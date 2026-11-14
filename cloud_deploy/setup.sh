@@ -125,7 +125,32 @@ SCRIPT_EOF
 
 chmod +x start_cloud.sh
 
+# 7. 配置 systemd 開機自動啟動 (無需打開雲端終端機即可自動運行)
+echo "📦 [7/7] 配置 systemd 開機自動啟動服務 (autotrade.service)..."
+sudo tee /etc/systemd/system/autotrade.service > /dev/null << SERVICE_EOF
+[Unit]
+Description=IBKR AutoTrade Dual-Engine Service
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=$USER
+WorkingDirectory=$TARGET_DIR
+ExecStart=$TARGET_DIR/start_cloud.sh
+ExecStop=/usr/bin/tmux kill-session -t autotrade
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable autotrade.service
+
 echo "======================================================================"
-echo "🎉 部署完成！"
+echo "🎉 部署完成！已設定開機自動啟動 (autotrade.service)"
 echo "專案路徑: $TARGET_DIR"
+echo "手動啟動/重啟: sudo systemctl restart autotrade"
+echo "查看 Tmux 畫面: tmux attach -t autotrade"
 echo "======================================================================"

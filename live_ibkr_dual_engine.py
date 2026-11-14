@@ -31,6 +31,7 @@ import json
 import math
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Optional, Dict, Any, List, Tuple
 
 import pandas as pd
@@ -1170,6 +1171,8 @@ class LiveIBKRDualEngine:
             "account_id": self.account_id if self.is_connected else "尚未連線",
             "currency": self.currency,
             "status_message": self.status_message,
+            "market_schedule_open": not getattr(self, "market_paused", False),
+            "market_schedule_status": "CLOSED" if getattr(self, "market_paused", False) else "OPEN",
             "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
 
             # 市場行情數據流狀態
@@ -1253,16 +1256,85 @@ class LiveIBKRDualEngine:
         except Exception as e:
             logger.warning(f"寫入狀態檔異常: {e}")
 
+    @staticmethod
+    def is_cme_market_open(now_et: Optional[datetime] = None) -> Tuple[bool, str]:
+        """
+        判斷 CME Globex (MES / MNQ) 是否處於交易時段 (美東時間 ET，自動處理夏令/冬令時)。
+        交易時段：美東 週日 18:00 至 週五 17:00，週一至週四每日 17:00–18:00 為例行結算休市。
+        """
+        if os.getenv("ENABLE_MARKET_SCHEDULE", "true").strip().lower() in ("0", "false", "no"):
+            return True, "24/7 全時段模式 (已關閉休市排程)"
+
+        if now_et is None:
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+
+        wd = now_et.weekday()  # 0=Mon ... 4=Fri, 5=Sat, 6=Sun
+        hm = now_et.hour * 60 + now_et.minute
+
+        if wd == 5:
+            return False, "CME 週末休市中（美東週日 18:00 自動開市連線）"
+        if wd == 6 and hm < 18 * 60:
+            return False, "CME 週末休市中（美東今日 18:00 自動開市連線）"
+        if wd == 4 and hm >= 17 * 60:
+            return False, "CME 週末休市中（美東週日 18:00 自動開市連線）"
+        if wd in (0, 1, 2, 3) and (17 * 60 <= hm < 18 * 60):
+            return False, "CME 每日例行結算休市（美東 17:00–18:00，18:00 自動恢復連線）"
+
+        return True, "CME 開市交易中"
+
     def run_loop(self):
-        """雙引擎主輪詢循環，具備斷線自動再連線守護與狀態維持"""
+        """雙引擎主輪詢循環，具備 CME 休市自動暫停/開市自動連線與斷線重連守護"""
         logger.info("======================================================================")
         logger.info(" 🏛️  AutoTrade 雙策略並行守護引擎啟動 (6:4 資金分配 | V4.3 優先權)")
-        logger.info(" 🛡️  斷線自動再連線守護與手動平倉機制已就緒")
+        logger.info(" ⏰  CME (MES/MNQ) 自動開休市排程 & 斷線自動再連線守護已就緒")
         logger.info("======================================================================")
+
+        self.market_paused = False
 
         while True:
             try:
                 self.check_controls()
+
+                # 0. CME (MES/MNQ) 開休市排程檢查：休市自動暫停並斷線，開市自動恢復連線
+                mkt_open, mkt_reason = self.is_cme_market_open()
+                if not mkt_open:
+                    if not self.market_paused:
+                        self.market_paused = True
+                        self.is_reconnecting = False
+                        self.status_message = f"⏸️ {mkt_reason}"
+                        logger.info(f"⏸️ [CME 休市排程] {mkt_reason}，暫停策略評估並斷開 IB Gateway 連線")
+                        if self.ib and self.ib.isConnected():
+                            try:
+                                self.ib.disconnect()
+                            except Exception:
+                                pass
+                        self.is_connected = False
+                        try:
+                            from telegram_notifier import notifier
+                            notifier.send_message_async(
+                                f"⏸️ <b>【AutoTrade 休市自動暫停】</b>\n{mkt_reason}"
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        self.status_message = f"⏸️ {mkt_reason}"
+
+                    self.write_status_file()
+                    time.sleep(30.0)
+                    continue
+                elif self.market_paused:
+                    self.market_paused = False
+                    self.reconnect_attempts = 0
+                    self.reconnect_delay = 5.0
+                    self.status_message = "🔔 CME 已開市，正在恢復連線..."
+                    logger.info("🔔 [CME 開市排程] 市場已開市，自動恢復 IB Gateway 連線與雙策略交易！")
+                    try:
+                        from telegram_notifier import notifier
+                        notifier.send_message_async(
+                            "🔔 <b>【AutoTrade 開市自動恢復】</b>\nCME (MES/MNQ) 已開市，系統正自動連線並恢復雙策略守護！"
+                        )
+                    except Exception:
+                        pass
 
                 # 1. 檢查並維持 IBKR 連線 (自動再連線機制，帶退避保護)
                 now = time.time()
