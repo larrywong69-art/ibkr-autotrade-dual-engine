@@ -377,6 +377,11 @@ class LiveIBKRDualEngine:
                         source="DUAL_ENGINE"
                     )
 
+                    # 訂閱官方即時每日損益 (PnL)
+                    try:
+                        self.ib.reqPnL(self.account_id, "")
+                    except Exception:
+                        pass
                     # 同步鎖定雙主力合約：MES 與 MNQ
                     self._qualify_dual_contracts()
                     # 立即拉取一次帳戶資金與行情
@@ -495,6 +500,20 @@ class LiveIBKRDualEngine:
                     self.realized_pnl = float(item.value)
                 elif item.tag == "UnrealizedPnL":
                     self.unrealized_pnl = float(item.value)
+
+            # 從官方 reqPnL() 訂閱更新即時每日已實現與未實現損益
+            try:
+                pnl_list = self.ib.pnl()
+                if pnl_list:
+                    pnl_obj = pnl_list[-1]
+                    u_val = getattr(pnl_obj, "unrealizedPnL", None)
+                    r_val = getattr(pnl_obj, "realizedPnL", None)
+                    if u_val is not None and not math.isnan(u_val) and abs(u_val) < 1e12:
+                        self.unrealized_pnl = round(float(u_val), 2)
+                    if r_val is not None and not math.isnan(r_val) and abs(r_val) < 1e12:
+                        self.realized_pnl = round(float(r_val), 2)
+            except Exception:
+                pass
 
             # 計算美金淨值與 6:4 資金池
             usd_rate = 7.78 if self.currency == "HKD" else 1.0
@@ -702,6 +721,11 @@ class LiveIBKRDualEngine:
 
         return trades_v43, trades_v50
 
+    @staticmethod
+    def _round_to_tick(price: float, tick: float = 0.25) -> float:
+        """將委託價格對齊 CME 最小跳動點位 (MES/MNQ 為 0.25)，避免 Error 110 拒單"""
+        return round(round(float(price) / tick) * tick, 2)
+
     def place_v43_bracket_order(self, signal: TradeSignal):
         """
         向 IBKR 下發 V4.3 MES 專屬 Bracket 訂單 (享有一票優先權)
@@ -713,14 +737,20 @@ class LiveIBKRDualEngine:
         exit_action = "SELL" if signal.direction == Direction.LONG else "BUY"
         qty = signal.contracts
 
-        logger.info(f"👑 [V4.3 優先開火] 送出 MES Bracket: {direction_action} {qty} 口 @ LMT {signal.entry_price:.2f} | 止蝕: {signal.sl_price:.2f}")
+        entry_p = self._round_to_tick(signal.entry_price, 0.25)
+        sl_p = self._round_to_tick(signal.sl_price, 0.25)
+        tp1_p = self._round_to_tick(signal.tp1_price, 0.25)
+        tp2_p = self._round_to_tick(signal.tp2_price, 0.25)
+
+        logger.info(f"👑 [V4.3 優先開火] 送出 MES Bracket: {direction_action} {qty} 口 @ LMT {entry_p:.2f} | 止蝕: {sl_p:.2f} | TP1: {tp1_p:.2f}")
 
         # 1. 主單 (LMT)
         parent = LimitOrder(
             action=direction_action,
             totalQuantity=qty,
-            lmtPrice=round(signal.entry_price, 2),
-            tif="GTC"
+            lmtPrice=entry_p,
+            tif="GTC",
+            outsideRth=True
         )
         parent.orderId = self.ib.client.getReqId()
         parent.orderRef = "V43_MES"
@@ -730,8 +760,9 @@ class LiveIBKRDualEngine:
         sl_order = StopOrder(
             action=exit_action,
             totalQuantity=qty,
-            stopPrice=round(signal.sl_price, 2),
-            tif="GTC"
+            stopPrice=sl_p,
+            tif="GTC",
+            outsideRth=True
         )
         sl_order.orderId = self.ib.client.getReqId()
         sl_order.parentId = parent.orderId
@@ -742,21 +773,21 @@ class LiveIBKRDualEngine:
 
         # 3. 梯次止賺 (50% / 25% / 25%)
         if qty == 1:
-            tp1 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=round(signal.tp1_price, 2), tif="GTC")
+            tp1 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=tp1_p, tif="GTC", outsideRth=True)
             tp1.orderId = self.ib.client.getReqId()
             tp1.parentId = parent.orderId
             tp1.orderRef = "V43_MES_TP1"
             tp1.transmit = True
             orders.append(tp1)
         elif qty == 2:
-            tp1 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=round(signal.tp1_price, 2), tif="GTC")
+            tp1 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=tp1_p, tif="GTC", outsideRth=True)
             tp1.orderId = self.ib.client.getReqId()
             tp1.parentId = parent.orderId
             tp1.orderRef = "V43_MES_TP1"
             tp1.transmit = False
             orders.append(tp1)
 
-            tp2 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=round(signal.tp2_price, 2), tif="GTC")
+            tp2 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=tp2_p, tif="GTC", outsideRth=True)
             tp2.orderId = self.ib.client.getReqId()
             tp2.parentId = parent.orderId
             tp2.orderRef = "V43_MES_TP2"
@@ -768,14 +799,14 @@ class LiveIBKRDualEngine:
             if cnt_a + cnt_b > qty:
                 cnt_b = max(1, qty - cnt_a)
 
-            tp1 = LimitOrder(action=exit_action, totalQuantity=cnt_a, lmtPrice=round(signal.tp1_price, 2), tif="GTC")
+            tp1 = LimitOrder(action=exit_action, totalQuantity=cnt_a, lmtPrice=tp1_p, tif="GTC", outsideRth=True)
             tp1.orderId = self.ib.client.getReqId()
             tp1.parentId = parent.orderId
             tp1.orderRef = "V43_MES_TP1"
             tp1.transmit = False
             orders.append(tp1)
 
-            tp2 = LimitOrder(action=exit_action, totalQuantity=cnt_b, lmtPrice=round(signal.tp2_price, 2), tif="GTC")
+            tp2 = LimitOrder(action=exit_action, totalQuantity=cnt_b, lmtPrice=tp2_p, tif="GTC", outsideRth=True)
             tp2.orderId = self.ib.client.getReqId()
             tp2.parentId = parent.orderId
             tp2.orderRef = "V43_MES_TP2"
@@ -837,13 +868,19 @@ class LiveIBKRDualEngine:
         exit_action = "SELL" if signal.direction == Direction.LONG else "BUY"
         qty = signal.contracts
 
-        logger.info(f"⚡ [V5.0 順勢開火] 送出 MNQ Bracket: {direction_action} {qty} 口 @ LMT {signal.entry_price:.2f} | 止蝕: {signal.sl_price:.2f}")
+        entry_p = self._round_to_tick(signal.entry_price, 0.25)
+        sl_p = self._round_to_tick(signal.sl_price, 0.25)
+        tp1_p = self._round_to_tick(signal.tp1_price, 0.25)
+        tp2_p = self._round_to_tick(signal.tp2_price, 0.25)
+
+        logger.info(f"⚡ [V5.0 順勢開火] 送出 MNQ Bracket: {direction_action} {qty} 口 @ LMT {entry_p:.2f} | 止蝕: {sl_p:.2f} | TP1: {tp1_p:.2f}")
 
         parent = LimitOrder(
             action=direction_action,
             totalQuantity=qty,
-            lmtPrice=round(signal.entry_price, 2),
-            tif="GTC"
+            lmtPrice=entry_p,
+            tif="GTC",
+            outsideRth=True
         )
         parent.orderId = self.ib.client.getReqId()
         parent.orderRef = "V50_MNQ"
@@ -852,8 +889,9 @@ class LiveIBKRDualEngine:
         sl_order = StopOrder(
             action=exit_action,
             totalQuantity=qty,
-            stopPrice=round(signal.sl_price, 2),
-            tif="GTC"
+            stopPrice=sl_p,
+            tif="GTC",
+            outsideRth=True
         )
         sl_order.orderId = self.ib.client.getReqId()
         sl_order.parentId = parent.orderId
@@ -864,21 +902,21 @@ class LiveIBKRDualEngine:
 
         # V5.0 不對稱梯次止賺 (60% / 25% / 15%)
         if qty == 1:
-            tp1 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=round(signal.tp1_price, 2), tif="GTC")
+            tp1 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=tp1_p, tif="GTC", outsideRth=True)
             tp1.orderId = self.ib.client.getReqId()
             tp1.parentId = parent.orderId
             tp1.orderRef = "V50_MNQ_TP1"
             tp1.transmit = True
             orders.append(tp1)
         elif qty == 2:
-            tp1 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=round(signal.tp1_price, 2), tif="GTC")
+            tp1 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=tp1_p, tif="GTC", outsideRth=True)
             tp1.orderId = self.ib.client.getReqId()
             tp1.parentId = parent.orderId
             tp1.orderRef = "V50_MNQ_TP1"
             tp1.transmit = False
             orders.append(tp1)
 
-            tp2 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=round(signal.tp2_price, 2), tif="GTC")
+            tp2 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=tp2_p, tif="GTC", outsideRth=True)
             tp2.orderId = self.ib.client.getReqId()
             tp2.parentId = parent.orderId
             tp2.orderRef = "V50_MNQ_TP2"
@@ -890,14 +928,14 @@ class LiveIBKRDualEngine:
             if cnt_a + cnt_b > qty:
                 cnt_b = max(1, qty - cnt_a)
 
-            tp1 = LimitOrder(action=exit_action, totalQuantity=cnt_a, lmtPrice=round(signal.tp1_price, 2), tif="GTC")
+            tp1 = LimitOrder(action=exit_action, totalQuantity=cnt_a, lmtPrice=tp1_p, tif="GTC", outsideRth=True)
             tp1.orderId = self.ib.client.getReqId()
             tp1.parentId = parent.orderId
             tp1.orderRef = "V50_MNQ_TP1"
             tp1.transmit = False
             orders.append(tp1)
 
-            tp2 = LimitOrder(action=exit_action, totalQuantity=cnt_b, lmtPrice=round(signal.tp2_price, 2), tif="GTC")
+            tp2 = LimitOrder(action=exit_action, totalQuantity=cnt_b, lmtPrice=tp2_p, tif="GTC", outsideRth=True)
             tp2.orderId = self.ib.client.getReqId()
             tp2.parentId = parent.orderId
             tp2.orderRef = "V50_MNQ_TP2"
@@ -952,10 +990,13 @@ class LiveIBKRDualEngine:
             df['rvol'] = 1.0
 
             last_idx = len(df) - 1
+            # 無持倉與掛單時清除殘留的記憶體限價單狀態，確保只評估最新 K 棒
+            self.engine_v43.pending_limit_order = None
             # 使用 V4.3 專屬 60% 資金池計算口數
             sig, pending = self.engine_v43.evaluate_bar(last_idx, df, self.pool_v43_usd, 0.5)
             target_sig = sig or (pending.signal if pending else None)
             if target_sig:
+                self.engine_v43.pending_limit_order = None
                 self.place_v43_bracket_order(target_sig)
         except Exception as e:
             logger.warning(f"V4.3 MES K 棒評估異常: {e}")
@@ -1004,10 +1045,13 @@ class LiveIBKRDualEngine:
             df['vwap'] = calculate_session_vwap(df)
 
             last_idx = len(df) - 1
+            # 無持倉與掛單時清除殘留的記憶體限價單狀態，確保只評估最新 K 棒
+            self.engine_v50.pending_limit_order = None
             # 使用 V5.0 專屬 40% 資金池計算口數
             sig, pending = self.engine_v50.evaluate_bar(last_idx, df, self.pool_v50_usd, 0.5)
             target_sig = sig or (pending.signal if pending else None)
             if target_sig:
+                self.engine_v50.pending_limit_order = None
                 self.place_v50_bracket_order(target_sig)
         except Exception as e:
             logger.warning(f"V5.0 MNQ K 棒評估異常: {e}")
@@ -1161,6 +1205,16 @@ class LiveIBKRDualEngine:
         orders_v43, orders_v50 = self.get_real_open_orders() if self.is_connected else ([], [])
         trades_v43, trades_v50 = self.get_real_executions() if self.is_connected else ([], [])
 
+        # 若官方 accountSummary/reqPnL 尚未回傳，改由即時持倉與今日成交紀錄加總補齊損益
+        calc_unrealized = round(
+            (pos_v43.get("unrealized_pnl", 0.0) if pos_v43 else 0.0) +
+            (pos_v50.get("unrealized_pnl", 0.0) if pos_v50 else 0.0),
+            2
+        )
+        calc_realized = round(sum(float(t.get("realized_pnl", 0.0)) for t in (trades_v43 + trades_v50)), 2)
+        display_unrealized = self.unrealized_pnl if self.unrealized_pnl != 0.0 else calc_unrealized
+        display_realized = self.realized_pnl if self.realized_pnl != 0.0 else calc_realized
+
         status = {
             "mode": "DUAL_ENGINE_PARALLEL",
             "version": "v4.3 (MES 60%) + v5.0 (MNQ 40%)",
@@ -1185,8 +1239,8 @@ class LiveIBKRDualEngine:
             "cash_balance": self.cash_balance,
             "available_funds": self.available_funds,
             "margin_requirement": self.init_margin_req,
-            "realized_pnl": self.realized_pnl,
-            "unrealized_pnl": self.unrealized_pnl,
+            "realized_pnl": display_realized,
+            "unrealized_pnl": display_unrealized,
 
             # 6:4 資金調度池
             "capital_allocation": {
