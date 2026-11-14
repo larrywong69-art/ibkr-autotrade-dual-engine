@@ -1,0 +1,23 @@
+{
+  "name": "IBKR 雙引擎量化交易監控",
+  "short_name": "IBKR交易",
+  "description": "IBKR 雙策略引擎 (V4.3 MES 60% + V5.0 MNQ 40%) 實時手機監控與手動平倉系統",
+  "start_url": "/mobile.html",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b0f19",
+  "theme_color": "#0b0f19",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230b0f19'/><text x='50' y='68' font-size='55' text-anchor='middle' fill='%2338bdf8'>⚡</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230b0f19'/><text x='50' y='68' font-size='55' text-anchor='middle' fill='%2338bdf8'>⚡</text></svg>",
+      "sizes": "512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}

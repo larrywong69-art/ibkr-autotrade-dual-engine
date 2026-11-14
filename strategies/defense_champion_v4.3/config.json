@@ -1,0 +1,99 @@
+{
+  "version": "v4.3",
+  "name": "v4_3_Cap1Lot_R2R3_LimitOrder_3A3B_EquityScaled",
+  "title": "防守力冠軍策略 (Highest Defense Champion)",
+  "description": "3A骨架 + 3B濾網 | 保留完整狀態機 | 規則2及3限制最多1口對沖 | 斐波那契浪3限價單(LMT)零滑價接貨 | 3萬美金資產階梯滾動控口",
+  "backtest_metrics_5yr": {
+    "initial_capital": 30000.0,
+    "final_equity": 16610075.17,
+    "net_profit": 16580075.17,
+    "total_return_pct": 55266.92,
+    "cagr_pct": 253.71,
+    "max_drawdown_pct": 23.94,
+    "calmar_ratio": 10.60,
+    "sharpe_ratio": 2.82,
+    "win_rate_pct": 47.90,
+    "profit_factor": 1.94,
+    "total_trades": 737,
+    "winning_trades": 353,
+    "losing_trades": 384
+  },
+  "account_config": {
+    "initial_capital": 30000.0,
+    "commission_tier1_per_side": 0.62,
+    "commission_tier2_per_side": 0.57,
+    "tier2_monthly_volume_threshold": 1000,
+    "typical_spread_points": 0.25,
+    "limit_entry_slippage_points": 0.00,
+    "limit_tp_slippage_points": 0.00,
+    "stop_loss_slippage_points": 0.25,
+    "point_multiplier": 5.0,
+    "overnight_margin_per_contract": 2400.0,
+    "margin_buffer_factor": 1.8
+  },
+  "indicator_params": {
+    "price_sortino_trend_threshold": 1.25,
+    "price_sortino_range_threshold": 0.70,
+    "htf_slope_atr_multiplier": 0.20
+  },
+  "rule_params": {
+    "range_window_bars": 24,
+    "range_min_height_atr_mult": 3.20,
+    "range_peak_diff_atr_mult": 0.35,
+    "range_sl_atr_mult": 0.85,
+    "slope_consecutive_bars": 3,
+    "false_breakout_max_bars": 5,
+    "false_breakout_sl_atr_mult": 0.35,
+    "max_reversal_failures": 2,
+    "fib_pullback_min": 0.42,
+    "fib_pullback_max": 0.70,
+    "fib_sl_level": 0.82,
+    "fib_sl_atr_mult": 0.60,
+    "fib_tp1_ratio": 1.15,
+    "fib_tp2_ratio": 2.25,
+    "min_weighted_rr": 1.80,
+    "strong_momentum_body_atr_mult": 0.90,
+    "breakeven_min_offset_points": 0.25,
+    "emergency_abort_body_ratio": 1.50,
+    "trailing_4r_threshold": 2.20,
+    "trailing_atr_mult": 1.50,
+    "daily_max_drawdown_pct": 0.05,
+    "sizing_warmup_trades": 10,
+    "sizing_rolling_trades": 40,
+    "sortino_tier_mid": 0.00,
+    "sortino_tier_high": 0.10,
+    "allow_rule2_entry": true,
+    "allow_rule3_entry": true,
+    "max_rule2_3_contracts": 1,
+    "exclude_r2_r3_from_sortino_rolling": true,
+    "use_limit_orders": true,
+    "limit_order_expiry_bars": 3,
+    "limit_order_tick_offset": 0.00
+  },
+  "equity_sizing_tiers": [
+    {
+      "tier_name": "Tier_1_Starter_30k_to_45k",
+      "min_equity": 0.0,
+      "max_equity": 45000.0,
+      "contracts_low": 2,
+      "contracts_mid": 3,
+      "contracts_high": 5
+    },
+    {
+      "tier_name": "Tier_2_Standard3A_45k_to_75k",
+      "min_equity": 45000.0,
+      "max_equity": 75000.0,
+      "contracts_low": 2,
+      "contracts_mid": 4,
+      "contracts_high": 6
+    },
+    {
+      "tier_name": "Tier_3_AllWeather3B_Above_75k",
+      "min_equity": 75000.0,
+      "max_equity": 999999999.0,
+      "contracts_low": 4,
+      "contracts_mid": 8,
+      "contracts_high": 12
+    }
+  ]
+}

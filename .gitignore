@@ -1,0 +1,55 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# IDE & OS files
+.DS_Store
+.idea/
+.vscode/
+*.sublime-workspace
+*.swp
+*.swo
+
+# Logs & runtime state
+*.log
+logs/
+*.db
+trade_status.json
+trade_control.json
+recent_50_trades.json
+mes_paper_trade_log.csv
+trades_ledger.json
+incidents.json
+data/
+reports/
+
+# Archives & generated deploy files
+*.tar.gz
+*.zip
+cloud_deploy/docker-compose.ibgateway.yml
+cloud_deploy/start_cloud.sh
+
+# Backtest results & data exports
+backtest_*.csv
+backtest_*.json
+backtest_*.png
+mes_trades_*.csv
+*.png
+

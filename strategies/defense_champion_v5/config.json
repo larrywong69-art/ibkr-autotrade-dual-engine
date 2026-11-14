@@ -1,0 +1,145 @@
+{
+  "version": "v5.0",
+  "name": "v5_DualChampion_VWAP_AsymmetricTranches_LMT",
+  "title": "V5 終極雙劍合璧防守冠軍策略 (Highest Defense & Calmar Champion v5.0)",
+  "description": "3A骨架 + 3B濾網 + 日內VWAP動態價值濾網 + 60/25/15不對稱三梯次收割 + 規則2及3限制1口對沖 + 斐波那契浪3限價單(LMT)掛單接貨 + 1.2x ATR動態跑道移動止損",
+  "backtest_metrics_5yr": {
+    "initial_capital": 30000.0,
+    "final_equity": 12676414.03,
+    "net_profit": 12646414.03,
+    "total_return_pct": 42154.71,
+    "cagr_pct": 235.10,
+    "max_drawdown_pct": 13.14,
+    "calmar_ratio": 17.90,
+    "sharpe_ratio": 3.93,
+    "sortino_ratio": 8.00,
+    "win_rate_pct": 58.07,
+    "profit_factor": 1.87,
+    "payoff_ratio": 1.35,
+    "total_tranches": 6607,
+    "max_consecutive_losses": 36
+  },
+  "annual_metrics": [
+    {
+      "year": 2020,
+      "start_equity": 30000.00,
+      "end_equity": 184567.49,
+      "net_pnl": 154567.49,
+      "return_pct": 515.22,
+      "max_dd_pct": 13.14,
+      "sharpe": 4.36,
+      "trade_count": 1246,
+      "win_rate_pct": 60.11,
+      "profit_factor": 1.71
+    },
+    {
+      "year": 2021,
+      "start_equity": 184567.49,
+      "end_equity": 1035400.47,
+      "net_pnl": 850832.98,
+      "return_pct": 460.99,
+      "max_dd_pct": 9.71,
+      "sharpe": 4.36,
+      "trade_count": 1421,
+      "win_rate_pct": 61.01,
+      "profit_factor": 1.88
+    },
+    {
+      "year": 2022,
+      "start_equity": 1035400.47,
+      "end_equity": 1849394.73,
+      "net_pnl": 813994.26,
+      "return_pct": 78.62,
+      "max_dd_pct": 6.58,
+      "sharpe": 3.18,
+      "trade_count": 1235,
+      "win_rate_pct": 53.85,
+      "profit_factor": 1.60
+    },
+    {
+      "year": 2023,
+      "start_equity": 1849394.73,
+      "end_equity": 3910521.06,
+      "net_pnl": 2061126.33,
+      "return_pct": 111.45,
+      "max_dd_pct": 6.29,
+      "sharpe": 4.58,
+      "trade_count": 1353,
+      "win_rate_pct": 56.91,
+      "profit_factor": 1.92
+    },
+    {
+      "year": 2024,
+      "start_equity": 3910521.06,
+      "end_equity": 12676414.03,
+      "net_pnl": 8765892.97,
+      "return_pct": 224.16,
+      "max_dd_pct": 7.02,
+      "sharpe": 4.18,
+      "trade_count": 1352,
+      "win_rate_pct": 58.14,
+      "profit_factor": 1.89
+    }
+  ],
+  "account_config": {
+    "initial_capital": 30000.0,
+    "commission_tier1_per_side": 0.62,
+    "commission_tier2_per_side": 0.57,
+    "tier2_monthly_volume_threshold": 1000,
+    "typical_spread_points": 0.25,
+    "limit_entry_slippage_points": 0.00,
+    "limit_tp_slippage_points": 0.00,
+    "stop_loss_slippage_points": 0.25,
+    "point_multiplier": 5.0,
+    "overnight_margin_per_contract": 2400.0,
+    "margin_buffer_factor": 1.8
+  },
+  "indicator_params": {
+    "use_vwap_filter": true,
+    "price_sortino_trend_threshold": 1.25,
+    "price_sortino_range_threshold": 0.70,
+    "htf_slope_atr_multiplier": 0.20
+  },
+  "rule_params": {
+    "tranche_a_ratio": 0.60,
+    "tranche_b_ratio": 0.25,
+    "tranche_c_ratio": 0.15,
+    "fib_tp1_ratio": 1.25,
+    "fib_tp2_ratio": 2.40,
+    "trailing_trigger_r": 1.80,
+    "trailing_atr_mult": 1.20,
+    "breakeven_min_offset_points": 0.25,
+    "allow_rule2_entry": true,
+    "allow_rule3_entry": true,
+    "max_rule2_3_contracts": 1,
+    "use_limit_orders": true,
+    "limit_order_expiry_bars": 2,
+    "limit_order_tick_offset": 0.00
+  },
+  "equity_sizing_tiers": [
+    {
+      "tier_name": "Tier_1_Starter_30k_to_45k",
+      "min_equity": 0.0,
+      "max_equity": 45000.0,
+      "contracts_low": 2,
+      "contracts_mid": 3,
+      "contracts_high": 5
+    },
+    {
+      "tier_name": "Tier_2_Standard3A_45k_to_75k",
+      "min_equity": 45000.0,
+      "max_equity": 75000.0,
+      "contracts_low": 2,
+      "contracts_mid": 4,
+      "contracts_high": 6
+    },
+    {
+      "tier_name": "Tier_3_AllWeather3B_Above_75k",
+      "min_equity": 75000.0,
+      "max_equity": 999999999.0,
+      "contracts_low": 4,
+      "contracts_mid": 8,
+      "contracts_high": 12
+    }
+  ]
+}

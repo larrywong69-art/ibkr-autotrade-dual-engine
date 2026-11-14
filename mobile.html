@@ -1,0 +1,981 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="AutoTrade">
+  <meta name="theme-color" content="#0b0f19">
+  <link rel="manifest" href="/manifest.json">
+  <title>AutoTrade 雙引擎手機監控</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card: #111827;
+      --border: #1f2937;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+    }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 16px);
+      -webkit-tap-highlight-color: transparent;
+    }
+    .safe-top {
+      padding-top: max(12px, env(safe-area-inset-top));
+    }
+    .safe-bottom {
+      padding-bottom: max(16px, env(safe-area-inset-bottom));
+    }
+    .glass {
+      background: rgba(17, 24, 39, 0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between selection:bg-indigo-500 selection:text-white">
+
+  <!-- 頂部固定導航列 -->
+  <header class="sticky top-0 z-40 glass border-b border-[var(--border)] px-4 py-3 safe-top">
+    <div class="flex items-center justify-between">
+      <div class="flex items-center space-x-2.5">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-emerald-500 flex items-center justify-center text-white text-lg font-bold shadow-lg shadow-indigo-500/20">
+          ⚡
+        </div>
+        <div>
+          <div class="flex items-center gap-1.5">
+            <h1 class="text-sm font-bold tracking-tight text-white">AutoTrade</h1>
+            <span id="account-badge" class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-500/15 text-blue-400 border border-blue-500/30">
+              IBKR-PAPER
+            </span>
+          </div>
+          <p class="text-[11px] text-[var(--muted)] flex items-center gap-1">
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" id="header-pulse"></span>
+            <span id="header-last-updated">載入中...</span>
+          </p>
+        </div>
+      </div>
+
+      <!-- 連線狀態、報價狀態與 PIN 指示燈 -->
+      <div class="flex items-center gap-1.5">
+        <button id="pin-badge" onclick="openPinModal()" class="flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 border border-slate-700 active:scale-90 transition-transform">
+          <span>🔒</span>
+          <span id="pin-status-text">PIN</span>
+        </button>
+        <div id="mkt-data-pill" class="flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25" title="報價數據源">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400" id="mkt-data-dot"></span>
+          <span id="mkt-data-text">實時報價</span>
+        </div>
+        <div id="conn-pill" class="flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">
+          <span class="w-2 h-2 rounded-full bg-emerald-400" id="conn-dot"></span>
+          <span id="conn-text">連線中</span>
+        </div>
+        <button onclick="fetchStatus()" class="w-8 h-8 rounded-lg bg-[var(--card)] border border-[var(--border)] flex items-center justify-center text-xs active:scale-90 transition-transform">
+          🔄
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- 主要內容區 -->
+  <main class="flex-1 px-4 py-3 space-y-3 max-w-lg mx-auto w-full">
+
+    <!-- 斷線重連警告橫幅 (預設隱藏，斷線/重連時自動浮現) -->
+    <div id="reconnect-banner" class="hidden bg-amber-500/15 border border-amber-500/30 rounded-xl p-3 flex items-start space-x-2.5 animate-pulse">
+      <span class="text-lg">⚠️</span>
+      <div class="flex-1">
+        <div class="text-xs font-bold text-amber-400" id="reconnect-title">偵測到 IBKR 連線中斷</div>
+        <div class="text-[11px] text-amber-200/80 mt-0.5" id="reconnect-desc">
+          可能因另一裝置（如手機版 IBKR）登入而被擠出。系統守護線程正在自動嘗試重新連線...
+        </div>
+      </div>
+    </div>
+
+    <!-- 戶外監控與安全狀態列 (方案 B Cloudflare + 方案 C Telegram) -->
+    <div id="remote-access-card" class="bg-indigo-950/40 border border-indigo-500/25 rounded-xl px-3 py-2 flex items-center justify-between text-xs">
+      <div class="flex items-center space-x-2 truncate">
+        <span class="text-base">⚡</span>
+        <div class="truncate">
+          <div class="font-bold text-indigo-200 flex items-center gap-1.5">
+            <span>Cloudflare 戶外隧道</span>
+            <span id="tunnel-badge" class="px-1.5 py-0.2 rounded text-[10px] bg-indigo-500/20 text-indigo-300 font-semibold">檢測中</span>
+          </div>
+          <div class="text-[10px] text-indigo-300/70 truncate" id="tunnel-url-desc">安全的端對端加密連接</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-1">
+        <span id="tg-badge" class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-500/15 text-blue-400 border border-blue-500/30 flex items-center gap-1">
+          <span>✈️</span>
+          <span>TG 推播已就緒</span>
+        </span>
+      </div>
+    </div>
+
+    <!-- 帳戶總覽卡片 (2x2 Grid) -->
+    <div class="grid grid-cols-2 gap-2.5">
+      <!-- 淨清算值 -->
+      <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-3 shadow-sm">
+        <div class="text-[11px] text-[var(--muted)] font-medium">帳戶淨清算值 (HKD)</div>
+        <div class="text-lg font-bold text-white mt-1 tracking-tight" id="val-equity">--</div>
+        <div class="text-[10px] text-emerald-400 mt-0.5" id="val-equity-usd">≈ $-- USD</div>
+      </div>
+
+      <!-- 今日損益 -->
+      <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-3 shadow-sm">
+        <div class="text-[11px] text-[var(--muted)] font-medium">今日未實現損益</div>
+        <div class="text-lg font-bold mt-1 tracking-tight" id="val-unrealized-pnl">--</div>
+        <div class="text-[10px] text-[var(--muted)] mt-0.5" id="val-realized-pnl">已實現: $0.00</div>
+      </div>
+
+      <!-- 可用資金 -->
+      <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-3 shadow-sm">
+        <div class="text-[11px] text-[var(--muted)] font-medium">可用資金 (Available)</div>
+        <div class="text-base font-bold text-blue-400 mt-1" id="val-avail">--</div>
+        <div class="text-[10px] text-[var(--muted)] mt-0.5">即時流動性安全</div>
+      </div>
+
+      <!-- 保證金佔用 -->
+      <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-3 shadow-sm">
+        <div class="text-[11px] text-[var(--muted)] font-medium">保證金佔用 (Margin)</div>
+        <div class="text-base font-bold text-amber-400 mt-1" id="val-margin">--</div>
+        <div class="text-[10px] text-[var(--muted)] mt-0.5" id="val-margin-ratio">佔比: 0.0%</div>
+      </div>
+    </div>
+
+    <!-- 策略 1: V4.3 標普防守冠軍 (MES 60%) -->
+    <div class="bg-[var(--card)] border border-blue-500/20 rounded-xl p-3.5 shadow-sm space-y-2.5 relative overflow-hidden">
+      <div class="absolute top-0 right-0 w-24 h-24 bg-blue-500/5 rounded-full blur-xl pointer-events-none"></div>
+
+      <!-- 策略頂部標籤 -->
+      <div class="flex items-center justify-between">
+        <div class="flex items-center space-x-2">
+          <span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span>
+          <div>
+            <div class="text-xs font-bold text-white flex items-center gap-1.5">
+              <span>V4.3 標普防守冠軍</span>
+              <span class="px-1.5 py-0.2 rounded text-[10px] bg-blue-500/15 text-blue-400 border border-blue-500/25">
+                權重 60% • 優先權
+              </span>
+            </div>
+            <div class="text-[10px] text-[var(--muted)]" id="v43-contract-tag">合約: MESZ6 (CME)</div>
+          </div>
+        </div>
+
+        <div id="v43-pos-badge" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-800 text-slate-400 border border-slate-700">
+          無持倉
+        </div>
+      </div>
+
+      <!-- 即時報價與持倉數據 -->
+      <div class="grid grid-cols-3 gap-2 bg-black/20 rounded-lg p-2.5 border border-white/5 text-center">
+        <div>
+          <div class="text-[10px] text-[var(--muted)]">即時市價</div>
+          <div class="text-xs font-bold text-white mt-0.5" id="v43-price">--</div>
+        </div>
+        <div>
+          <div class="text-[10px] text-[var(--muted)]">持倉均價</div>
+          <div class="text-xs font-bold text-white mt-0.5" id="v43-entry">--</div>
+        </div>
+        <div>
+          <div class="text-[10px] text-[var(--muted)]">浮動盈虧</div>
+          <div class="text-xs font-bold mt-0.5" id="v43-pnl">--</div>
+        </div>
+      </div>
+
+      <!-- 操作按鈕列 -->
+      <div class="flex items-center gap-2 pt-1">
+        <button onclick="promptManualClose('MES')" class="flex-1 py-2 px-3 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 text-xs font-bold flex items-center justify-center gap-1.5 active:scale-95 transition-all">
+          <span>🛑</span>
+          <span>手動平倉 MES</span>
+        </button>
+
+        <button id="v43-toggle-btn" onclick="toggleStrategy('v43')" class="py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold flex items-center justify-center gap-1 active:scale-95 transition-all">
+          <span id="v43-toggle-text">暫停</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 策略 2: V5.0 納指順勢防守 (MNQ 40%) -->
+    <div class="bg-[var(--card)] border border-emerald-500/20 rounded-xl p-3.5 shadow-sm space-y-2.5 relative overflow-hidden">
+      <div class="absolute top-0 right-0 w-24 h-24 bg-emerald-500/5 rounded-full blur-xl pointer-events-none"></div>
+
+      <!-- 策略頂部標籤 -->
+      <div class="flex items-center justify-between">
+        <div class="flex items-center space-x-2">
+          <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+          <div>
+            <div class="text-xs font-bold text-white flex items-center gap-1.5">
+              <span>V5.0 納指雙劍合璧</span>
+              <span class="px-1.5 py-0.2 rounded text-[10px] bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">
+                權重 40% • 順勢收割
+              </span>
+            </div>
+            <div class="text-[10px] text-[var(--muted)]" id="v50-contract-tag">合約: MNQZ6 (CME)</div>
+          </div>
+        </div>
+
+        <div id="v50-pos-badge" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-800 text-slate-400 border border-slate-700">
+          無持倉
+        </div>
+      </div>
+
+      <!-- 即時報價與持倉數據 -->
+      <div class="grid grid-cols-3 gap-2 bg-black/20 rounded-lg p-2.5 border border-white/5 text-center">
+        <div>
+          <div class="text-[10px] text-[var(--muted)]">即時市價</div>
+          <div class="text-xs font-bold text-white mt-0.5" id="v50-price">--</div>
+        </div>
+        <div>
+          <div class="text-[10px] text-[var(--muted)]">持倉均價</div>
+          <div class="text-xs font-bold text-white mt-0.5" id="v50-entry">--</div>
+        </div>
+        <div>
+          <div class="text-[10px] text-[var(--muted)]">浮動盈虧</div>
+          <div class="text-xs font-bold mt-0.5" id="v50-pnl">--</div>
+        </div>
+      </div>
+
+      <!-- 操作按鈕列 -->
+      <div class="flex items-center gap-2 pt-1">
+        <button onclick="promptManualClose('MNQ')" class="flex-1 py-2 px-3 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 text-xs font-bold flex items-center justify-center gap-1.5 active:scale-95 transition-all">
+          <span>🛑</span>
+          <span>手動平倉 MNQ</span>
+        </button>
+
+        <button id="v50-toggle-btn" onclick="toggleStrategy('v50')" class="py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold flex items-center justify-center gap-1 active:scale-95 transition-all">
+          <span id="v50-toggle-text">暫停</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 全局緊急一鍵全平 (ALL) -->
+    <div class="pt-1">
+      <button onclick="promptManualClose('ALL')" class="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white font-bold text-xs shadow-md shadow-rose-600/20 flex items-center justify-center gap-2 active:scale-98 transition-all">
+        <span class="text-sm">🚨</span>
+        <span>緊急全平所有合約 (MES + MNQ 一鍵全出)</span>
+      </button>
+    </div>
+
+    <!-- 當日真實成交流水紀錄 (Trade History) -->
+    <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-3.5 space-y-2.5 shadow-sm">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center space-x-2">
+          <span class="text-base">📋</span>
+          <div>
+            <div class="text-xs font-bold text-white flex items-center gap-1.5">
+              <span>當日成交流水紀錄</span>
+              <span id="trades-count-badge" class="px-1.5 py-0.2 rounded text-[10px] font-bold bg-blue-500/15 text-blue-400 border border-blue-500/25">
+                0 筆
+              </span>
+            </div>
+            <div class="text-[10px] text-[var(--muted)]">IBKR 實盤與模擬盤逐筆成交明細</div>
+          </div>
+        </div>
+
+        <!-- 篩選標籤列 -->
+        <div class="flex items-center gap-1 bg-black/30 p-0.5 rounded-lg border border-white/5 text-[10px]">
+          <button id="filter-btn-all" onclick="setTradeFilter('ALL')" class="px-2 py-0.5 rounded font-bold bg-blue-600 text-white transition-all">全部</button>
+          <button id="filter-btn-mes" onclick="setTradeFilter('MES')" class="px-2 py-0.5 rounded font-medium text-[var(--muted)] hover:text-white transition-all">MES</button>
+          <button id="filter-btn-mnq" onclick="setTradeFilter('MNQ')" class="px-2 py-0.5 rounded font-medium text-[var(--muted)] hover:text-white transition-all">MNQ</button>
+        </div>
+      </div>
+
+      <!-- 成交卡片垂直列表 (附自適應滾動) -->
+      <div id="trades-container" class="space-y-2 max-h-80 overflow-y-auto pr-0.5">
+        <div class="text-[var(--muted)] text-center py-5 text-xs bg-black/20 rounded-lg border border-white/5 space-y-1">
+          <div class="text-base">☕</div>
+          <div class="font-bold text-slate-300">目前尚無成交紀錄</div>
+          <div class="text-[10px] text-[var(--muted)]">雙策略全天候實時監控信號中</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 雲端報告與 Google Drive 快速通道 -->
+    <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-3.5 space-y-2.5">
+      <div class="flex items-center justify-between">
+        <div class="text-xs font-bold text-white flex items-center gap-1.5">
+          <span>☁️</span>
+          <span>每日結算雲端報告 (Google Drive)</span>
+        </div>
+        <button onclick="pushToGDrive()" class="text-[11px] text-blue-400 hover:text-blue-300 flex items-center gap-1 font-semibold">
+          <span>🔄</span>
+          <span>即時推播</span>
+        </button>
+      </div>
+
+      <div class="grid grid-cols-2 gap-2 text-xs">
+        <a id="link-gdoc" href="#" target="_blank" class="p-2.5 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center space-x-2 text-blue-300 active:bg-blue-500/20">
+          <span class="text-base">📄</span>
+          <div class="truncate">
+            <div class="font-bold truncate">Google 文件</div>
+            <div class="text-[10px] text-[var(--muted)]">深度分析報告</div>
+          </div>
+        </a>
+
+        <a id="link-gsheet" href="#" target="_blank" class="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center space-x-2 text-emerald-300 active:bg-emerald-500/20">
+          <span class="text-base">📊</span>
+          <div class="truncate">
+            <div class="font-bold truncate">Google 試算表</div>
+            <div class="text-[10px] text-[var(--muted)]">每日損益匯總</div>
+          </div>
+        </a>
+      </div>
+    </div>
+
+    <!-- 最近連線與事件稽核 -->
+    <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-3 space-y-2">
+      <div class="flex items-center justify-between text-xs">
+        <span class="font-bold text-slate-300 flex items-center gap-1.5">
+          <span>🛡️</span>
+          <span>系統防護與連線動態</span>
+        </span>
+        <span class="text-[10px] text-[var(--muted)]" id="incident-count">正常</span>
+      </div>
+      <div id="incidents-container" class="space-y-1.5 text-[11px]">
+        <div class="text-[var(--muted)] text-center py-2">連線狀態良好，無重大異常事件</div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- 手機底部快捷說明 -->
+  <footer class="text-center text-[10px] text-[var(--muted)] py-3 px-4 border-t border-[var(--border)] safe-bottom">
+    提示：點選 Safari 分享按鈕選擇「加入主畫面」，即可獲得原生 App 體驗。
+  </footer>
+
+  <!-- 手動平倉安全二次確認彈窗 (Confirmation Modal) -->
+  <div id="close-modal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-[#111827] border border-rose-500/40 rounded-2xl max-w-sm w-full p-5 space-y-4 shadow-2xl">
+      <div class="w-12 h-12 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center text-2xl mx-auto">
+        🛑
+      </div>
+      
+      <div class="text-center space-y-1.5">
+        <h3 class="text-base font-bold text-white" id="modal-title">確認手動平倉？</h3>
+        <p class="text-xs text-rose-200/80 leading-relaxed" id="modal-desc">
+          此操作將立即撤銷該合約的現有未成交掛單，並以市價單（Market Order）即時清空持倉！
+        </p>
+      </div>
+
+      <div class="bg-black/30 rounded-xl p-3 border border-white/5 space-y-1 text-xs">
+        <div class="flex justify-between text-[var(--muted)]">
+          <span>目標標的:</span>
+          <span class="font-bold text-white" id="modal-target">MES</span>
+        </div>
+        <div class="flex justify-between text-[var(--muted)]">
+          <span>當前持倉狀態:</span>
+          <span class="font-bold" id="modal-pos-status">好倉 1 張</span>
+        </div>
+        <div class="flex justify-between text-[var(--muted)]">
+          <span>未實現損益:</span>
+          <span class="font-bold" id="modal-pnl">+$0.00</span>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2 pt-1">
+        <button onclick="closeModal()" class="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition-all active:scale-95">
+          取消操作
+        </button>
+        <button id="modal-confirm-btn" onclick="executeManualClose()" class="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs transition-all active:scale-95 shadow-md shadow-rose-600/30">
+          確認執行平倉
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 安全 PIN 碼解鎖彈窗 (PIN Auth Modal) -->
+  <div id="pin-modal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-[#111827] border border-indigo-500/40 rounded-2xl max-w-sm w-full p-5 space-y-4 shadow-2xl">
+      <div class="w-12 h-12 rounded-full bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-2xl mx-auto">
+        🔐
+      </div>
+      
+      <div class="text-center space-y-1.5">
+        <h3 class="text-base font-bold text-white">安全解鎖授權</h3>
+        <p class="text-xs text-slate-300/80 leading-relaxed" id="pin-modal-desc">
+          公網遠端操作（手動平倉、切換策略等）需要輸入安全解鎖口令。
+        </p>
+      </div>
+
+      <div class="space-y-2">
+        <input type="password" id="pin-input" maxlength="32" placeholder="請輸入安全解鎖密碼 (AutoTrade)"
+          class="w-full bg-black/40 border border-slate-700 focus:border-indigo-500 rounded-xl px-4 py-3 text-center text-base tracking-widest font-mono text-white outline-none"
+          onkeydown="if(event.key==='Enter') verifyAndSavePin()">
+        <div id="pin-error" class="text-xs text-rose-400 text-center hidden">PIN 碼不正確，請重新輸入</div>
+      </div>
+
+      <div class="flex items-center gap-2 pt-1">
+        <button onclick="closePinModal()" class="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition-all active:scale-95">
+          取消
+        </button>
+        <button id="pin-verify-btn" onclick="verifyAndSavePin()" class="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs transition-all active:scale-95 shadow-md shadow-indigo-600/30">
+          確認解鎖
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast 提示組件 -->
+  <div id="toast" class="fixed top-5 left-1/2 -translate-x-1/2 z-50 bg-emerald-500 text-white text-xs font-bold px-4 py-2.5 rounded-full shadow-lg transition-all duration-300 opacity-0 pointer-events-none flex items-center gap-1.5">
+    <span id="toast-icon">✓</span>
+    <span id="toast-msg">操作成功</span>
+  </div>
+
+  <script>
+    let currentStatus = null;
+    let pendingSymbol = null;
+    let onPinSuccessCallback = null;
+    let currentTradeFilter = "ALL";
+    let cachedTrades = [];
+
+    function getAuthHeaders() {
+      const pin = localStorage.getItem("autotrade_pin") || "";
+      const headers = {"Content-Type": "application/json"};
+      if (pin) headers["X-Access-PIN"] = pin;
+      return headers;
+    }
+
+    function updatePinUI() {
+      const pin = localStorage.getItem("autotrade_pin");
+      const badge = document.getElementById("pin-badge");
+      const text = document.getElementById("pin-status-text");
+      if (pin) {
+        text.textContent = "已解鎖";
+        badge.className = "flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 active:scale-90 transition-transform";
+      } else {
+        text.textContent = "PIN";
+        badge.className = "flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 border border-slate-700 active:scale-90 transition-transform";
+      }
+    }
+
+    function openPinModal(desc, callback) {
+      onPinSuccessCallback = callback || null;
+      const modal = document.getElementById("pin-modal");
+      const descEl = document.getElementById("pin-modal-desc");
+      if (desc) descEl.textContent = desc;
+      document.getElementById("pin-error").classList.add("hidden");
+      const input = document.getElementById("pin-input");
+      input.value = "";
+      modal.classList.remove("hidden");
+      setTimeout(() => input.focus(), 100);
+    }
+
+    function closePinModal() {
+      document.getElementById("pin-modal").classList.add("hidden");
+      onPinSuccessCallback = null;
+    }
+
+    async function verifyAndSavePin() {
+      const input = document.getElementById("pin-input");
+      const pin = input.value.trim();
+      const errEl = document.getElementById("pin-error");
+      const btn = document.getElementById("pin-verify-btn");
+
+      if (!pin) {
+        errEl.textContent = "請輸入 6 位數安全 PIN 碼";
+        errEl.classList.remove("hidden");
+        return;
+      }
+
+      btn.textContent = "驗證中...";
+      btn.disabled = true;
+
+      try {
+        const res = await fetch("/api/auth/verify", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({pin: pin})
+        });
+        const data = await res.json();
+        if (res.ok && data.valid) {
+          localStorage.setItem("autotrade_pin", pin);
+          updatePinUI();
+          closePinModal();
+          showToast("✓ PIN 碼解鎖成功！");
+          if (onPinSuccessCallback) {
+            const cb = onPinSuccessCallback;
+            onPinSuccessCallback = null;
+            cb();
+          }
+        } else {
+          errEl.textContent = data.message || "PIN 碼錯誤，請重新輸入";
+          errEl.classList.remove("hidden");
+          if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+        }
+      } catch (e) {
+        errEl.textContent = "驗證伺服器連線失敗: " + e.message;
+        errEl.classList.remove("hidden");
+      } finally {
+        btn.textContent = "確認解鎖";
+        btn.disabled = false;
+      }
+    }
+
+    function showToast(msg, isError = false) {
+      const toast = document.getElementById("toast");
+      const icon = document.getElementById("toast-icon");
+      const text = document.getElementById("toast-msg");
+      icon.textContent = isError ? "⚠️" : "✓";
+      text.textContent = msg;
+      toast.className = `fixed top-5 left-1/2 -translate-x-1/2 z-50 ${isError ? 'bg-rose-600' : 'bg-emerald-600'} text-white text-xs font-bold px-4 py-2.5 rounded-full shadow-lg transition-all duration-300 opacity-100 flex items-center gap-1.5`;
+      if (navigator.vibrate) navigator.vibrate(isError ? [100, 50, 100] : 80);
+      setTimeout(() => {
+        toast.className = toast.className.replace("opacity-100", "opacity-0 pointer-events-none");
+      }, 2500);
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch("/trade_status.json?t=" + Date.now());
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        currentStatus = data;
+        renderStatus(data);
+      } catch (err) {
+        document.getElementById("conn-dot").className = "w-2 h-2 rounded-full bg-rose-500";
+        document.getElementById("conn-pill").className = "flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold bg-rose-500/15 text-rose-400 border border-rose-500/25";
+        document.getElementById("conn-text").textContent = "伺服器未連線";
+      }
+    }
+
+    function renderStatus(data) {
+      // 頂部更新時間與帳號
+      document.getElementById("header-last-updated").textContent = "更新: " + (data.last_update ? data.last_update.split(" ")[1] : "剛剛");
+      if (data.account_id) document.getElementById("account-badge").textContent = data.account_id;
+
+      // 連線狀態與斷線重連橫幅
+      const reconnectBanner = document.getElementById("reconnect-banner");
+      const connDot = document.getElementById("conn-dot");
+      const connPill = document.getElementById("conn-pill");
+      const connText = document.getElementById("conn-text");
+
+      if (data.reconnecting) {
+        reconnectBanner.classList.remove("hidden");
+        document.getElementById("reconnect-title").textContent = `⚠️ 自動重新連線中 (第 ${data.reconnect_attempts || 1} 次)`;
+        document.getElementById("reconnect-desc").textContent = `檢測到連線中斷（可能因手機端登入擠出）。守護進程正自動重新握手（間隔 ${data.reconnect_delay || 5} 秒）...`;
+        connDot.className = "w-2 h-2 rounded-full bg-amber-400 animate-ping";
+        connPill.className = "flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/25";
+        connText.textContent = "自動重連中";
+      } else if (data.ibkr_connected) {
+        reconnectBanner.classList.add("hidden");
+        connDot.className = "w-2 h-2 rounded-full bg-emerald-400";
+        connPill.className = "flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25";
+        connText.textContent = "即時連線中";
+      } else {
+        reconnectBanner.classList.remove("hidden");
+        document.getElementById("reconnect-title").textContent = "IBKR 離線";
+        document.getElementById("reconnect-desc").textContent = "未連接至 IB Gateway (端口 4002/7497)，等待重試...";
+        connDot.className = "w-2 h-2 rounded-full bg-rose-500";
+        connPill.className = "flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold bg-rose-500/15 text-rose-400 border border-rose-500/25";
+        connText.textContent = "離線";
+      }
+
+      // 報價數據流狀態指示燈 (Type 1 實時 vs Type 3 延遲)
+      const mktPill = document.getElementById("mkt-data-pill");
+      const mktDot = document.getElementById("mkt-data-dot");
+      const mktText = document.getElementById("mkt-data-text");
+      if (mktPill && mktDot && mktText) {
+        if (data.market_data_status === "REAL_TIME" || data.market_data_type === 1) {
+          mktPill.className = "flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25";
+          mktDot.className = "w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse";
+          mktText.textContent = "CME 實時";
+        } else {
+          mktPill.className = "flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/25";
+          mktDot.className = "w-1.5 h-1.5 rounded-full bg-amber-400";
+          mktText.textContent = "延遲 (待重啟Gateway)";
+        }
+      }
+
+      // 帳戶指標
+      const eq = data.equity || 0;
+      document.getElementById("val-equity").textContent = "$" + eq.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+      const eqUsd = data.capital_allocation && data.capital_allocation.total_equity_usd ? data.capital_allocation.total_equity_usd : (eq / 7.78);
+      document.getElementById("val-equity-usd").textContent = `≈ $${eqUsd.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} USD`;
+
+      const uPnl = data.unrealized_pnl || 0;
+      const uEl = document.getElementById("val-unrealized-pnl");
+      uEl.textContent = (uPnl >= 0 ? "+" : "") + "$" + uPnl.toFixed(2);
+      uEl.className = "text-lg font-bold mt-1 tracking-tight " + (uPnl > 0 ? "text-emerald-400" : (uPnl < 0 ? "text-rose-400" : "text-white"));
+
+      const rPnl = data.realized_pnl || 0;
+      document.getElementById("val-realized-pnl").textContent = `已實現: ${rPnl >= 0 ? '+' : ''}$${rPnl.toFixed(2)}`;
+
+      const avail = data.available_funds || 0;
+      document.getElementById("val-avail").textContent = "$" + avail.toLocaleString('en-US', {maximumFractionDigits: 0});
+
+      const margin = data.margin_requirement || 0;
+      document.getElementById("val-margin").textContent = "$" + margin.toLocaleString('en-US', {maximumFractionDigits: 0});
+      const ratio = eq > 0 ? ((margin / eq) * 100).toFixed(1) : "0.0";
+      document.getElementById("val-margin-ratio").textContent = `佔比: ${ratio}%`;
+
+      // 策略 1: V4.3 MES
+      const v43 = data.v43 || {};
+      document.getElementById("v43-contract-tag").textContent = "合約: " + (v43.active_contract || "MES 主力") + " (CME)";
+      document.getElementById("v43-price").textContent = v43.current_price ? v43.current_price.toFixed(2) : "--";
+
+      const v43Pos = v43.active_position;
+      const v43Badge = document.getElementById("v43-pos-badge");
+      if (v43Pos && v43Pos.contracts > 0) {
+        const isLong = v43Pos.direction === "LONG";
+        v43Badge.textContent = (isLong ? "好倉 " : "淡倉 ") + v43Pos.contracts + " 張";
+        v43Badge.className = `px-2 py-0.5 rounded-full text-xs font-bold ${isLong ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'}`;
+        document.getElementById("v43-entry").textContent = v43Pos.entry_price ? v43Pos.entry_price.toFixed(2) : "--";
+        const pnl = v43Pos.unrealized_pnl || 0;
+        const pnlEl = document.getElementById("v43-pnl");
+        pnlEl.textContent = (pnl >= 0 ? "+" : "") + "$" + pnl.toFixed(2);
+        pnlEl.className = "text-xs font-bold mt-0.5 " + (pnl >= 0 ? "text-emerald-400" : "text-rose-400");
+      } else {
+        v43Badge.textContent = "無持倉";
+        v43Badge.className = "px-2 py-0.5 rounded-full text-xs font-bold bg-slate-800 text-slate-400 border border-slate-700";
+        document.getElementById("v43-entry").textContent = "--";
+        document.getElementById("v43-pnl").textContent = "$0.00";
+        document.getElementById("v43-pnl").className = "text-xs font-bold mt-0.5 text-slate-400";
+      }
+
+      // 策略 2: V5.0 MNQ
+      const v50 = data.v50 || {};
+      document.getElementById("v50-contract-tag").textContent = "合約: " + (v50.active_contract || "MNQ 主力") + " (CME)";
+      document.getElementById("v50-price").textContent = v50.current_price ? v50.current_price.toFixed(2) : "--";
+
+      const v50Pos = v50.active_position;
+      const v50Badge = document.getElementById("v50-pos-badge");
+      if (v50Pos && v50Pos.contracts > 0) {
+        const isLong = v50Pos.direction === "LONG";
+        v50Badge.textContent = (isLong ? "好倉 " : "淡倉 ") + v50Pos.contracts + " 張";
+        v50Badge.className = `px-2 py-0.5 rounded-full text-xs font-bold ${isLong ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'}`;
+        document.getElementById("v50-entry").textContent = v50Pos.entry_price ? v50Pos.entry_price.toFixed(2) : "--";
+        const pnl = v50Pos.unrealized_pnl || 0;
+        const pnlEl = document.getElementById("v50-pnl");
+        pnlEl.textContent = (pnl >= 0 ? "+" : "") + "$" + pnl.toFixed(2);
+        pnlEl.className = "text-xs font-bold mt-0.5 " + (pnl >= 0 ? "text-emerald-400" : "text-rose-400");
+      } else {
+        v50Badge.textContent = "無持倉";
+        v50Badge.className = "px-2 py-0.5 rounded-full text-xs font-bold bg-slate-800 text-slate-400 border border-slate-700";
+        document.getElementById("v50-entry").textContent = "--";
+        document.getElementById("v50-pnl").textContent = "$0.00";
+        document.getElementById("v50-pnl").className = "text-xs font-bold mt-0.5 text-slate-400";
+      }
+    }
+
+    // 手動平倉確認彈窗控制
+    function promptManualClose(symbol) {
+      pendingSymbol = symbol;
+      const modal = document.getElementById("close-modal");
+      const title = document.getElementById("modal-title");
+      const target = document.getElementById("modal-target");
+      const posStatus = document.getElementById("modal-pos-status");
+      const pnlEl = document.getElementById("modal-pnl");
+
+      if (symbol === "ALL") {
+        title.textContent = "🚨 確認全平所有持倉？";
+        target.textContent = "全部持倉 (MES + MNQ)";
+        posStatus.textContent = "兩盤所有現存合約";
+        pnlEl.textContent = document.getElementById("val-unrealized-pnl").textContent;
+      } else if (symbol === "MES") {
+        title.textContent = "🛑 確認手動平倉 MES？";
+        target.textContent = "MES (微型標普期貨)";
+        const v43Pos = currentStatus && currentStatus.v43 ? currentStatus.v43.active_position : null;
+        posStatus.textContent = v43Pos ? `${v43Pos.direction === 'LONG' ? '好倉' : '淡倉'} ${v43Pos.contracts} 張` : "無持倉 (將撤銷所有掛單)";
+        pnlEl.textContent = v43Pos ? `$${v43Pos.unrealized_pnl || 0}` : "$0.00";
+      } else if (symbol === "MNQ") {
+        title.textContent = "🛑 確認手動平倉 MNQ？";
+        target.textContent = "MNQ (微型納指期貨)";
+        const v50Pos = currentStatus && currentStatus.v50 ? currentStatus.v50.active_position : null;
+        posStatus.textContent = v50Pos ? `${v50Pos.direction === 'LONG' ? '好倉' : '淡倉'} ${v50Pos.contracts} 張` : "無持倉 (將撤銷所有掛單)";
+        pnlEl.textContent = v50Pos ? `$${v50Pos.unrealized_pnl || 0}` : "$0.00";
+      }
+
+      modal.classList.remove("hidden");
+    }
+
+    function closeModal() {
+      document.getElementById("close-modal").classList.add("hidden");
+      pendingSymbol = null;
+    }
+
+    async function executeManualClose() {
+      if (!pendingSymbol) return;
+      const btn = document.getElementById("modal-confirm-btn");
+      btn.textContent = "執行平倉中...";
+      btn.disabled = true;
+
+      const pin = localStorage.getItem("autotrade_pin") || "";
+
+      try {
+        const res = await fetch("/api/positions/close", {
+          method: "POST",
+          headers: getAuthHeaders(),
+          body: JSON.stringify({symbol: pendingSymbol, reason: "MOBILE_PWA_MANUAL_CLOSE", pin: pin})
+        });
+
+        if (res.status === 401) {
+          const sym = pendingSymbol;
+          closeModal();
+          openPinModal("執行手動平倉需要安全 PIN 碼授權，請輸入 6 位數 PIN 碼：", () => {
+            promptManualClose(sym);
+          });
+          return;
+        }
+
+        const json = await res.json();
+        closeModal();
+        if (json.status === "ok") {
+          showToast(json.message || `已發送 ${pendingSymbol} 平倉指令`);
+        } else {
+          showToast(json.message || "平倉失敗", true);
+        }
+        fetchStatus();
+      } catch (err) {
+        showToast("平倉指令發送失敗: " + err.message, true);
+      } finally {
+        btn.textContent = "確認執行平倉";
+        btn.disabled = false;
+      }
+    }
+
+    async function toggleStrategy(strat) {
+      const pin = localStorage.getItem("autotrade_pin") || "";
+      try {
+        const action = strat === "v43" ? "flat_v43" : "flat_v50";
+        const res = await fetch("/api/control", {
+          method: "POST",
+          headers: getAuthHeaders(),
+          body: JSON.stringify({action: action, pin: pin})
+        });
+
+        if (res.status === 401) {
+          openPinModal("執行策略控制需要安全 PIN 碼授權：", () => toggleStrategy(strat));
+          return;
+        }
+
+        const json = await res.json();
+        showToast(`已發送 ${strat.toUpperCase()} 控制指令`);
+        fetchStatus();
+      } catch (err) {
+        showToast("操作失敗", true);
+      }
+    }
+
+    async function pushToGDrive() {
+      showToast("正在推播報告至 Google Drive...");
+      try {
+        const res = await fetch("/api/reports/push_gdrive", {
+          method: "POST",
+          headers: getAuthHeaders(),
+          body: JSON.stringify({})
+        });
+        const data = await res.json();
+        if (data.status === "ok") {
+          showToast("✓ 報告已成功推播至 Google Drive！");
+        } else {
+          showToast("推播失敗: " + data.message, true);
+        }
+      } catch (err) {
+        showToast("推播連線錯誤", true);
+      }
+    }
+
+    async function fetchTunnelStatus() {
+      try {
+        const res = await fetch("/api/tunnel_info?t=" + Date.now());
+        if (!res.ok) return;
+        const data = await res.json();
+        const badge = document.getElementById("tunnel-badge");
+        const desc = document.getElementById("tunnel-url-desc");
+        if (data.status === "ONLINE" && data.public_url) {
+          badge.textContent = "公網已連線";
+          badge.className = "px-1.5 py-0.2 rounded text-[10px] bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/30";
+          desc.textContent = data.public_url.replace("https://", "");
+        } else {
+          badge.textContent = "未啟動";
+          badge.className = "px-1.5 py-0.2 rounded text-[10px] bg-slate-800 text-slate-400 font-semibold";
+          desc.textContent = "僅限本機 / 區域 Wi-Fi 訪問";
+        }
+      } catch (e) {}
+    }
+
+    async function fetchIncidents() {
+      try {
+        const res = await fetch("/api/incidents?limit=3");
+        if (!res.ok) return;
+        const data = await res.json();
+        const container = document.getElementById("incidents-container");
+        if (!data.incidents || data.incidents.length === 0) {
+          container.innerHTML = `<div class="text-[var(--muted)] text-center py-1">系統運作穩定，無連線異常</div>`;
+          return;
+        }
+        container.innerHTML = data.incidents.map(inc => `
+          <div class="flex items-start space-x-2 p-1.5 rounded bg-black/20 border border-white/5">
+            <span class="text-xs">${inc.severity === 'CRITICAL' ? '🚨' : (inc.severity === 'WARNING' ? '⚠️' : 'ℹ️')}</span>
+            <div class="flex-1 truncate">
+              <div class="flex justify-between items-center text-[10px]">
+                <span class="font-semibold text-slate-300">${inc.incident_type}</span>
+                <span class="text-[var(--muted)]">${inc.timestamp.split(" ")[1] || ''}</span>
+              </div>
+              <div class="text-[10px] text-[var(--muted)] truncate">${inc.message}</div>
+            </div>
+          </div>
+        `).join("");
+      } catch (e) {}
+    }
+
+    function setTradeFilter(filter) {
+      currentTradeFilter = filter;
+      ['all', 'mes', 'mnq'].forEach(f => {
+        const btn = document.getElementById(`filter-btn-${f}`);
+        if (!btn) return;
+        if (f === filter.toLowerCase()) {
+          btn.className = "px-2 py-0.5 rounded font-bold bg-blue-600 text-white transition-all";
+        } else {
+          btn.className = "px-2 py-0.5 rounded font-medium text-[var(--muted)] hover:text-white transition-all";
+        }
+      });
+      renderTrades(cachedTrades);
+    }
+
+    async function fetchTrades() {
+      try {
+        const res = await fetch("/api/trades?limit=50&t=" + Date.now());
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        if (data.status === "ok" && Array.isArray(data.trades)) {
+          cachedTrades = data.trades;
+          renderTrades(cachedTrades);
+        }
+      } catch (err) {
+        if (currentStatus && (currentStatus.recent_trades || (currentStatus.v43 && currentStatus.v43.recent_trades))) {
+          const fallback = (currentStatus.recent_trades || [])
+            .concat((currentStatus.v43 && currentStatus.v43.recent_trades) || [])
+            .concat((currentStatus.v50 && currentStatus.v50.recent_trades) || []);
+          if (fallback.length > 0) {
+            cachedTrades = fallback;
+            renderTrades(cachedTrades);
+          }
+        }
+      }
+    }
+
+    function renderTrades(trades) {
+      const container = document.getElementById("trades-container");
+      const badge = document.getElementById("trades-count-badge");
+      if (!container) return;
+
+      let filtered = trades || [];
+      if (currentTradeFilter === "MES") {
+        filtered = filtered.filter(t => {
+          const sym = (t.symbol || "").toUpperCase();
+          const strat = (t.strategy || "").toLowerCase();
+          const ref = (t.order_ref || "").toUpperCase();
+          return sym.includes("MES") || strat.includes("4.3") || strat.includes("v4") || ref.includes("MES") || ref.includes("V43");
+        });
+      } else if (currentTradeFilter === "MNQ") {
+        filtered = filtered.filter(t => {
+          const sym = (t.symbol || "").toUpperCase();
+          const strat = (t.strategy || "").toLowerCase();
+          const ref = (t.order_ref || "").toUpperCase();
+          return sym.includes("MNQ") || strat.includes("5.0") || strat.includes("v5") || ref.includes("MNQ") || ref.includes("V50");
+        });
+      }
+
+      if (badge) badge.textContent = `${filtered.length} 筆`;
+
+      if (filtered.length === 0) {
+        container.innerHTML = `
+          <div class="text-[var(--muted)] text-center py-5 text-xs bg-black/20 rounded-lg border border-white/5 space-y-1">
+            <div class="text-base">☕</div>
+            <div class="font-bold text-slate-300">${currentTradeFilter === 'ALL' ? '目前尚無成交紀錄' : currentTradeFilter + ' 目前尚無成交紀錄'}</div>
+            <div class="text-[10px] text-[var(--muted)]">雙策略全天候實時監控信號中</div>
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = filtered.map(t => {
+        const sym = (t.symbol || (t.strategy && t.strategy.includes('4') ? 'MES' : 'MNQ')).toUpperCase();
+        const isMes = sym.includes("MES") || (t.strategy && t.strategy.includes("4"));
+        const stratName = isMes ? "V4.3 MES" : "V5.0 MNQ";
+        const stratIcon = isMes ? "🛡️" : "🚀";
+        const stratBadge = isMes 
+          ? "bg-blue-500/15 text-blue-400 border border-blue-500/30" 
+          : "bg-indigo-500/15 text-indigo-400 border border-indigo-500/30";
+
+        const side = (t.side || (t.direction === "LONG" ? "BOT" : "SLD")).toUpperCase();
+        const isBuy = side === "BOT" || side === "BUY" || t.direction === "LONG";
+        const sideText = isBuy ? "買入 BOT" : "賣出 SLD";
+        const sideBadge = isBuy
+          ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+          : "bg-rose-500/20 text-rose-400 border border-rose-500/30";
+
+        const contracts = t.shares || t.contracts || 1;
+        const price = t.price || t.exit_price || t.entry_price || 0;
+        const pnl = t.net_pnl !== undefined ? t.net_pnl : (t.realized_pnl !== undefined ? t.realized_pnl : (t.pnl_usd || 0));
+        const comm = t.commission || 0.61;
+        
+        let pnlHtml = "";
+        if (pnl !== 0) {
+          const isProfitable = pnl > 0;
+          pnlHtml = `<span class="font-bold font-mono ${isProfitable ? 'text-emerald-400' : 'text-rose-400'}">${isProfitable ? '+' : ''}$${pnl.toFixed(2)}</span>`;
+        } else if (isBuy) {
+          pnlHtml = `<span class="text-[10px] text-slate-400">開倉建倉</span>`;
+        } else {
+          pnlHtml = `<span class="font-mono text-slate-400">$0.00</span>`;
+        }
+
+        const rawTime = t.timestamp || t.exit_time || t.entry_time || "";
+        const timeStr = rawTime.length > 10 ? rawTime.slice(5) : (rawTime || "--:--");
+        const execId = t.exec_id || t.position_id || "";
+        const execIdShort = execId ? (execId.length > 12 ? '...' + execId.slice(-10) : execId) : `訂單 #${t.order_id || 'IB'}`;
+
+        return `
+          <div class="bg-black/25 hover:bg-black/40 border border-white/5 rounded-xl p-2.5 transition-all space-y-1.5">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-1.5">
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${stratBadge}">
+                  ${stratIcon} ${stratName}
+                </span>
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${sideBadge}">
+                  ${sideText}
+                </span>
+                <span class="text-[11px] font-bold text-white">${sym}</span>
+              </div>
+              <span class="text-[10px] text-[var(--muted)] font-mono">${timeStr}</span>
+            </div>
+            <div class="flex items-center justify-between text-xs pt-0.5">
+              <div class="flex items-center gap-1">
+                <span class="font-bold text-slate-200">${contracts} 張</span>
+                <span class="text-[var(--muted)]">@</span>
+                <span class="font-mono font-bold text-white">$${price.toFixed(2)}</span>
+              </div>
+              <div class="text-right">
+                ${pnlHtml}
+              </div>
+            </div>
+            <div class="flex items-center justify-between text-[10px] text-[var(--muted)] border-t border-white/5 pt-1">
+              <span class="truncate font-mono">${t.order_ref || execIdShort}</span>
+              <span>手續費: $${comm.toFixed(2)}</span>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    // 初始化與定期輪詢
+    updatePinUI();
+    fetchStatus();
+    fetchTrades();
+    fetchTunnelStatus();
+    fetchIncidents();
+
+    setInterval(fetchStatus, 2000);
+    setInterval(fetchTrades, 4000);
+    setInterval(fetchTunnelStatus, 8000);
+    setInterval(fetchIncidents, 10000);
+  </script>
+</body>
+</html>
