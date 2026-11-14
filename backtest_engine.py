@@ -24,6 +24,7 @@ import os
 import json
 import math
 import time
+import urllib.request
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -70,6 +71,113 @@ STRATEGY_CATALOG = {
 
 def _round_tick(val: float, tick: float = 0.25) -> float:
     return round(round(float(val) / tick) * tick, 2)
+
+
+def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """為任何 OHLCV DataFrame 統一計算技術指標 (ATR14, EMA20/50/200, 日內 VWAP, 箱體高低)"""
+    tr = np.maximum(
+        df["high"] - df["low"],
+        np.maximum(
+            (df["high"] - df["close"].shift(1)).abs(),
+            (df["low"] - df["close"].shift(1)).abs()
+        )
+    )
+    df["atr"] = tr.rolling(14, min_periods=1).mean().bfill()
+    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
+    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
+    df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
+
+    tp = (df["high"] + df["low"] + df["close"]) / 3.0
+    vol_safe = df["volume"].replace(0, 1)
+    df["_pv"] = tp * vol_safe
+    df["_vs"] = vol_safe
+    day_grp = df.index.date
+    df["vwap"] = df.groupby(day_grp)["_pv"].cumsum() / df.groupby(day_grp)["_vs"].cumsum()
+    df.drop(columns=["_pv", "_vs"], inplace=True)
+
+    df["box_high"] = df["high"].shift(1).rolling(24, min_periods=5).max().bfill()
+    df["box_low"] = df["low"].shift(1).rolling(24, min_periods=5).min().bfill()
+    return df
+
+
+def fetch_real_yahoo_data(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    timeframe: str
+) -> Tuple[pd.DataFrame, str, str]:
+    """
+    從 Yahoo Finance 抓取真實 CME 期貨歷史行情 (ES=F 對應 MES，NQ=F 對應 MNQ)。
+    回傳: (df_ohlcv, data_source_label, warning_note)
+    """
+    yf_sym = "NQ=F" if symbol.upper() == "MNQ" else "ES=F"
+    tf = timeframe.lower().strip()
+
+    s_dt = pd.to_datetime(start_date)
+    e_dt = pd.to_datetime(end_date) + timedelta(days=1)
+    now_dt = datetime.now()
+    if e_dt > now_dt:
+        e_dt = now_dt
+
+    span_days = max(1, (e_dt - s_dt).days)
+    note = ""
+
+    # Yahoo Finance 真實歷史資料週期上限自動適配
+    if tf == "1m":
+        yf_interval = "1m"
+        if span_days > 7:
+            s_dt = e_dt - timedelta(days=7)
+            note = "1分鐘真實數據受限於 Yahoo 上限，已自動取最近 7 天真實行情"
+    elif tf in ("5m", "15m"):
+        yf_interval = tf
+        if span_days > 58:
+            # 超過 58 天時改抓 1h 真實數據作為回測基準，或提示
+            yf_interval = "1h"
+            if span_days > 720:
+                yf_interval = "1d"
+                note = f"所選區間超過 {tf} 真實數據 60 天 / 1H 730 天上限，已自動切換為真實日線 (1D) 行情"
+            else:
+                note = f"所選區間超過 {tf} 真實數據 60 天上限，已自動切換為真實 1 小時 (1H) 行情"
+    elif tf in ("1h", "4h"):
+        yf_interval = "1h"
+        if span_days > 720:
+            yf_interval = "1d"
+            note = "所選區間超過 1H 真實數據 730 天上限，已自動切換為真實日線 (1D) 行情"
+    else:
+        yf_interval = "1d"
+
+    p1 = int(s_dt.timestamp())
+    p2 = int(e_dt.timestamp())
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_sym}?period1={p1}&period2={p2}&interval={yf_interval}&includePrePost=true"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=12) as resp:
+        raw = json.loads(resp.read().decode("utf-8"))
+
+    res = raw["chart"]["result"][0]
+    timestamps = res.get("timestamp", [])
+    quote = res["indicators"]["quote"][0]
+
+    df = pd.DataFrame({
+        "open": quote["open"],
+        "high": quote["high"],
+        "low": quote["low"],
+        "close": quote["close"],
+        "volume": quote["volume"]
+    }, index=pd.to_datetime(timestamps, unit="s", utc=True).tz_convert("America/New_York").tz_localize(None))
+
+    df = df.dropna(subset=["open", "high", "low", "close"]).copy()
+    df["volume"] = df["volume"].fillna(1000).astype(int)
+    df.index.name = "datetime"
+
+    # 若選 4h 且抓到 1h，重採樣為 4h
+    if tf == "4h" and yf_interval == "1h" and len(df) > 0:
+        df = df.resample("4h").agg({
+            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+        }).dropna()
+
+    df = _add_indicators(df)
+    label = f"🟢 真實市場數據 (Yahoo Finance {yf_sym} · {yf_interval.upper()} · {len(df)} 根實盤K棒)"
+    return df, label, note
 
 
 def generate_base_5m_data(start_date: str, end_date: str, symbol: str = "MES", seed: int = 42) -> pd.DataFrame:
@@ -808,6 +916,7 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
     start_date = str(payload.get("start_date", "2024-01-01"))
     end_date = str(payload.get("end_date", "2026-11-14"))
     symbol = str(payload.get("symbol", "MES")).upper()
+    data_source = str(payload.get("data_source", "REAL_YF")).upper()
 
     params = {
         "symbol": symbol,
@@ -820,8 +929,42 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
         "risk_multiplier": float(payload.get("risk_multiplier", 1.0))
     }
 
-    df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
-    candles, _ = resample_ohlcv(df_base, timeframe=timeframe, max_bars=1200)
+    data_source_label = "🟡 高擬真合成數據 (Synthetic CME Globex)"
+    data_note = ""
+
+    if data_source == "REAL_YF":
+        try:
+            df_base, data_source_label, data_note = fetch_real_yahoo_data(
+                symbol=symbol, start_date=start_date, end_date=end_date, timeframe=timeframe
+            )
+            if len(df_base) < 35:
+                raise ValueError("真實市場數據筆數不足")
+        except Exception as e:
+            df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
+            data_source_label = "🟡 高擬真合成數據 (真實數據連線失敗自動切換)"
+            data_note = f"真實行情抓取失敗 ({e})，已自動切換為高擬真合成數據"
+    else:
+        df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
+
+    # 若為真實 1D / 1H 數據，直接對齊目標週期或保持原樣避免無意義降採樣
+    if data_source == "REAL_YF" and "真實" in data_source_label:
+        candles = []
+        df_show = df_base.iloc[-1200:] if len(df_base) > 1200 else df_base
+        for ts, row in df_show.iterrows():
+            candles.append({
+                "time": int(ts.timestamp()),
+                "datetime": ts.strftime("%Y-%m-%d %H:%M") if ts.hour != 0 or ts.minute != 0 else ts.strftime("%Y-%m-%d"),
+                "open": round(float(row["open"]), 2),
+                "high": round(float(row["high"]), 2),
+                "low": round(float(row["low"]), 2),
+                "close": round(float(row["close"]), 2),
+                "volume": int(row["volume"]),
+                "ema20": round(float(row.get("ema20", row["close"])), 2),
+                "ema50": round(float(row.get("ema50", row["close"])), 2),
+                "vwap": round(float(row.get("vwap", row["close"])), 2)
+            })
+    else:
+        candles, _ = resample_ohlcv(df_base, timeframe=timeframe, max_bars=1200)
 
     results = {}
     for strat_id in strategies:
@@ -834,11 +977,14 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
         "status": "ok",
         "elapsed_sec": elapsed,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "data_source_label": data_source_label,
+        "data_note": data_note,
         "config": {
             "symbol": symbol,
             "timeframe": timeframe,
             "start_date": start_date,
             "end_date": end_date,
+            "data_source": data_source,
             "strategies": strategies,
             **params
         },

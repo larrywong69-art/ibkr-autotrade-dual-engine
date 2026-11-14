@@ -322,10 +322,17 @@
   <div class="layout">
     <!-- 左側設定欄：回測區間、IBKR 資金參數、最多 3 策略選擇 -->
     <aside style="display:flex; flex-direction:column; gap:14px;">
-      <!-- 1. 回測時間段 (最長 10 年) -->
+      <!-- 1. 回測時間段 (最長 10 年) & 數據來源 -->
       <div class="card">
         <div class="card-title">
-          <span>📅 1. 回測時間段（最長 10 年）</span>
+          <span>📅 1. 回測時間段 & 數據來源</span>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="inp-data-source">歷史行情數據來源</label>
+          <select id="inp-data-source">
+            <option value="REAL_YF" selected>🟢 真實市場數據 (Yahoo Finance ES=F / NQ=F)</option>
+            <option value="SYNTHETIC">🟡 高擬真合成數據 (10年完整5分K壓力測試)</option>
+          </select>
         </div>
         <div class="form-grid">
           <div class="form-group">
@@ -460,18 +467,18 @@
           </div>
 
           <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-            <label style="font-size:12px; color:var(--muted);">標記顯示策略：</label>
-            <select id="marker-strat-select" onchange="drawKlineChart()" style="width:auto; min-width:190px;"></select>
+            <label style="font-size:12px; color:var(--amber); font-weight:700;">🎯 K線圖主要策略：</label>
+            <select id="marker-strat-select" onchange="drawKlineChart()" style="width:auto; min-width:210px;"></select>
             <button onclick="resetKlineZoom()">🔍 重設縮放</button>
           </div>
         </div>
 
-        <div class="canvas-wrap" style="height: 440px;">
+        <div class="canvas-wrap" style="height: 460px;">
           <div class="chart-hud" id="kline-hud">
-            <span>滑鼠滾輪縮放 K 線 ｜ 按住左鍵左右拖曳 ｜ 點擊下方交易明細可自動定位至該筆進出場 K 棒</span>
-            <span style="color:var(--blue);">藍線: EMA20 ｜ 紫線: EMA50 ｜ 黃虛線: VWAP ｜ 🟢▲開多 🔴▼開空 🎯止盈 🛑止損</span>
+            <span>僅標示「主要策略」開/平倉（比較策略僅於下方報告顯示）｜ 🟢▲開多 🔴▼開空 ●平倉（賺綠底／蝕紅底）</span>
+            <span style="color:var(--blue);">藍: EMA20 ｜ 紫: EMA50 ｜ 黃虛線: VWAP</span>
           </div>
-          <canvas id="kline-canvas" height="440"></canvas>
+          <canvas id="kline-canvas" height="460"></canvas>
         </div>
       </section>
 
@@ -695,6 +702,7 @@
       const payload = {
         strategies,
         timeframe: currentTimeframe,
+        data_source: document.getElementById('inp-data-source').value,
         start_date: document.getElementById('inp-start').value,
         end_date: document.getElementById('inp-end').value,
         symbol: document.getElementById('inp-symbol').value,
@@ -733,9 +741,12 @@
         drawEquityAndDDCharts();
         renderAttributionAndHeatmap();
 
-        statusEl.textContent = `✅ 回測完成 (${data.elapsed_sec}s)`;
-        statusEl.style.color = 'var(--green)';
-        document.getElementById('elapsed-tag').textContent = `計算耗時: ${data.elapsed_sec} 秒 ｜ K 棒數: ${candles.length}`;
+        statusEl.textContent = `✅ ${data.data_source_label || '回測完成'} (${data.elapsed_sec}s)`;
+        statusEl.style.color = (data.data_source_label || '').includes('真實') ? 'var(--green)' : 'var(--amber)';
+        document.getElementById('elapsed-tag').textContent = `${data.data_source_label || ''} ｜ 耗時: ${data.elapsed_sec} 秒 ｜ K 棒數: ${candles.length}`;
+        if (data.data_note) {
+          showToast('ℹ️ ' + data.data_note);
+        }
       } catch (err) {
         statusEl.textContent = '❌ 回測發生錯誤';
         statusEl.style.color = 'var(--red)';
@@ -752,10 +763,9 @@
       const prevMarker = markerSel.value;
       const prevAttr = attrSel.value;
 
-      markerSel.innerHTML = `<option value="ALL">全部已選策略 (${keys.length})</option>` +
-        keys.map(k => `<option value="${k}">${results[k].name}</option>`).join('');
-      if (keys.includes(prevMarker) || prevMarker === 'ALL') markerSel.value = prevMarker;
-      else markerSel.value = keys[0] || 'ALL';
+      markerSel.innerHTML = keys.map((k, idx) => `<option value="${k}">${idx === 0 ? '★ ' : ''}${results[k].name}</option>`).join('');
+      if (keys.includes(prevMarker)) markerSel.value = prevMarker;
+      else markerSel.value = keys[0] || '';
 
       attrSel.innerHTML = keys.map(k => `<option value="${k}">${results[k].name}</option>`).join('');
       if (keys.includes(prevAttr)) attrSel.value = prevAttr;
@@ -1047,14 +1057,13 @@
         ctx.fillText(slice[i].datetime.slice(5), x - 28, H - 8);
       }
 
-      // 繪製開倉 / 平倉標記與進出場虛線連接
+      // 只繪製「主要策略」的開倉(大三角形) / 平倉(大圓形) 與 賺綠/蝕紅 區間底色（比較策略不標示）
       const selStrat = document.getElementById('marker-strat-select').value;
       const results = currentBacktestData.results || {};
-      const stratKeys = selStrat === 'ALL' ? Object.keys(results) : [selStrat];
+      const primaryKey = results[selStrat] ? selStrat : Object.keys(results)[0];
+      const sObj = results[primaryKey];
 
-      stratKeys.forEach(sKey => {
-        const sObj = results[sKey];
-        if (!sObj) return;
+      if (sObj) {
         const markers = sObj.chart_markers || [];
         markers.forEach(m => {
           if (m.exit_bar_idx < viewStart || m.entry_bar_idx > viewEnd) return;
@@ -1065,63 +1074,88 @@
           const ey = yOf(m.entry_price);
           const xx = xOf(Math.max(0, Math.min(count - 1, xSliceIdx)));
           const xy = yOf(m.exit_price);
+          const isWin = m.pnl >= 0;
           const isHighlight = (highlightedTradeId === m.trade_id);
 
-          // 進出場連接線
+          // 1. 該段交易區間底色 (賺=綠色底色 / 蝕=紅色底色)
+          const zoneLeft = Math.min(ex, xx) - 5;
+          const zoneWidth = Math.max(14, Math.abs(xx - ex) + 10);
+          const zoneTop = padT + 2;
+          const zoneHeight = priceH - 4;
           ctx.save();
-          ctx.strokeStyle = m.pnl >= 0 ? 'rgba(16, 185, 129, 0.75)' : 'rgba(244, 63, 94, 0.75)';
-          ctx.lineWidth = isHighlight ? 2.5 : 1.3;
-          ctx.setLineDash([3, 3]);
+          ctx.fillStyle = isWin
+            ? (isHighlight ? 'rgba(16, 185, 129, 0.28)' : 'rgba(16, 185, 129, 0.14)')
+            : (isHighlight ? 'rgba(244, 63, 94, 0.28)' : 'rgba(244, 63, 94, 0.14)');
+          ctx.fillRect(zoneLeft, zoneTop, zoneWidth, zoneHeight);
+          ctx.strokeStyle = isWin ? 'rgba(16, 185, 129, 0.45)' : 'rgba(244, 63, 94, 0.45)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(zoneLeft, zoneTop, zoneWidth, zoneHeight);
+          ctx.restore();
+
+          // 2. 進出場虛線連接
+          ctx.save();
+          ctx.strokeStyle = isWin ? '#34d399' : '#fb7185';
+          ctx.lineWidth = isHighlight ? 3.0 : 1.8;
+          ctx.setLineDash([4, 3]);
           ctx.beginPath();
           ctx.moveTo(ex, ey);
           ctx.lineTo(xx, xy);
           ctx.stroke();
           ctx.restore();
 
-          // 開倉標記 (三角形 + 價格標籤)
+          // 3. 放大開倉標示：三角形 (▲ 開多 / ▼ 開空)
           if (eSliceIdx >= 0 && eSliceIdx < count) {
             const isLong = m.direction === 'LONG';
             const cBar = slice[eSliceIdx];
-            const my = isLong ? yOf(cBar.low) + 14 : yOf(cBar.high) - 14;
+            const my = isLong ? Math.min(H - padB - 18, yOf(cBar.low) + 18) : Math.max(padT + 18, yOf(cBar.high) - 18);
+
+            ctx.save();
             ctx.fillStyle = isLong ? '#10b981' : '#f43f5e';
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1.6;
             ctx.beginPath();
             if (isLong) {
-              ctx.moveTo(ex, my - 8);
-              ctx.lineTo(ex - 6, my + 4);
-              ctx.lineTo(ex + 6, my + 4);
+              ctx.moveTo(ex, my - 11);
+              ctx.lineTo(ex - 9, my + 6);
+              ctx.lineTo(ex + 9, my + 6);
             } else {
-              ctx.moveTo(ex, my + 8);
-              ctx.lineTo(ex - 6, my - 4);
-              ctx.lineTo(ex + 6, my - 4);
+              ctx.moveTo(ex, my + 11);
+              ctx.lineTo(ex - 9, my - 6);
+              ctx.lineTo(ex + 9, my - 6);
             }
             ctx.closePath();
             ctx.fill();
-
-            if (count <= 160 || isHighlight) {
-              ctx.font = 'bold 10px -apple-system, sans-serif';
-              ctx.fillText(`${isLong ? '買' : '賣'}${m.contracts}口`, ex - 16, isLong ? my + 15 : my - 8);
-            }
-          }
-
-          // 平倉標記 (圓點 + 損益標籤)
-          if (xSliceIdx >= 0 && xSliceIdx < count) {
-            ctx.fillStyle = m.pnl >= 0 ? '#38bdf8' : '#fb7185';
-            ctx.beginPath();
-            ctx.arc(xx, xy, isHighlight ? 6 : 4, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.strokeStyle = '#080c14';
-            ctx.lineWidth = 1.5;
             ctx.stroke();
 
-            if (count <= 120 || isHighlight) {
-              ctx.font = 'bold 10px -apple-system, sans-serif';
-              const pnlTxt = `${m.pnl >= 0 ? '+' : ''}$${Math.round(m.pnl)}`;
-              ctx.fillStyle = m.pnl >= 0 ? '#34d399' : '#fda4af';
-              ctx.fillText(pnlTxt, xx - 14, xy - 8);
+            if (count <= 200 || isHighlight) {
+              ctx.font = 'bold 11px -apple-system, sans-serif';
+              ctx.fillStyle = isLong ? '#6ee7b7' : '#fda4af';
+              ctx.fillText(`開${isLong ? '多' : '空'} ${m.contracts}口`, ex - 22, isLong ? my + 20 : my - 12);
             }
+            ctx.restore();
+          }
+
+          // 4. 放大平倉標示：圓形 (● 賺=綠色 / 蝕=紅色)
+          if (xSliceIdx >= 0 && xSliceIdx < count) {
+            ctx.save();
+            ctx.fillStyle = isWin ? '#10b981' : '#f43f5e';
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2.0;
+            ctx.beginPath();
+            ctx.arc(xx, xy, isHighlight ? 10 : 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+
+            if (count <= 180 || isHighlight) {
+              ctx.font = 'bold 11px -apple-system, sans-serif';
+              const pnlTxt = `${isWin ? '+' : ''}$${Math.round(m.pnl)}`;
+              ctx.fillStyle = isWin ? '#6ee7b7' : '#fda4af';
+              ctx.fillText(`平 ${pnlTxt}`, xx - 20, xy - 13);
+            }
+            ctx.restore();
           }
         });
-      });
+      }
 
       // 滑鼠十字準線與懸停 K 棒資訊
       if (hoverBarIdx >= 0 && hoverBarIdx < count) {
