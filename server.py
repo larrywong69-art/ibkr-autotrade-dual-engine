@@ -311,6 +311,12 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             return
 
+        if parsed.path in ("/backtest", "/backtest/"):
+            self.send_response(302)
+            self.send_header("Location", "/backtest_lab.html")
+            self.end_headers()
+            return
+
         if parsed.path == "/manifest.json":
             manifest_file = os.path.join(CURRENT_DIR, "manifest.json")
             if os.path.exists(manifest_file):
@@ -578,6 +584,43 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                 "last_action": state.get("last_action", "")
             }
             self.wfile.write(json.dumps(resp).encode("utf-8"))
+            return
+
+        if parsed.path == "/api/backtest/run":
+            content_length = int(self.headers.get("Content-Length", 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                payload = json.loads(post_data.decode("utf-8"))
+            except Exception:
+                payload = {}
+
+            try:
+                from backtest_engine import run_multi_strategy_backtest_api
+                resp = run_multi_strategy_backtest_api(payload)
+                self.send_response(200)
+            except Exception as e:
+                resp = {"status": "error", "message": f"回測執行異常: {e}"}
+                self.send_response(500)
+
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+            return
+
+        if parsed.path == "/api/backtest/export-gdrive":
+            try:
+                from backtest_engine import export_backtest_to_gdrive
+                resp = export_backtest_to_gdrive()
+                self.send_response(200)
+            except Exception as e:
+                resp = {"status": "error", "message": f"報告匯出異常: {e}"}
+                self.send_response(500)
+
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
             return
 
         self.send_error(404, "Endpoint Not Found")

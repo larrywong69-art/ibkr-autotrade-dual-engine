@@ -1,0 +1,1341 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoTrade 量化回測實驗室 | IBKR Multi-Strategy Backtest Lab</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --panel: #111827;
+      --panel-2: #1e293b;
+      --border: #26334d;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --blue: #38bdf8;
+      --green: #10b981;
+      --red: #f43f5e;
+      --amber: #f59e0b;
+      --purple: #a855f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
+      font-size: 13px;
+      line-height: 1.45;
+      min-height: 100vh;
+    }
+    a { color: var(--blue); text-decoration: none; }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: rgba(17, 24, 39, 0.92);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 16px;
+      font-weight: 800;
+    }
+    .badge {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--blue);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .btn-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    button, .btn {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 7px 13px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    button:hover, .btn:hover { border-color: var(--blue); background: #24324b; }
+    .btn-primary {
+      background: linear-gradient(135deg, #0284c7, #2563eb);
+      border-color: #38bdf8;
+      color: #fff;
+    }
+    .btn-primary:hover { filter: brightness(1.1); }
+    .btn-green {
+      background: linear-gradient(135deg, #059669, #10b981);
+      border-color: #34d399;
+      color: #fff;
+    }
+    .layout {
+      max-width: 1680px;
+      margin: 0 auto;
+      padding: 16px;
+      display: grid;
+      grid-template-columns: 330px 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 1150px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .card-title {
+      font-size: 13px;
+      font-weight: 800;
+      color: #e2e8f0;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .form-group { margin-bottom: 10px; }
+    .form-label {
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 4px;
+      font-weight: 600;
+    }
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    input[type="text"], input[type="number"], input[type="date"], select {
+      width: 100%;
+      background: #090d16;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 7px 9px;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    input:focus, select:focus {
+      outline: none;
+      border-color: var(--blue);
+    }
+    .preset-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 6px;
+    }
+    .pill {
+      padding: 4px 8px;
+      font-size: 11px;
+      border-radius: 6px;
+      background: #090d16;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .pill:hover, .pill.active {
+      color: #fff;
+      border-color: var(--blue);
+      background: rgba(56, 189, 248, 0.18);
+    }
+    .strat-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 8px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0b111e;
+      margin-bottom: 6px;
+      cursor: pointer;
+    }
+    .strat-item.selected {
+      border-color: var(--blue);
+      background: rgba(56, 189, 248, 0.08);
+    }
+    .strat-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      margin-top: 4px;
+      flex-shrink: 0;
+    }
+    .main-col {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      min-width: 0;
+    }
+    .tf-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .tf-group {
+      display: inline-flex;
+      background: #090d16;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 3px;
+      gap: 3px;
+    }
+    .tf-btn {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      padding: 5px 11px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .tf-btn.active {
+      background: var(--blue);
+      color: #090d16;
+    }
+    .canvas-wrap {
+      position: relative;
+      width: 100%;
+      background: #080c14;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      cursor: crosshair;
+    }
+    .chart-hud {
+      position: absolute;
+      top: 10px;
+      left: 12px;
+      right: 12px;
+      pointer-events: none;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      background: rgba(11, 15, 25, 0.82);
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.07);
+    }
+    .table-scroll {
+      width: 100%;
+      overflow-x: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-variant-numeric: tabular-nums;
+    }
+    th, td {
+      padding: 9px 10px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    th {
+      background: #0c1322;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    tbody tr:hover {
+      background: rgba(56, 189, 248, 0.06);
+    }
+    .clickable-row { cursor: pointer; }
+    .clickable-row.active-trade {
+      background: rgba(56, 189, 248, 0.18) !important;
+    }
+    .pos { color: var(--green); font-weight: 700; }
+    .neg { color: var(--red); font-weight: 700; }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 960px) {
+      .grid-2 { grid-template-columns: 1fr; }
+    }
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #1e293b;
+      border: 1px solid var(--blue);
+      color: #fff;
+      padding: 12px 16px;
+      border-radius: 10px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+      z-index: 100;
+      display: none;
+      max-width: 420px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 頂部導航與匯出工具列 -->
+  <header class="topbar">
+    <div class="brand">
+      <span>🧪 AutoTrade 本地量化回測實驗室</span>
+      <span class="badge">IBKR Multi-Strategy Lab</span>
+      <span id="status-pill" style="font-size:12px; color:var(--muted); font-weight:500;">準備就緒</span>
+    </div>
+    <div class="btn-row">
+      <a href="/dashboard.html" class="btn">🖥️ 實盤儀表板</a>
+      <a href="/mobile.html" class="btn">📱 手機監控</a>
+      <button onclick="exportHTMLReport()">📥 匯出分析報告 (HTML)</button>
+      <button onclick="exportCSVTrades()">📊 匯出交易明細 (CSV)</button>
+      <button class="btn-green" onclick="pushReportToGDrive()">☁️ 輸出至 Google Drive</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- 左側設定欄：回測區間、IBKR 資金參數、最多 3 策略選擇 -->
+    <aside style="display:flex; flex-direction:column; gap:14px;">
+      <!-- 1. 回測時間段 (最長 10 年) -->
+      <div class="card">
+        <div class="card-title">
+          <span>📅 1. 回測時間段（最長 10 年）</span>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label" for="inp-start">開始日期</label>
+            <input type="date" id="inp-start" value="2021-11-15" min="2016-01-01" max="2026-12-31" />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="inp-end">結束日期</label>
+            <input type="date" id="inp-end" value="2026-11-14" min="2016-01-01" max="2026-12-31" />
+          </div>
+        </div>
+        <div class="preset-pills">
+          <span class="pill" onclick="setRangePreset(0.25, this)">近 3 個月</span>
+          <span class="pill" onclick="setRangePreset(1, this)">近 1 年</span>
+          <span class="pill" onclick="setRangePreset(3, this)">近 3 年</span>
+          <span class="pill active" onclick="setRangePreset(5, this)">近 5 年</span>
+          <span class="pill" onclick="setRangePreset(10, this)">最長 10 年</span>
+        </div>
+      </div>
+
+      <!-- 2. IBKR 資金與交易成本參數 -->
+      <div class="card">
+        <div class="card-title">
+          <span>🏦 2. IBKR 帳戶與交易參數</span>
+          <span class="badge">IBKR 預設</span>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label" for="inp-symbol">交易標的 (CME)</label>
+            <select id="inp-symbol" onchange="onSymbolChange()">
+              <option value="MES" selected>MES (微型標普 $5/點)</option>
+              <option value="MNQ">MNQ (微型納指 $2/點)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="inp-capital">初始資金 (USD)</label>
+            <input type="number" id="inp-capital" value="30000" min="2000" step="1000" />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="inp-comm">IB 單邊佣金 ($/口)</label>
+            <input type="number" id="inp-comm" value="0.62" min="0" step="0.01" />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="inp-slip">止損滑價 (點數)</label>
+            <input type="number" id="inp-slip" value="0.25" min="0" step="0.25" />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="inp-margin">每口隔夜保證金 ($)</label>
+            <input type="number" id="inp-margin" value="2400" min="500" step="100" />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="inp-max-lots">單筆最大口數上限</label>
+            <input type="number" id="inp-max-lots" value="12" min="1" max="50" step="1" />
+          </div>
+        </div>
+        <div class="form-group" style="margin-top:4px;">
+          <label class="form-label" for="inp-risk-mult">倉位風險縮放倍數 (Risk Multiplier)</label>
+          <input type="number" id="inp-risk-mult" value="1.0" min="0.2" max="3.0" step="0.1" />
+        </div>
+      </div>
+
+      <!-- 3. 選擇最多 3 個策略同時比較 -->
+      <div class="card">
+        <div class="card-title">
+          <span>⚔️ 3. 選擇策略比較（最多 3 個）</span>
+          <span id="strat-count-badge" class="badge">已選 3/3</span>
+        </div>
+        <div id="strategy-list">
+          <label class="strat-item selected">
+            <input type="checkbox" name="strat" value="v4.3" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#38bdf8;"></span>
+            <div>
+              <div style="font-weight:700;">V4.3 標普防守力冠軍 (MES)</div>
+              <div style="font-size:11px; color:var(--muted);">1H 結構 + 浪3 LMT + R2/R3 鎖1口 + 50/25/25 梯次</div>
+            </div>
+          </label>
+          <label class="strat-item selected">
+            <input type="checkbox" name="strat" value="v5.0" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#10b981;"></span>
+            <div>
+              <div style="font-weight:700;">V5.0 雙劍合璧冠軍 (VWAP+60/25/15)</div>
+              <div style="font-size:11px; color:var(--muted);">日內 VWAP 濾網 + 60/25/15 不對稱收割 + 1.2ATR 追蹤</div>
+            </div>
+          </label>
+          <label class="strat-item selected">
+            <input type="checkbox" name="strat" value="dual_60_40" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#f59e0b;"></span>
+            <div>
+              <div style="font-weight:700;">Dual 雙引擎實盤組合 (60% V4.3 + 40% V5.0)</div>
+              <div style="font-size:11px; color:var(--muted);">模擬目前雲端實盤 6:4 雙資金池協同與防飢餓保護</div>
+            </div>
+          </label>
+          <label class="strat-item">
+            <input type="checkbox" name="strat" value="v4.1" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#a855f7;"></span>
+            <div>
+              <div style="font-weight:700;">V4.1 總回報成長冠軍 (全開擴口版)</div>
+              <div style="font-size:11px; color:var(--muted);">規則 1/2/3 全開動態口數階梯，追求高複利</div>
+            </div>
+          </label>
+          <label class="strat-item">
+            <input type="checkbox" name="strat" value="v5.9" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#f43f5e;"></span>
+            <div>
+              <div style="font-weight:700;">V5.9 極限純浪3 + 4H 宏觀鎖定</div>
+              <div style="font-size:11px; color:var(--muted);">過濾所有箱體盤整，僅順 4H 大勢狙擊浪 3 回踩</div>
+            </div>
+          </label>
+        </div>
+
+        <button class="btn-primary" style="width:100%; justify-content:center; padding:10px; font-size:13px; margin-top:6px;" onclick="runBacktest()">
+          🚀 開始執行多策略回測
+        </button>
+      </div>
+    </aside>
+
+    <!-- 右側主視覺區：K 線開平倉圖、淨值對比、績效矩陣、進階分析 -->
+    <main class="main-col">
+      <!-- K 線圖與週期切換器 -->
+      <section class="card">
+        <div class="tf-bar">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <span style="font-weight:800; font-size:14px;">📈 K 線圖與開倉/平倉標記</span>
+            <div class="tf-group" id="tf-buttons">
+              <button class="tf-btn" onclick="switchTimeframe('1m', this)">1分</button>
+              <button class="tf-btn active" onclick="switchTimeframe('5m', this)">5分</button>
+              <button class="tf-btn" onclick="switchTimeframe('15m', this)">15分</button>
+              <button class="tf-btn" onclick="switchTimeframe('1h', this)">1小時</button>
+              <button class="tf-btn" onclick="switchTimeframe('4h', this)">4小時</button>
+              <button class="tf-btn" onclick="switchTimeframe('1d', this)">1日</button>
+            </div>
+          </div>
+
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <label style="font-size:12px; color:var(--muted);">標記顯示策略：</label>
+            <select id="marker-strat-select" onchange="drawKlineChart()" style="width:auto; min-width:190px;"></select>
+            <button onclick="resetKlineZoom()">🔍 重設縮放</button>
+          </div>
+        </div>
+
+        <div class="canvas-wrap" style="height: 440px;">
+          <div class="chart-hud" id="kline-hud">
+            <span>滑鼠滾輪縮放 K 線 ｜ 按住左鍵左右拖曳 ｜ 點擊下方交易明細可自動定位至該筆進出場 K 棒</span>
+            <span style="color:var(--blue);">藍線: EMA20 ｜ 紫線: EMA50 ｜ 黃虛線: VWAP ｜ 🟢▲開多 🔴▼開空 🎯止盈 🛑止損</span>
+          </div>
+          <canvas id="kline-canvas" height="440"></canvas>
+        </div>
+      </section>
+
+      <!-- 多策略並排績效對比表 -->
+      <section class="card">
+        <div class="card-title">
+          <span>🏆 多策略核心績效指標並排比較 (IBKR 實盤標準扣除佣金與滑價)</span>
+          <span id="elapsed-tag" style="font-size:11px; color:var(--muted);"></span>
+        </div>
+        <div class="table-scroll">
+          <table id="kpi-compare-table">
+            <thead>
+              <tr>
+                <th>策略名稱</th>
+                <th>初始資金</th>
+                <th>最終淨值</th>
+                <th>總淨利 (報酬率)</th>
+                <th>年化 CAGR</th>
+                <th>最大回撤 (MDD)</th>
+                <th>Sharpe / Sortino</th>
+                <th>Calmar</th>
+                <th>勝率 (總筆數)</th>
+                <th>獲利因子 (PF)</th>
+                <th>單筆期望值</th>
+                <th>IB 總佣金成本</th>
+                <th>蒙地卡羅 95% MDD</th>
+              </tr>
+            </thead>
+            <tbody id="kpi-compare-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 疊加淨值曲線 & 水下回撤對比圖 -->
+      <div class="grid-2">
+        <section class="card">
+          <div class="card-title">
+            <span>💹 多策略資金淨值曲線對比 (Equity Curve)</span>
+          </div>
+          <div class="canvas-wrap" style="height: 270px;">
+            <canvas id="equity-canvas" height="270"></canvas>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-title">
+            <span>🌊 水下回撤幅度對比 (Underwater Drawdown %)</span>
+          </div>
+          <div class="canvas-wrap" style="height: 270px;">
+            <canvas id="dd-canvas" height="270"></canvas>
+          </div>
+        </section>
+      </div>
+
+      <!-- 進階分析：規則 1/2/3 歸因 + 蒙地卡羅壓力測試 + 時段表現 -->
+      <div class="grid-2">
+        <section class="card">
+          <div class="card-title">
+            <span>🧠 規則 1/2/3 歸因拆解與交易時段分析</span>
+            <select id="attr-strat-select" onchange="renderAttributionAndHeatmap()" style="width:auto;"></select>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>進場規則 / 交易時段</th>
+                  <th>成交筆數</th>
+                  <th>勝率 (Win%)</th>
+                  <th>累計貢獻淨利</th>
+                </tr>
+              </thead>
+              <tbody id="attr-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-title">
+            <span>🎲 蒙地卡羅 500 次隨機重排壓力測試 & 年度分解</span>
+          </div>
+          <div id="mc-summary-box" style="display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:10px;"></div>
+          <div class="table-scroll" style="max-height: 210px; overflow-y:auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th>年度</th>
+                  <th>期初淨值</th>
+                  <th>期末淨值</th>
+                  <th>年度淨利</th>
+                  <th>年度報酬%</th>
+                  <th>最大回撤%</th>
+                  <th>交易筆數 (勝率)</th>
+                </tr>
+              </thead>
+              <tbody id="annual-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- 月度報酬熱力圖 -->
+      <section class="card">
+        <div class="card-title">
+          <span>🗓️ 月度報酬率熱力圖 (Monthly Return Heatmap %)</span>
+        </div>
+        <div class="table-scroll">
+          <table id="heatmap-table">
+            <thead>
+              <tr>
+                <th>年份</th>
+                <th>1月</th><th>2月</th><th>3月</th><th>4月</th><th>5月</th><th>6月</th>
+                <th>7月</th><th>8月</th><th>9月</th><th>10月</th><th>11月</th><th>12月</th>
+              </tr>
+            </thead>
+            <tbody id="heatmap-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 逐筆交易明細表 (點擊任一列自動跳轉 K 線圖至該筆交易位置) -->
+      <section class="card">
+        <div class="card-title">
+          <span>📋 歷史交易明細列表（點擊任一筆交易，上方 K 線圖將自動定位並放大該筆進出場位置）</span>
+          <span id="trade-list-count" class="badge">0 筆</span>
+        </div>
+        <div class="table-scroll" style="max-height: 360px; overflow-y: auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>策略</th>
+                <th>方向</th>
+                <th>觸發規則</th>
+                <th>口數</th>
+                <th>開倉時間</th>
+                <th>開倉價</th>
+                <th>止損價 (SL)</th>
+                <th>止盈 (TP1/TP2)</th>
+                <th>平倉時間</th>
+                <th>平倉價</th>
+                <th>出場原因</th>
+                <th>淨損益 (已扣佣金)</th>
+                <th>交易後淨值</th>
+              </tr>
+            </thead>
+            <tbody id="trades-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    let currentBacktestData = null;
+    let currentTimeframe = '5m';
+    // K 線視窗索引範圍 [viewStart, viewEnd]
+    let viewStart = 0;
+    let viewEnd = 100;
+    let highlightedTradeId = null;
+    let isDragging = false;
+    let dragStartX = 0;
+    let dragStartViewStart = 0;
+    let dragStartViewEnd = 0;
+    let hoverBarIdx = -1;
+
+    function showToast(msg, isError = false) {
+      const el = document.getElementById('toast');
+      el.style.display = 'block';
+      el.style.borderColor = isError ? 'var(--red)' : 'var(--blue)';
+      el.innerHTML = msg;
+      clearTimeout(window._toastTimer);
+      window._toastTimer = setTimeout(() => { el.style.display = 'none'; }, 5000);
+    }
+
+    function setRangePreset(years, pillEl) {
+      document.querySelectorAll('.preset-pills .pill').forEach(p => p.classList.remove('active'));
+      if (pillEl) pillEl.classList.add('active');
+      const end = new Date('2026-11-14T00:00:00');
+      const days = Math.min(3650, Math.round(years * 365.25));
+      const start = new Date(end.getTime() - days * 86400000);
+      document.getElementById('inp-end').value = end.toISOString().slice(0, 10);
+      document.getElementById('inp-start').value = start.toISOString().slice(0, 10);
+    }
+
+    function onSymbolChange() {
+      const sym = document.getElementById('inp-symbol').value;
+      document.getElementById('inp-margin').value = sym === 'MNQ' ? 2000 : 2400;
+    }
+
+    function onStrategyToggle(cb) {
+      const checked = Array.from(document.querySelectorAll('input[name="strat"]:checked'));
+      if (checked.length > 3) {
+        cb.checked = false;
+        showToast('⚠️ 最多可同時選擇 3 個策略進行並排比較！', true);
+        return;
+      }
+      if (checked.length === 0) {
+        cb.checked = true;
+        showToast('⚠️ 請至少保留 1 個回測策略！', true);
+        return;
+      }
+      document.querySelectorAll('#strategy-list .strat-item').forEach(item => {
+        const input = item.querySelector('input');
+        item.classList.toggle('selected', input.checked);
+      });
+      const count = document.querySelectorAll('input[name="strat"]:checked').length;
+      document.getElementById('strat-count-badge').textContent = `已選 ${count}/3`;
+    }
+
+    function switchTimeframe(tf, btnEl) {
+      currentTimeframe = tf;
+      document.querySelectorAll('#tf-buttons .tf-btn').forEach(b => b.classList.remove('active'));
+      if (btnEl) btnEl.classList.add('active');
+      runBacktest();
+    }
+
+    async function runBacktest() {
+      const strategies = Array.from(document.querySelectorAll('input[name="strat"]:checked')).map(i => i.value);
+      const payload = {
+        strategies,
+        timeframe: currentTimeframe,
+        start_date: document.getElementById('inp-start').value,
+        end_date: document.getElementById('inp-end').value,
+        symbol: document.getElementById('inp-symbol').value,
+        initial_capital: parseFloat(document.getElementById('inp-capital').value || '30000'),
+        commission_per_side: parseFloat(document.getElementById('inp-comm').value || '0.62'),
+        slippage_points: parseFloat(document.getElementById('inp-slip').value || '0.25'),
+        margin_per_contract: parseFloat(document.getElementById('inp-margin').value || '2400'),
+        max_contracts_cap: parseInt(document.getElementById('inp-max-lots').value || '12', 10),
+        risk_multiplier: parseFloat(document.getElementById('inp-risk-mult').value || '1.0')
+      };
+
+      const statusEl = document.getElementById('status-pill');
+      statusEl.textContent = '⏳ 正在計算多策略回測與 K 線標記...';
+      statusEl.style.color = 'var(--amber)';
+
+      try {
+        const resp = await fetch('/api/backtest/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await resp.json();
+        if (data.status !== 'ok') {
+          throw new Error(data.message || '回測執行失敗');
+        }
+        currentBacktestData = data;
+        highlightedTradeId = null;
+
+        const candles = data.candles || [];
+        viewEnd = candles.length - 1;
+        viewStart = Math.max(0, viewEnd - Math.min(140, candles.length - 1));
+
+        populateStrategySelectors(data);
+        renderKPITable(data);
+        drawKlineChart();
+        drawEquityAndDDCharts();
+        renderAttributionAndHeatmap();
+
+        statusEl.textContent = `✅ 回測完成 (${data.elapsed_sec}s)`;
+        statusEl.style.color = 'var(--green)';
+        document.getElementById('elapsed-tag').textContent = `計算耗時: ${data.elapsed_sec} 秒 ｜ K 棒數: ${candles.length}`;
+      } catch (err) {
+        statusEl.textContent = '❌ 回測發生錯誤';
+        statusEl.style.color = 'var(--red)';
+        showToast('❌ ' + err.message, true);
+      }
+    }
+
+    function populateStrategySelectors(data) {
+      const results = data.results || {};
+      const keys = Object.keys(results);
+      const markerSel = document.getElementById('marker-strat-select');
+      const attrSel = document.getElementById('attr-strat-select');
+
+      const prevMarker = markerSel.value;
+      const prevAttr = attrSel.value;
+
+      markerSel.innerHTML = `<option value="ALL">全部已選策略 (${keys.length})</option>` +
+        keys.map(k => `<option value="${k}">${results[k].name}</option>`).join('');
+      if (keys.includes(prevMarker) || prevMarker === 'ALL') markerSel.value = prevMarker;
+      else markerSel.value = keys[0] || 'ALL';
+
+      attrSel.innerHTML = keys.map(k => `<option value="${k}">${results[k].name}</option>`).join('');
+      if (keys.includes(prevAttr)) attrSel.value = prevAttr;
+    }
+
+    function renderKPITable(data) {
+      const tbody = document.getElementById('kpi-compare-body');
+      const results = data.results || {};
+      tbody.innerHTML = Object.values(results).map(r => {
+        const m = r.metrics;
+        const mc = r.monte_carlo || {};
+        const pnlCls = m.net_profit >= 0 ? 'pos' : 'neg';
+        const sign = m.net_profit >= 0 ? '+' : '';
+        return `
+          <tr>
+            <td>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span style="width:10px; height:10px; border-radius:50%; background:${r.color}; display:inline-block;"></span>
+                <strong>${r.name}</strong>
+              </div>
+            </td>
+            <td>$${m.initial_capital.toLocaleString()}</td>
+            <td><strong>$${m.final_equity.toLocaleString()}</strong></td>
+            <td class="${pnlCls}">${sign}$${m.net_profit.toLocaleString()} (${sign}${m.total_return_pct}%)</td>
+            <td class="${m.cagr_pct >= 0 ? 'pos' : 'neg'}">${m.cagr_pct}%</td>
+            <td class="neg">-${m.max_drawdown_pct}% ($${m.max_drawdown_usd.toLocaleString()})</td>
+            <td><strong>${m.sharpe_ratio}</strong> / ${m.sortino_ratio}</td>
+            <td>${m.calmar_ratio}</td>
+            <td>${m.win_rate_pct}% (${m.total_trades} 筆)</td>
+            <td>${m.profit_factor}</td>
+            <td class="${m.expectancy_usd >= 0 ? 'pos' : 'neg'}">$${m.expectancy_usd}</td>
+            <td>$${m.total_commission_usd.toLocaleString()}</td>
+            <td class="neg">-${mc.p95_max_dd_pct || m.max_drawdown_pct}%</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function renderAttributionAndHeatmap() {
+      if (!currentBacktestData) return;
+      const stratId = document.getElementById('attr-strat-select').value;
+      const stratData = currentBacktestData.results[stratId];
+      if (!stratData) return;
+
+      // 1. 規則與時段歸因
+      const attrBody = document.getElementById('attr-table-body');
+      const rules = Object.values(stratData.rule_attribution || {});
+      const sessions = Object.entries(stratData.session_analysis || {});
+      let html = rules.map(r => `
+        <tr>
+          <td><strong>${r.name}</strong></td>
+          <td>${r.count} 筆</td>
+          <td>${r.win_rate}%</td>
+          <td class="${r.net_pnl >= 0 ? 'pos' : 'neg'}">${r.net_pnl >= 0 ? '+' : ''}$${r.net_pnl.toLocaleString()}</td>
+        </tr>
+      `).join('');
+      html += sessions.map(([sName, sObj]) => `
+        <tr>
+          <td style="color:var(--muted);">🕒 ${sName}</td>
+          <td>${sObj.count} 筆</td>
+          <td>${sObj.win_rate}%</td>
+          <td class="${sObj.net_pnl >= 0 ? 'pos' : 'neg'}">${sObj.net_pnl >= 0 ? '+' : ''}$${sObj.net_pnl.toLocaleString()}</td>
+        </tr>
+      `).join('');
+      attrBody.innerHTML = html;
+
+      // 2. 蒙地卡羅與年度表
+      const mc = stratData.monte_carlo || {};
+      document.getElementById('mc-summary-box').innerHTML = `
+        <div style="background:#090d16; border:1px solid var(--border); padding:8px; border-radius:8px;">
+          <div style="font-size:11px; color:var(--muted);">中位數預期回撤 (50%)</div>
+          <div class="neg" style="font-size:15px; margin-top:2px;">-${mc.median_max_dd_pct || 0}%</div>
+        </div>
+        <div style="background:#090d16; border:1px solid var(--border); padding:8px; border-radius:8px;">
+          <div style="font-size:11px; color:var(--muted);">極端 95% 信賴最大回撤</div>
+          <div class="neg" style="font-size:15px; margin-top:2px;">-${mc.p95_max_dd_pct || 0}%</div>
+        </div>
+        <div style="background:#090d16; border:1px solid var(--border); padding:8px; border-radius:8px;">
+          <div style="font-size:11px; color:var(--muted);">破產風險機率 (&lt;40%淨值)</div>
+          <div style="font-size:15px; font-weight:800; color:${(mc.ruin_prob_pct || 0) === 0 ? 'var(--green)' : 'var(--red)'}; margin-top:2px;">${mc.ruin_prob_pct || 0}%</div>
+        </div>
+      `;
+
+      const annBody = document.getElementById('annual-table-body');
+      annBody.innerHTML = (stratData.annual_breakdown || []).map(a => `
+        <tr>
+          <td><strong>${a.year}</strong></td>
+          <td>$${a.start_equity.toLocaleString()}</td>
+          <td>$${a.end_equity.toLocaleString()}</td>
+          <td class="${a.net_pnl >= 0 ? 'pos' : 'neg'}">${a.net_pnl >= 0 ? '+' : ''}$${a.net_pnl.toLocaleString()}</td>
+          <td class="${a.return_pct >= 0 ? 'pos' : 'neg'}">${a.return_pct >= 0 ? '+' : ''}${a.return_pct}%</td>
+          <td class="neg">-${a.max_dd_pct}%</td>
+          <td>${a.trades} 筆 (${a.win_rate}%)</td>
+        </tr>
+      `).join('');
+
+      // 3. 月度報酬熱力圖
+      const hmBody = document.getElementById('heatmap-body');
+      const mRet = stratData.monthly_returns || {};
+      const years = Object.keys(mRet).sort();
+      hmBody.innerHTML = years.map(yr => {
+        let cells = `<td><strong>${yr}</strong></td>`;
+        for (let m = 1; m <= 12; m++) {
+          const val = mRet[yr][m];
+          if (val === undefined) {
+            cells += `<td style="color:#475569;">--</td>`;
+          } else {
+            const bg = val > 0
+              ? `rgba(16, 185, 129, ${Math.min(0.45, Math.abs(val) / 18)})`
+              : (val < 0 ? `rgba(244, 63, 94, ${Math.min(0.45, Math.abs(val) / 18)})` : 'transparent');
+            const cls = val > 0 ? 'pos' : (val < 0 ? 'neg' : '');
+            cells += `<td class="${cls}" style="background:${bg};">${val > 0 ? '+' : ''}${val}%</td>`;
+          }
+        }
+        return `<tr>${cells}</tr>`;
+      }).join('');
+
+      // 4. 交易明細列表
+      const trades = stratData.trades || [];
+      document.getElementById('trade-list-count').textContent = `${stratData.name}：共 ${trades.length} 筆`;
+      const tBody = document.getElementById('trades-table-body');
+      tBody.innerHTML = trades.slice().reverse().map(t => {
+        const isLong = t.direction === 'LONG';
+        const pnlCls = t.pnl >= 0 ? 'pos' : 'neg';
+        return `
+          <tr class="clickable-row" id="trade-row-${t.trade_id}" onclick="focusTradeOnChart('${stratId}', ${t.trade_id})">
+            <td>#${t.trade_id}</td>
+            <td><span class="badge">${t.strategy}</span></td>
+            <td style="color:${isLong ? 'var(--green)' : 'var(--red)'}; font-weight:800;">${isLong ? '🟢 好倉 LONG' : '🔴 淡倉 SHORT'}</td>
+            <td>${t.rule_label}</td>
+            <td><strong>${t.contracts} 口</strong></td>
+            <td>${t.entry_time}</td>
+            <td>${t.entry_price.toFixed(2)}</td>
+            <td style="color:var(--red);">${t.sl_price.toFixed(2)}</td>
+            <td style="color:var(--green);">${t.tp1_price.toFixed(2)} / ${t.tp2_price.toFixed(2)}</td>
+            <td>${t.exit_time}</td>
+            <td>${t.exit_price.toFixed(2)}</td>
+            <td>${t.exit_reason}</td>
+            <td class="${pnlCls}">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}</td>
+            <td>$${t.equity_after.toLocaleString()}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function focusTradeOnChart(stratId, tradeId) {
+      if (!currentBacktestData) return;
+      document.getElementById('marker-strat-select').value = stratId;
+      highlightedTradeId = tradeId;
+
+      document.querySelectorAll('.clickable-row').forEach(r => r.classList.remove('active-trade'));
+      const row = document.getElementById(`trade-row-${tradeId}`);
+      if (row) row.classList.add('active-trade');
+
+      const markers = currentBacktestData.results[stratId]?.chart_markers || [];
+      const m = markers.find(x => x.trade_id === tradeId);
+      const candles = currentBacktestData.candles || [];
+      if (m && candles.length > 0) {
+        const center = Math.floor((m.entry_bar_idx + m.exit_bar_idx) / 2);
+        const halfSpan = Math.max(25, (m.exit_bar_idx - m.entry_bar_idx) + 20);
+        viewStart = Math.max(0, center - halfSpan);
+        viewEnd = Math.min(candles.length - 1, center + halfSpan);
+        drawKlineChart();
+        document.getElementById('kline-canvas').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } else {
+        showToast('ℹ️ 此筆交易發生在較早期區間，可切換為「1小時 / 4小時 / 1日」週期檢視完整跨度');
+      }
+    }
+
+    function resetKlineZoom() {
+      if (!currentBacktestData) return;
+      const candles = currentBacktestData.candles || [];
+      viewEnd = candles.length - 1;
+      viewStart = Math.max(0, viewEnd - Math.min(140, candles.length - 1));
+      highlightedTradeId = null;
+      drawKlineChart();
+    }
+
+    function drawKlineChart() {
+      const canvas = document.getElementById('kline-canvas');
+      if (!canvas || !currentBacktestData) return;
+      const rect = canvas.parentElement.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+
+      const W = rect.width;
+      const H = rect.height;
+      ctx.fillStyle = '#080c14';
+      ctx.fillRect(0, 0, W, H);
+
+      const candles = currentBacktestData.candles || [];
+      if (candles.length === 0) return;
+
+      viewStart = Math.max(0, Math.min(viewStart, candles.length - 5));
+      viewEnd = Math.max(viewStart + 4, Math.min(viewEnd, candles.length - 1));
+      const slice = candles.slice(viewStart, viewEnd + 1);
+      const count = slice.length;
+
+      const padL = 14, padR = 68, padT = 42, padB = 28;
+      const chartW = W - padL - padR;
+      const chartH = H - padT - padB;
+      const priceH = chartH * 0.78;
+      const volH = chartH * 0.18;
+
+      let minP = Infinity, maxP = -Infinity, maxV = 1;
+      for (const c of slice) {
+        if (c.low < minP) minP = c.low;
+        if (c.high > maxP) maxP = c.high;
+        if (c.volume > maxV) maxV = c.volume;
+      }
+      const padP = Math.max(1.0, (maxP - minP) * 0.08);
+      minP -= padP;
+      maxP += padP;
+
+      const xOf = (idxInSlice) => padL + ((idxInSlice + 0.5) / count) * chartW;
+      const yOf = (p) => padT + (1.0 - (p - minP) / Math.max(0.01, maxP - minP)) * priceH;
+
+      // 背景水平價格格線
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.1)';
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '11px -apple-system, sans-serif';
+      for (let g = 0; g <= 5; g++) {
+        const py = padT + (g / 5) * priceH;
+        const pv = maxP - (g / 5) * (maxP - minP);
+        ctx.beginPath();
+        ctx.moveTo(padL, py);
+        ctx.lineTo(W - padR, py);
+        ctx.stroke();
+        ctx.fillText(pv.toFixed(2), W - padR + 6, py + 4);
+      }
+
+      // 繪製 EMA20, EMA50, VWAP
+      const drawOverlayLine = (key, color, dashed = false) => {
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.4;
+        if (dashed) ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        slice.forEach((c, idx) => {
+          const x = xOf(idx);
+          const y = yOf(c[key] || c.close);
+          if (idx === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        ctx.restore();
+      };
+      drawOverlayLine('ema20', '#38bdf8', false);
+      drawOverlayLine('ema50', '#a855f7', false);
+      drawOverlayLine('vwap', '#f59e0b', true);
+
+      // 繪製 K 棒與成交量
+      const barW = Math.max(2, Math.min(18, (chartW / count) * 0.72));
+      slice.forEach((c, idx) => {
+        const x = xOf(idx);
+        const isUp = c.close >= c.open;
+        const color = isUp ? '#10b981' : '#f43f5e';
+
+        // 成交量柱
+        const vh = (c.volume / maxV) * volH;
+        ctx.fillStyle = isUp ? 'rgba(16, 185, 129, 0.25)' : 'rgba(244, 63, 94, 0.25)';
+        ctx.fillRect(x - barW / 2, H - padB - vh, barW, vh);
+
+        // 上下影線
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(x, yOf(c.high));
+        ctx.lineTo(x, yOf(c.low));
+        ctx.stroke();
+
+        // K 棒實體
+        const yOpen = yOf(c.open);
+        const yClose = yOf(c.close);
+        const topY = Math.min(yOpen, yClose);
+        const bodyH = Math.max(1.5, Math.abs(yClose - yOpen));
+        ctx.fillStyle = color;
+        ctx.fillRect(x - barW / 2, topY, barW, bodyH);
+      });
+
+      // 時間軸刻度
+      ctx.fillStyle = '#94a3b8';
+      const stepT = Math.max(1, Math.floor(count / 6));
+      for (let i = 0; i < count; i += stepT) {
+        const x = xOf(i);
+        ctx.fillText(slice[i].datetime.slice(5), x - 28, H - 8);
+      }
+
+      // 繪製開倉 / 平倉標記與進出場虛線連接
+      const selStrat = document.getElementById('marker-strat-select').value;
+      const results = currentBacktestData.results || {};
+      const stratKeys = selStrat === 'ALL' ? Object.keys(results) : [selStrat];
+
+      stratKeys.forEach(sKey => {
+        const sObj = results[sKey];
+        if (!sObj) return;
+        const markers = sObj.chart_markers || [];
+        markers.forEach(m => {
+          if (m.exit_bar_idx < viewStart || m.entry_bar_idx > viewEnd) return;
+          const eSliceIdx = m.entry_bar_idx - viewStart;
+          const xSliceIdx = m.exit_bar_idx - viewStart;
+
+          const ex = xOf(Math.max(0, Math.min(count - 1, eSliceIdx)));
+          const ey = yOf(m.entry_price);
+          const xx = xOf(Math.max(0, Math.min(count - 1, xSliceIdx)));
+          const xy = yOf(m.exit_price);
+          const isHighlight = (highlightedTradeId === m.trade_id);
+
+          // 進出場連接線
+          ctx.save();
+          ctx.strokeStyle = m.pnl >= 0 ? 'rgba(16, 185, 129, 0.75)' : 'rgba(244, 63, 94, 0.75)';
+          ctx.lineWidth = isHighlight ? 2.5 : 1.3;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.moveTo(ex, ey);
+          ctx.lineTo(xx, xy);
+          ctx.stroke();
+          ctx.restore();
+
+          // 開倉標記 (三角形 + 價格標籤)
+          if (eSliceIdx >= 0 && eSliceIdx < count) {
+            const isLong = m.direction === 'LONG';
+            const cBar = slice[eSliceIdx];
+            const my = isLong ? yOf(cBar.low) + 14 : yOf(cBar.high) - 14;
+            ctx.fillStyle = isLong ? '#10b981' : '#f43f5e';
+            ctx.beginPath();
+            if (isLong) {
+              ctx.moveTo(ex, my - 8);
+              ctx.lineTo(ex - 6, my + 4);
+              ctx.lineTo(ex + 6, my + 4);
+            } else {
+              ctx.moveTo(ex, my + 8);
+              ctx.lineTo(ex - 6, my - 4);
+              ctx.lineTo(ex + 6, my - 4);
+            }
+            ctx.closePath();
+            ctx.fill();
+
+            if (count <= 160 || isHighlight) {
+              ctx.font = 'bold 10px -apple-system, sans-serif';
+              ctx.fillText(`${isLong ? '買' : '賣'}${m.contracts}口`, ex - 16, isLong ? my + 15 : my - 8);
+            }
+          }
+
+          // 平倉標記 (圓點 + 損益標籤)
+          if (xSliceIdx >= 0 && xSliceIdx < count) {
+            ctx.fillStyle = m.pnl >= 0 ? '#38bdf8' : '#fb7185';
+            ctx.beginPath();
+            ctx.arc(xx, xy, isHighlight ? 6 : 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#080c14';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            if (count <= 120 || isHighlight) {
+              ctx.font = 'bold 10px -apple-system, sans-serif';
+              const pnlTxt = `${m.pnl >= 0 ? '+' : ''}$${Math.round(m.pnl)}`;
+              ctx.fillStyle = m.pnl >= 0 ? '#34d399' : '#fda4af';
+              ctx.fillText(pnlTxt, xx - 14, xy - 8);
+            }
+          }
+        });
+      });
+
+      // 滑鼠十字準線與懸停 K 棒資訊
+      if (hoverBarIdx >= 0 && hoverBarIdx < count) {
+        const hc = slice[hoverBarIdx];
+        const hx = xOf(hoverBarIdx);
+        ctx.save();
+        ctx.strokeStyle = 'rgba(248, 250, 252, 0.3)';
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(hx, padT);
+        ctx.lineTo(hx, H - padB);
+        ctx.stroke();
+        ctx.restore();
+
+        const hud = document.getElementById('kline-hud');
+        hud.innerHTML = `
+          <span><strong>${hc.datetime}</strong> ｜ 開: ${hc.open.toFixed(2)} 高: ${hc.high.toFixed(2)} 低: ${hc.low.toFixed(2)} 收: <strong>${hc.close.toFixed(2)}</strong> ｜ 量: ${hc.volume.toLocaleString()}</span>
+          <span style="color:var(--blue);">EMA20: ${hc.ema20.toFixed(2)} ｜ EMA50: ${hc.ema50.toFixed(2)} ｜ VWAP: ${hc.vwap.toFixed(2)}</span>
+        `;
+      }
+    }
+
+    function drawEquityAndDDCharts() {
+      if (!currentBacktestData) return;
+      const results = Object.values(currentBacktestData.results || {});
+      if (results.length === 0) return;
+
+      // 1. 淨值曲線
+      const eqCanvas = document.getElementById('equity-canvas');
+      const eqRect = eqCanvas.parentElement.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      eqCanvas.width = eqRect.width * dpr;
+      eqCanvas.height = eqRect.height * dpr;
+      const ctx1 = eqCanvas.getContext('2d');
+      ctx1.scale(dpr, dpr);
+      const W = eqRect.width, H = eqRect.height;
+      ctx1.fillStyle = '#080c14';
+      ctx1.fillRect(0, 0, W, H);
+
+      let minEq = Infinity, maxEq = -Infinity;
+      results.forEach(r => {
+        (r.equity_series || []).forEach(p => {
+          if (p.equity < minEq) minEq = p.equity;
+          if (p.equity > maxEq) maxEq = p.equity;
+        });
+      });
+      const padL = 14, padR = 72, padT = 24, padB = 24;
+      const cW = W - padL - padR, cH = H - padT - padB;
+
+      ctx1.strokeStyle = 'rgba(148,163,184,0.12)';
+      ctx1.fillStyle = '#94a3b8';
+      ctx1.font = '11px -apple-system, sans-serif';
+      for (let g = 0; g <= 4; g++) {
+        const y = padT + (g / 4) * cH;
+        const v = maxEq - (g / 4) * (maxEq - minEq);
+        ctx1.beginPath(); ctx1.moveTo(padL, y); ctx1.lineTo(W - padR, y); ctx1.stroke();
+        ctx1.fillText('$' + Math.round(v).toLocaleString(), W - padR + 6, y + 4);
+      }
+
+      results.forEach((r, sIdx) => {
+        const pts = r.equity_series || [];
+        if (pts.length < 2) return;
+        ctx1.strokeStyle = r.color;
+        ctx1.lineWidth = 2.0;
+        ctx1.beginPath();
+        pts.forEach((p, idx) => {
+          const x = padL + (idx / (pts.length - 1)) * cW;
+          const y = padT + (1.0 - (p.equity - minEq) / Math.max(1, maxEq - minEq)) * cH;
+          if (idx === 0) ctx1.moveTo(x, y); else ctx1.lineTo(x, y);
+        });
+        ctx1.stroke();
+
+        ctx1.fillStyle = r.color;
+        ctx1.fillText(`● ${r.name}`, padL + 8 + sIdx * 210, 16);
+      });
+
+      // 2. 水下回撤圖
+      const ddCanvas = document.getElementById('dd-canvas');
+      const ddRect = ddCanvas.parentElement.getBoundingClientRect();
+      ddCanvas.width = ddRect.width * dpr;
+      ddCanvas.height = ddRect.height * dpr;
+      const ctx2 = ddCanvas.getContext('2d');
+      ctx2.scale(dpr, dpr);
+      ctx2.fillStyle = '#080c14';
+      ctx2.fillRect(0, 0, W, H);
+
+      let minDD = -5.0;
+      results.forEach(r => {
+        (r.equity_series || []).forEach(p => {
+          if (p.dd_pct < minDD) minDD = p.dd_pct;
+        });
+      });
+
+      ctx2.strokeStyle = 'rgba(148,163,184,0.12)';
+      ctx2.fillStyle = '#94a3b8';
+      ctx2.font = '11px -apple-system, sans-serif';
+      for (let g = 0; g <= 4; g++) {
+        const y = padT + (g / 4) * cH;
+        const v = (g / 4) * minDD;
+        ctx2.beginPath(); ctx2.moveTo(padL, y); ctx2.lineTo(W - padR, y); ctx2.stroke();
+        ctx2.fillText(v.toFixed(1) + '%', W - padR + 6, y + 4);
+      }
+
+      results.forEach(r => {
+        const pts = r.equity_series || [];
+        if (pts.length < 2) return;
+        ctx2.strokeStyle = r.color;
+        ctx2.lineWidth = 1.8;
+        ctx2.beginPath();
+        pts.forEach((p, idx) => {
+          const x = padL + (idx / (pts.length - 1)) * cW;
+          const y = padT + (p.dd_pct / Math.min(-0.1, minDD)) * cH;
+          if (idx === 0) ctx2.moveTo(x, y); else ctx2.lineTo(x, y);
+        });
+        ctx2.stroke();
+      });
+    }
+
+    // K 線圖滑鼠互動 (滾輪縮放、按住拖曳、十字準線)
+    (function initCanvasInteractions() {
+      const canvas = document.getElementById('kline-canvas');
+      canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        if (!currentBacktestData) return;
+        const candles = currentBacktestData.candles || [];
+        const span = viewEnd - viewStart;
+        const delta = e.deltaY > 0 ? Math.ceil(span * 0.15) : -Math.ceil(span * 0.15);
+        const newSpan = Math.max(15, Math.min(candles.length - 1, span + delta));
+        const center = Math.floor((viewStart + viewEnd) / 2);
+        viewStart = Math.max(0, center - Math.floor(newSpan / 2));
+        viewEnd = Math.min(candles.length - 1, viewStart + newSpan);
+        drawKlineChart();
+      }, { passive: false });
+
+      canvas.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        dragStartX = e.clientX;
+        dragStartViewStart = viewStart;
+        dragStartViewEnd = viewEnd;
+      });
+
+      window.addEventListener('mouseup', () => { isDragging = false; });
+
+      canvas.addEventListener('mousemove', (e) => {
+        if (!currentBacktestData) return;
+        const candles = currentBacktestData.candles || [];
+        const rect = canvas.getBoundingClientRect();
+        const span = viewEnd - viewStart + 1;
+
+        if (isDragging) {
+          const dx = e.clientX - dragStartX;
+          const barShift = Math.round((-dx / Math.max(100, rect.width - 82)) * span);
+          const wLen = dragStartViewEnd - dragStartViewStart;
+          viewStart = Math.max(0, Math.min(candles.length - 1 - wLen, dragStartViewStart + barShift));
+          viewEnd = viewStart + wLen;
+          drawKlineChart();
+          return;
+        }
+
+        const relX = e.clientX - rect.left - 14;
+        const chartW = rect.width - 82;
+        if (relX >= 0 && relX <= chartW) {
+          hoverBarIdx = Math.max(0, Math.min(span - 1, Math.floor((relX / chartW) * span)));
+          drawKlineChart();
+        }
+      });
+
+      window.addEventListener('resize', () => {
+        drawKlineChart();
+        drawEquityAndDDCharts();
+      });
+    })();
+
+    async function pushReportToGDrive() {
+      try {
+        const resp = await fetch('/api/backtest/export-gdrive', { method: 'POST' });
+        const data = await resp.json();
+        if (data.status === 'ok') {
+          const linkHtml = data.gdrive_folder_url
+            ? ` <a href="${data.gdrive_folder_url}" target="_blank" style="text-decoration:underline;">開啟 Google Drive ↗</a>`
+            : ` <a href="${data.html_url}" target="_blank" style="text-decoration:underline;">開啟報告 ↗</a>`;
+          showToast('✅ ' + data.message + linkHtml);
+        } else {
+          showToast('⚠️ ' + (data.message || '匯出失敗'), true);
+        }
+      } catch (e) {
+        showToast('❌ 匯出失敗: ' + e.message, true);
+      }
+    }
+
+    async function exportHTMLReport() {
+      const resp = await fetch('/api/backtest/export-gdrive', { method: 'POST' });
+      const data = await resp.json();
+      if (data.status === 'ok' && data.html_url) {
+        window.open(data.html_url, '_blank');
+      } else {
+        showToast('⚠️ 請先執行回測再匯出報告', true);
+      }
+    }
+
+    async function exportCSVTrades() {
+      const resp = await fetch('/api/backtest/export-gdrive', { method: 'POST' });
+      const data = await resp.json();
+      if (data.status === 'ok' && data.csv_url) {
+        window.open(data.csv_url, '_blank');
+      } else {
+        showToast('⚠️ 請先執行回測再匯出 CSV', true);
+      }
+    }
+
+    // 頁面載入後自動執行預設 3 策略回測
+    window.addEventListener('DOMContentLoaded', () => {
+      runBacktest();
+    });
+  </script>
+</body>
+</html>
