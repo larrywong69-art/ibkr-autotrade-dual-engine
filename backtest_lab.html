@@ -331,8 +331,39 @@
           <label class="form-label" for="inp-data-source">歷史行情數據來源</label>
           <select id="inp-data-source">
             <option value="REAL_YF" selected>🟢 真實市場數據 (Yahoo Finance ES=F / NQ=F)</option>
+            <option value="IBKR_CSV">🔵 IBKR 本地快取 CSV (從本機 Gateway 下載)</option>
             <option value="SYNTHETIC">🟡 高擬真合成數據 (10年完整5分K壓力測試)</option>
           </select>
+        </div>
+
+        <!-- IBKR 本地歷史下載快取區 -->
+        <div style="background:#090d16; border:1px solid var(--border); border-radius:8px; padding:9px; margin-bottom:10px;">
+          <div style="font-size:11px; font-weight:700; color:var(--blue); margin-bottom:6px;">⬇️ IBKR 本地歷史下載並快取 CSV</div>
+          <div class="form-grid" style="margin-bottom:6px;">
+            <div>
+              <label class="form-label" for="inp-ib-dur">下載長度</label>
+              <select id="inp-ib-dur">
+                <option value="1 W">1 週 (1m/5m)</option>
+                <option value="1 M" selected>1 個月 (5m/15m)</option>
+                <option value="3 M">3 個月 (5m/15m)</option>
+                <option value="1 Y">1 年 (1H/1D)</option>
+                <option value="2 Y">2 年 (1H/1D)</option>
+                <option value="5 Y">5 年 (1D)</option>
+                <option value="10 Y">10 年 (1D)</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label" for="inp-ib-port">本機端口</label>
+              <select id="inp-ib-port">
+                <option value="4002" selected>4002 (IB Gateway)</option>
+                <option value="7497">7497 (TWS)</option>
+              </select>
+            </div>
+          </div>
+          <button style="width:100%; justify-content:center;" onclick="downloadIBKRHistory()">
+            📥 連線本機 IBKR 下載並快取
+          </button>
+          <div id="ibkr-cache-list" style="margin-top:6px; font-size:11px; color:var(--muted);"></div>
         </div>
         <div class="form-grid">
           <div class="form-group">
@@ -1366,8 +1397,51 @@
       }
     }
 
+    async function refreshIBKRCacheList() {
+      try {
+        const resp = await fetch('/api/backtest/ibkr-cache-list');
+        const data = await resp.json();
+        const box = document.getElementById('ibkr-cache-list');
+        if (!box) return;
+        const items = data.items || [];
+        if (items.length === 0) {
+          box.innerHTML = '尚無本地快取 CSV（下載後自動存於 data/ibkr_cache/）';
+          return;
+        }
+        box.innerHTML = items.map(it =>
+          `<div style="margin-top:3px; color:#cbd5e1;">• <strong>${it.filename}</strong> (${it.bars.toLocaleString()} 根 · ${it.start.slice(0,10)} ~ ${it.end.slice(0,10)})</div>`
+        ).join('');
+      } catch (e) {}
+    }
+
+    async function downloadIBKRHistory() {
+      const sym = document.getElementById('inp-symbol').value;
+      const dur = document.getElementById('inp-ib-dur').value;
+      const port = parseInt(document.getElementById('inp-ib-port').value, 10);
+      showToast(`⏳ 正在連線本機 IBKR (Port ${port}) 下載 ${sym} (${currentTimeframe}, ${dur})...`);
+      try {
+        const resp = await fetch('/api/backtest/ibkr-download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol: sym, timeframe: currentTimeframe, duration: dur, port })
+        });
+        const data = await resp.json();
+        if (data.status === 'ok') {
+          showToast('✅ ' + data.message);
+          document.getElementById('inp-data-source').value = 'IBKR_CSV';
+          await refreshIBKRCacheList();
+          runBacktest();
+        } else {
+          showToast('⚠️ ' + (data.message || '下載失敗'), true);
+        }
+      } catch (e) {
+        showToast('❌ 下載異常: ' + e.message, true);
+      }
+    }
+
     // 頁面載入後自動執行預設 3 策略回測
     window.addEventListener('DOMContentLoaded', () => {
+      refreshIBKRCacheList();
       runBacktest();
     });
   </script>

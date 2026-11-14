@@ -932,7 +932,24 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
     data_source_label = "🟡 高擬真合成數據 (Synthetic CME Globex)"
     data_note = ""
 
-    if data_source == "REAL_YF":
+    if data_source == "IBKR_CSV":
+        from ibkr_history_downloader import get_cache_path
+        cache_path = get_cache_path(symbol, timeframe)
+        if os.path.exists(cache_path):
+            df_c = pd.read_csv(cache_path, parse_dates=["datetime"], index_col="datetime").sort_index()
+            s_dt = pd.to_datetime(start_date)
+            e_dt = pd.to_datetime(end_date) + timedelta(days=1)
+            df_sub = df_c[(df_c.index >= s_dt) & (df_c.index <= e_dt)].copy()
+            if len(df_sub) < 35:
+                df_sub = df_c.copy()
+                data_note = f"選定日期區間內僅有較少快取筆數，已改用全部 {len(df_sub)} 根 IBKR 本地快取 K 棒"
+            df_base = _add_indicators(df_sub)
+            data_source_label = f"🔵 IBKR 本地快取 CSV ({symbol} · {timeframe.upper()} · {len(df_base)} 根真實K棒)"
+        else:
+            df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
+            data_source_label = "🟡 高擬真合成數據 (尚未下載該週期 IBKR 本地快取)"
+            data_note = f"尚未找到 {symbol}_{timeframe}.csv，請先點擊左側「從本機 IBKR 下載並快取 CSV」按鈕"
+    elif data_source == "REAL_YF":
         try:
             df_base, data_source_label, data_note = fetch_real_yahoo_data(
                 symbol=symbol, start_date=start_date, end_date=end_date, timeframe=timeframe
@@ -946,8 +963,8 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
 
-    # 若為真實 1D / 1H 數據，直接對齊目標週期或保持原樣避免無意義降採樣
-    if data_source == "REAL_YF" and "真實" in data_source_label:
+    # 若為真實數據或 IBKR 本地快取，直接對齊目標週期避免重複降採樣
+    if (data_source == "REAL_YF" and "真實" in data_source_label) or (data_source == "IBKR_CSV" and "IBKR" in data_source_label):
         candles = []
         df_show = df_base.iloc[-1200:] if len(df_base) > 1200 else df_base
         for ts, row in df_show.iterrows():

@@ -317,6 +317,20 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             return
 
+        if parsed.path == "/api/backtest/ibkr-cache-list":
+            try:
+                from ibkr_history_downloader import list_cached_csvs
+                resp = {"status": "ok", "items": list_cached_csvs()}
+                self.send_response(200)
+            except Exception as e:
+                resp = {"status": "error", "message": str(e), "items": []}
+                self.send_response(500)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+            return
+
         if parsed.path == "/manifest.json":
             manifest_file = os.path.join(CURRENT_DIR, "manifest.json")
             if os.path.exists(manifest_file):
@@ -615,6 +629,34 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                 self.send_response(200)
             except Exception as e:
                 resp = {"status": "error", "message": f"報告匯出異常: {e}"}
+                self.send_response(500)
+
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+            return
+
+        if parsed.path == "/api/backtest/ibkr-download":
+            content_length = int(self.headers.get("Content-Length", 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                payload = json.loads(post_data.decode("utf-8"))
+            except Exception:
+                payload = {}
+
+            try:
+                from ibkr_history_downloader import download_ibkr_history_to_csv
+                port_val = payload.get("port")
+                resp = download_ibkr_history_to_csv(
+                    symbol=str(payload.get("symbol", "MES")),
+                    timeframe=str(payload.get("timeframe", "5m")),
+                    duration=str(payload.get("duration", "1 M")),
+                    port=int(port_val) if port_val else None
+                )
+                self.send_response(200)
+            except Exception as e:
+                resp = {"status": "error", "message": f"IBKR 下載異常: {e}"}
                 self.send_response(500)
 
             self.send_header("Content-Type", "application/json; charset=utf-8")
