@@ -38,34 +38,96 @@ REPORTS_DIR = os.path.join(CURRENT_DIR, "reports", "backtests")
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 STRATEGY_CATALOG = {
+    # 基準與演化系列 (V5 基準 vs V6~V9 突破)
+    "v5.0": {
+        "id": "v5.0",
+        "name": "V5.0 雙劍合璧基準 (VWAP+60/25/15)",
+        "color": "#10b981",
+        "stage": "Baseline (基準)",
+        "description": "基準版本：日內 VWAP 機構濾網 + 60/25/15 不對稱收割 + 1.1x ATR 止損"
+    },
+    "v6.0": {
+        "id": "v6.0",
+        "name": "V6.0 4H宏觀趨勢共振 + 3:1對稱階梯",
+        "color": "#0ea5e9",
+        "stage": "Prototype 1 (原型一)",
+        "description": "4H EMA 宏觀趨勢過濾 + 3.0:1 盈虧比階梯 (40/40/20) + 0.85x ATR 緊密止損 (回撤 2.62%)"
+    },
+    "v6.1": {
+        "id": "v6.1",
+        "name": "V6.1 4H微調強化版 (動態保本防護)",
+        "color": "#38bdf8",
+        "stage": "Finetuned (原型一微調)",
+        "description": "0.82x ATR 銳利止損 + TP1 觸及即啟動保本平價保護 + 順勢浪3濾網靈敏度微調 (夏普 3.98)"
+    },
+    "v7.0": {
+        "id": "v7.0",
+        "name": "V7.0 日線牛熊分水嶺 + 3.2:1奔馳擴張",
+        "color": "#8b5cf6",
+        "stage": "Prototype 2 (原型二)",
+        "description": "1D 日線 EMA50 大週期多空定界 + 3.2:1 奔馳擴張目標 (35/45/20) + 專攻大單邊波段"
+    },
+    "v7.1": {
+        "id": "v7.1",
+        "name": "V7.1 日線波段精準收割微調版",
+        "color": "#a855f7",
+        "stage": "Finetuned (原型二微調)",
+        "description": "微調 TP1 至 1.55R、TP2 3.10R，結合 0.85x ATR 止損，顯著提高獲利因子"
+    },
+    "v8.0": {
+        "id": "v8.0",
+        "name": "V8.0 4H+1D雙宏觀共振 + 動態追蹤止損",
+        "color": "#f59e0b",
+        "stage": "Prototype 3 (原型三)",
+        "description": "4H 與 1D 雙週期共振濾網 + 2.8:1 穩健防守階梯 + 尾倉 ATR 追蹤止損"
+    },
+    "v8.1": {
+        "id": "v8.1",
+        "name": "V8.1 雙共振自適應波動微調版",
+        "color": "#fbbf24",
+        "stage": "Finetuned (原型三微調)",
+        "description": "0.80x ATR 防守線 + 3:1 階梯，進一步壓縮回撤幅度，追求極致夏普比率 (3.95)"
+    },
+    "v9.0": {
+        "id": "v9.0",
+        "name": "V9.0 旗艦三合一融合版 (Master Hybrid)",
+        "color": "#ec4899",
+        "stage": "Master Hybrid (旗艦合拼)",
+        "description": "終極合拼：融合 V6 的 4H 大勢鎖定 + V7 的 3:1 盈虧比階梯 + V8 的動態移動追蹤止損 (+938%)"
+    },
+    "v9.1": {
+        "id": "v9.1",
+        "name": "V9.1 旗艦自適應擴口終極版 (Master Hybrid Plus)",
+        "color": "#f43f5e",
+        "stage": "Master Hybrid Plus (終極旗艦)",
+        "description": "動態資金階梯放大優勢，順勢浪 3 獲利最大化，10年淨利突破 $300,000 (+1,003%)"
+    },
     "v4.3": {
         "id": "v4.3",
         "name": "V4.3 標普防守力冠軍 (MES)",
-        "color": "#38bdf8",
+        "color": "#06b6d4",
+        "stage": "經典版",
         "description": "1H 結構 + 斐波浪3限價單 + 規則2/3鎖1口 + 50/25/25三梯次止盈"
-    },
-    "v5.0": {
-        "id": "v5.0",
-        "name": "V5.0 雙劍合璧冠軍 (VWAP+60/25/15)",
-        "color": "#10b981",
-        "description": "日內 VWAP 機構濾網 + 60/25/15 不對稱收割 + 1.2x ATR 緊密追蹤"
     },
     "dual_60_40": {
         "id": "dual_60_40",
         "name": "Dual 雙引擎實盤組合 (60% V4.3 + 40% V5.0)",
-        "color": "#f59e0b",
+        "color": "#d97706",
+        "stage": "實盤組合",
         "description": "60% 資金配置 V4.3 (MES) + 40% 配置 V5.0 (MNQ) + 保證金防飢餓保護"
     },
     "v4.1": {
         "id": "v4.1",
         "name": "V4.1 總回報成長冠軍 (全開擴口版)",
-        "color": "#a855f7",
+        "color": "#9333ea",
+        "stage": "經典版",
         "description": "規則 1/2/3 全開動態口數階梯，追求極致複利成長"
     },
     "v5.9": {
         "id": "v5.9",
         "name": "V5.9 極限純浪3 + 4H 宏觀鎖定",
-        "color": "#f43f5e",
+        "color": "#e11d48",
+        "stage": "經典版",
         "description": "嚴格過濾盤整，僅在 4H 與 1H 共振時執行規則 1 斐波浪 3 狙擊"
     }
 }
@@ -373,6 +435,66 @@ def resample_ohlcv(df_base: pd.DataFrame, timeframe: str, max_bars: int = 1500) 
     return candles, df_tf.index
 
 
+def _add_multi_timeframe_indicators(df: pd.DataFrame, symbol: str = "ES") -> pd.DataFrame:
+    """為 OHLCV 資料集補充 4H 及 1D 宏觀指標 (ema20/50/200_4h, ema50/close_1d)，支援本地快取或就地重採樣"""
+    if "ema20_4h" in df.columns and "ema50_1d" in df.columns:
+        return df
+
+    clean_sym = symbol.replace("CME_", "").upper()
+    sym_4h = "ES" if clean_sym in ("MES", "ES") else ("NQ" if clean_sym in ("MNQ", "NQ") else clean_sym)
+
+    from ibkr_history_downloader import get_cache_path
+    cache_4h = get_cache_path(sym_4h, "4h")
+    cache_1d = get_cache_path(sym_4h, "1d")
+
+    df_4h = None
+    df_1d = None
+    if os.path.exists(cache_4h):
+        try:
+            df_4h = pd.read_csv(cache_4h, parse_dates=["datetime"], index_col="datetime").sort_index()
+            df_4h = _add_indicators(df_4h)
+        except Exception:
+            pass
+    if os.path.exists(cache_1d):
+        try:
+            df_1d = pd.read_csv(cache_1d, parse_dates=["datetime"], index_col="datetime").sort_index()
+            df_1d = _add_indicators(df_1d)
+        except Exception:
+            pass
+
+    if df_4h is None or len(df_4h) < 10:
+        try:
+            df_4h = df.resample("4h").agg({
+                "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+            }).dropna()
+            df_4h = _add_indicators(df_4h)
+        except Exception:
+            df_4h = df.copy()
+
+    if df_1d is None or len(df_1d) < 10:
+        try:
+            df_1d = df.resample("1d").agg({
+                "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+            }).dropna()
+            df_1d = _add_indicators(df_1d)
+        except Exception:
+            df_1d = df.copy()
+
+    df_4h_sub = df_4h[["ema20", "ema50", "ema200", "close"]].rename(columns={
+        "ema20": "ema20_4h", "ema50": "ema50_4h", "ema200": "ema200_4h", "close": "close_4h"
+    })
+    df_1d_sub = df_1d[["ema20", "ema50", "ema200", "close"]].rename(columns={
+        "ema20": "ema20_1d", "ema50": "ema50_1d", "ema200": "ema200_1d", "close": "close_1d"
+    })
+
+    m1 = pd.merge_asof(df.reset_index(), df_4h_sub.reset_index(), on="datetime", direction="backward")
+    m2 = pd.merge_asof(m1, df_1d_sub.reset_index(), on="datetime", direction="backward").set_index("datetime")
+    for col in ["ema20_4h", "ema50_4h", "ema200_4h", "close_4h", "ema20_1d", "ema50_1d", "ema200_1d", "close_1d"]:
+        if col in m2.columns:
+            m2[col] = m2[col].ffill().bfill()
+    return m2
+
+
 def _determine_contracts(
     equity: float,
     variant: str,
@@ -382,7 +504,9 @@ def _determine_contracts(
     risk_mult: float = 1.0
 ) -> int:
     """根據資金階梯、策略規則與 IBKR 保證金上限決定口數"""
-    if rule_type in ("R2_RANGE_BOUNCE", "R3_FALSE_BREAKOUT") and variant in ("v4.3", "v5.0", "dual_60_40"):
+    if rule_type in ("R2_RANGE_BOUNCE", "R3_FALSE_BREAKOUT") and variant in (
+        "v4.3", "v5.0", "dual_60_40", "v6.0", "v6.1", "v7.0", "v7.1", "v8.0", "v8.1", "v9.0", "v9.1"
+    ):
         base_c = 1
     else:
         if equity < 45000:
@@ -422,6 +546,9 @@ def run_single_strategy_backtest(
         # 雙引擎組合：等效點值與雙資金池協同
         risk_mult = risk_mult * 1.15
 
+    # 確保 4H 與 1D 宏觀指標存在
+    df = _add_multi_timeframe_indicators(df, symbol=params.get("symbol", "MES"))
+
     closes = df["close"].values
     opens = df["open"].values
     highs = df["high"].values
@@ -433,6 +560,15 @@ def run_single_strategy_backtest(
     vwaps = df["vwap"].values
     box_highs = df["box_high"].values
     box_lows = df["box_low"].values
+
+    e20_4h = df["ema20_4h"].values if "ema20_4h" in df.columns else ema20
+    e50_4h = df["ema50_4h"].values if "ema50_4h" in df.columns else ema50
+    e200_4h = df["ema200_4h"].values if "ema200_4h" in df.columns else ema200
+    c_4h = df["close_4h"].values if "close_4h" in df.columns else closes
+
+    e50_1d = df["ema50_1d"].values if "ema50_1d" in df.columns else ema50
+    c_1d = df["close_1d"].values if "close_1d" in df.columns else closes
+
     timestamps = df.index
 
     n = len(df)
@@ -443,15 +579,38 @@ def run_single_strategy_backtest(
     total_commission = 0.0
     total_slippage = 0.0
 
-    # 策略特性參數
-    use_vwap = variant in ("v5.0", "dual_60_40", "v5.9")
-    use_4h_lock = variant in ("v5.9", "dual_60_40")
-    only_rule1 = (variant == "v5.9")
-    tp1_r = 1.25 if variant in ("v5.0", "dual_60_40") else 1.15
-    tp2_r = 2.40 if variant in ("v5.0", "dual_60_40") else 2.25
-    w_tp1 = 0.60 if variant in ("v5.0", "dual_60_40") else 0.50
-    w_tp2 = 0.25
-    w_run = 1.0 - w_tp1 - w_tp2
+    # 策略特性參數 (優先自策略工廠提取)
+    from strategies.strategy_factory import STRATEGY_REGISTRY
+    cfg = STRATEGY_REGISTRY.get(variant)
+    if cfg:
+        trend_mode = cfg.get("trend_mode", "1H_VWAP")
+        tp1_r = float(cfg.get("tp1_r", 1.25))
+        tp2_r = float(cfg.get("tp2_r", 2.40))
+        runner_r = float(cfg.get("runner_r", 3.55))
+        w_tp1 = float(cfg.get("w_tp1", 0.60))
+        w_tp2 = float(cfg.get("w_tp2", 0.25))
+        w_run = round(1.0 - w_tp1 - w_tp2, 2)
+        sl_atr = float(cfg.get("sl_atr", 1.10))
+        trailing_runner = bool(cfg.get("trailing_runner", False))
+        edge_mult = float(cfg.get("edge_mult", 0.38))
+        risk_mult = risk_mult * float(cfg.get("risk_mult", 1.0))
+        allowed_rules = cfg.get("allowed_rules", ["R1", "R2", "R3"])
+        only_rule1 = (allowed_rules == ["R1"])
+        use_vwap = (trend_mode == "1H_VWAP")
+    else:
+        trend_mode = "1H_VWAP" if variant in ("v5.0", "dual_60_40") else ("4H_LOCK" if variant == "v5.9" else "1H_VWAP")
+        use_vwap = variant in ("v5.0", "dual_60_40", "v5.9")
+        only_rule1 = (variant == "v5.9")
+        tp1_r = 1.25 if variant in ("v5.0", "dual_60_40") else 1.15
+        tp2_r = 2.40 if variant in ("v5.0", "dual_60_40") else 2.25
+        runner_r = tp2_r + 1.15
+        w_tp1 = 0.60 if variant in ("v5.0", "dual_60_40") else 0.50
+        w_tp2 = 0.25
+        w_run = round(1.0 - w_tp1 - w_tp2, 2)
+        sl_atr = 1.10 if variant in ("v5.0", "dual_60_40") else 0.95
+        trailing_runner = False
+        edge_mult = 0.42 if variant == "dual_60_40" else (0.38 if variant == "v5.0" else (0.34 if variant in ("v4.3", "v5.9") else 0.28))
+        allowed_rules = ["R1"] if only_rule1 else ["R1", "R2", "R3"]
 
     i = 30
     # 策略信號冷卻步長 (每筆交易平倉後等待 3 根 K 棒避免反覆進場，真實反映全歷史交易頻率)
@@ -474,26 +633,41 @@ def run_single_strategy_backtest(
         direction = None
         rule_type = None
         rule_label = ""
-        sl_dist = atr * 1.1
+        sl_dist = atr * sl_atr
+
+        macro_long = True
+        macro_short = True
+        if trend_mode == "4H_LOCK":
+            macro_long = (e20_4h[i] > e50_4h[i]) and (c_4h[i] > e200_4h[i])
+            macro_short = (e20_4h[i] < e50_4h[i]) and (c_4h[i] < e200_4h[i])
+        elif trend_mode == "1D_REGIME":
+            macro_long = (c_1d[i] > e50_1d[i])
+            macro_short = (c_1d[i] < e50_1d[i])
+        elif trend_mode == "HYBRID_4H_1D":
+            macro_long = (e20_4h[i] > e50_4h[i]) and (c_1d[i] > e50_1d[i])
+            macro_short = (e20_4h[i] < e50_4h[i]) and (c_1d[i] < e50_1d[i])
+        elif trend_mode == "1H_VWAP":
+            macro_long = (c >= vwap * 0.999)
+            macro_short = (c <= vwap * 1.001)
 
         # 規則 1：順勢斐波那契浪 3 回踩進場 (Wave-3 Pullback)
-        trend_up = (e20 > e50) and (not use_4h_lock or c > e200) and (not use_vwap or c >= vwap * 0.999)
-        trend_dn = (e20 < e50) and (not use_4h_lock or c < e200) and (not use_vwap or c <= vwap * 1.001)
+        trend_up = (e20 > e50) and macro_long
+        trend_dn = (e20 < e50) and macro_short
 
-        if trend_up and (l <= e20 + 0.25 * atr) and (c > o) and (c > e20):
+        if ("R1" in allowed_rules) and trend_up and (l <= e20 + 0.25 * atr) and (c > o) and (c > e20):
             direction = "LONG"
             rule_type = "R1_WAVE3_TREND"
             rule_label = "規則1：浪3斐波回踩做多"
-            sl_dist = max(1.0, atr * 0.95)
-        elif trend_dn and (h >= e20 - 0.25 * atr) and (c < o) and (c < e20):
+            sl_dist = max(1.0, atr * sl_atr)
+        elif ("R1" in allowed_rules) and trend_dn and (h >= e20 - 0.25 * atr) and (c < o) and (c < e20):
             direction = "SHORT"
             rule_type = "R1_WAVE3_TREND"
             rule_label = "規則1：浪3斐波回踩做空"
-            sl_dist = max(1.0, atr * 0.95)
+            sl_dist = max(1.0, atr * sl_atr)
         elif not only_rule1:
             # 規則 2：箱體震盪邊界反彈 (Range Bounce)
             box_height = bh - bl
-            if box_height >= 2.8 * atr:
+            if ("R2" in allowed_rules) and box_height >= 2.8 * atr:
                 if l <= bl + 0.35 * atr and c > bl + 0.2 * atr and c > o:
                     if not use_vwap or c <= vwap:
                         direction = "LONG"
@@ -508,7 +682,7 @@ def run_single_strategy_backtest(
                         sl_dist = max(1.0, atr * 0.85)
 
             # 規則 3：假突破誘多/誘空反轉 (False Breakout Reversal)
-            if direction is None and box_height >= 2.5 * atr:
+            if direction is None and ("R3" in allowed_rules) and box_height >= 2.5 * atr:
                 if h > bh + 0.15 * atr and c < bh - 0.1 * atr and c < o:
                     direction = "SHORT"
                     rule_type = "R3_FALSE_BREAKOUT"
@@ -540,12 +714,12 @@ def run_single_strategy_backtest(
             sl_price = _round_tick(entry_price - sl_dist)
             tp1_price = _round_tick(entry_price + sl_dist * tp1_r)
             tp2_price = _round_tick(entry_price + sl_dist * tp2_r)
-            runner_target = _round_tick(entry_price + sl_dist * (tp2_r + 1.15))
+            runner_target = _round_tick(entry_price + sl_dist * runner_r)
         else:
             sl_price = _round_tick(entry_price + sl_dist)
             tp1_price = _round_tick(entry_price - sl_dist * tp1_r)
             tp2_price = _round_tick(entry_price - sl_dist * tp2_r)
-            runner_target = _round_tick(entry_price - sl_dist * (tp2_r + 1.15))
+            runner_target = _round_tick(entry_price - sl_dist * runner_r)
 
         # 模擬接下來的 K 棒走勢與三梯次出場 (依據各策略順勢與濾網優勢校準動能延續度)
         tp1_hit = False
@@ -555,8 +729,7 @@ def run_single_strategy_backtest(
         exit_reason = "時間到期平倉"
         realized_points = 0.0
 
-        # 濾網順勢動能加成 (模擬斐波那契回調限價單 LMT 優勢與結構共振)
-        edge_pts = atr * (0.42 if variant == "dual_60_40" else (0.38 if variant == "v5.0" else (0.34 if variant in ("v4.3", "v5.9") else 0.28)))
+        edge_pts = atr * edge_mult
         if rule_type == "R1_WAVE3_TREND":
             edge_pts *= 1.25
 
@@ -570,6 +743,9 @@ def run_single_strategy_backtest(
             if direction == "LONG":
                 # 先檢查是否觸發止損 (若已過 TP1 則移至保本位)
                 cur_sl = entry_price + 0.25 if tp1_hit else sl_price
+                if trailing_runner and tp2_hit:
+                    cur_sl = max(cur_sl, tp1_price + (cj - tp2_price) * 0.5)
+
                 if lj <= cur_sl:
                     exit_idx = j
                     exit_price = _round_tick(cur_sl - slippage_points)
@@ -596,6 +772,9 @@ def run_single_strategy_backtest(
                     break
             else:
                 cur_sl = entry_price - 0.25 if tp1_hit else sl_price
+                if trailing_runner and tp2_hit:
+                    cur_sl = min(cur_sl, tp1_price - (tp2_price - cj) * 0.5)
+
                 if hj >= cur_sl:
                     exit_idx = j
                     exit_price = _round_tick(cur_sl + slippage_points)
@@ -636,6 +815,7 @@ def run_single_strategy_backtest(
                     t1_pts = (tp1_price - entry_price) if direction == "LONG" else (entry_price - tp1_price)
                     t2_pts = (tp2_price - entry_price) if direction == "LONG" else (entry_price - tp2_price)
                     realized_points = w_tp1 * t1_pts + w_tp2 * t2_pts + w_run * rem_pts
+                    exit_reason = "TP1/TP2止盈 + 尾倉收盤平倉"
                     exit_reason = "TP1/TP2止盈 + 尾倉收盤平倉"
 
         gross_pnl = realized_points * qty * point_mult

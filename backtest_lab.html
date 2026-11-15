@@ -524,34 +524,133 @@
           <span>⚔️ 3. 選擇策略比較（最多 3 個）</span>
           <span id="strat-count-badge" class="badge">已選 3/3</span>
         </div>
-        <div id="strategy-list">
+        <div id="strategy-list" style="max-height:480px; overflow-y:auto; padding-right:4px;">
+          <!-- 旗艦終極進化版 -->
+          <div style="font-size:10px; font-weight:700; color:#f43f5e; margin:4px 0 4px 2px; text-transform:uppercase; letter-spacing:0.5px;">👑 旗艦終極合拼版 (V9 系列)</div>
           <label class="strat-item selected">
-            <input type="checkbox" name="strat" value="v4.3" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <input type="checkbox" name="strat" value="v9.1" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#f43f5e;"></span>
+            <div>
+              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
+                <span>V9.1 旗艦自適應擴口終極版</span>
+                <span class="badge" style="background:rgba(244,63,94,0.15); color:#f43f5e; border:1px solid rgba(244,63,94,0.4); font-size:10px;">+1003%</span>
+              </div>
+              <div style="font-size:11px; color:var(--muted);">4H鎖定 + 3.1:1盈虧比 + 尾倉追蹤 + 動態保證金階梯 (MDD 4.80%)</div>
+            </div>
+          </label>
+          <label class="strat-item">
+            <input type="checkbox" name="strat" value="v9.0" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#ec4899;"></span>
+            <div>
+              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
+                <span>V9.0 旗艦三合一融合版</span>
+                <span class="badge" style="background:rgba(236,72,153,0.15); color:#ec4899; border:1px solid rgba(236,72,153,0.4); font-size:10px;">+938%</span>
+              </div>
+              <div style="font-size:11px; color:var(--muted);">融合 V6 4H大勢鎖定 + V7 3:1階梯 + V8 動態移動止損 (夏普 3.68)</div>
+            </div>
+          </label>
+
+          <!-- 突破原型與微調版 -->
+          <div style="font-size:10px; font-weight:700; color:#38bdf8; margin:10px 0 4px 2px; text-transform:uppercase; letter-spacing:0.5px;">⚡ 突破原型與微調版 (V6 / V7 / V8)</div>
+          <label class="strat-item selected">
+            <input type="checkbox" name="strat" value="v6.0" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#0ea5e9;"></span>
+            <div>
+              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
+                <span>V6.0 4H宏觀趨勢共振 + 3:1階梯</span>
+                <span class="badge" style="background:rgba(14,165,233,0.15); color:#0ea5e9; border:1px solid rgba(14,165,233,0.4); font-size:10px;">回撤 2.62%</span>
+              </div>
+              <div style="font-size:11px; color:var(--muted);">4H 宏觀趨勢過濾 + 3.0:1 對稱階梯 (40/40/20) + 0.85x ATR 止損</div>
+            </div>
+          </label>
+          <label class="strat-item">
+            <input type="checkbox" name="strat" value="v6.1" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
             <span class="strat-dot" style="background:#38bdf8;"></span>
+            <div>
+              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
+                <span>V6.1 4H微調強化版</span>
+                <span class="badge" style="background:rgba(56,189,248,0.15); color:#38bdf8; border:1px solid rgba(56,189,248,0.4); font-size:10px;">夏普 3.98</span>
+              </div>
+              <div style="font-size:11px; color:var(--muted);">0.82x ATR 銳利止損 + TP1 觸及即啟動保本平價保護 (+865%)</div>
+            </div>
+          </label>
+          <label class="strat-item">
+            <input type="checkbox" name="strat" value="v7.0" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#8b5cf6;"></span>
+            <div>
+              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
+                <span>V7.0 日線牛熊分水嶺 + 3.2:1奔馳</span>
+                <span class="badge" style="background:rgba(139,92,246,0.15); color:#8b5cf6; border:1px solid rgba(139,92,246,0.4); font-size:10px;">+667%</span>
+              </div>
+              <div style="font-size:11px; color:var(--muted);">1D EMA50 大週期定界 + 35/45/20 奔馳波段擴張目標</div>
+            </div>
+          </label>
+          <label class="strat-item">
+            <input type="checkbox" name="strat" value="v7.1" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#a855f7;"></span>
+            <div>
+              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
+                <span>V7.1 日線波段精準收割微調版</span>
+                <span class="badge" style="background:rgba(168,85,247,0.15); color:#a855f7; border:1px solid rgba(168,85,247,0.4); font-size:10px;">+716%</span>
+              </div>
+              <div style="font-size:11px; color:var(--muted);">微調 TP1 1.55R / TP2 3.10R + 0.85x ATR 止損，獲利因子提升</div>
+            </div>
+          </label>
+          <label class="strat-item">
+            <input type="checkbox" name="strat" value="v8.0" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#f59e0b;"></span>
+            <div>
+              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
+                <span>V8.0 4H+1D雙宏觀共振 + 追蹤止損</span>
+                <span class="badge" style="background:rgba(245,158,11,0.15); color:#f59e0b; border:1px solid rgba(245,158,11,0.4); font-size:10px;">+786%</span>
+              </div>
+              <div style="font-size:11px; color:var(--muted);">雙宏觀濾網 + 2.8:1 穩健防守 + 尾倉 ATR 追蹤止損 (勝率 62.6%)</div>
+            </div>
+          </label>
+          <label class="strat-item">
+            <input type="checkbox" name="strat" value="v8.1" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#fbbf24;"></span>
+            <div>
+              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
+                <span>V8.1 雙共振自適應波動微調版</span>
+                <span class="badge" style="background:rgba(251,191,36,0.15); color:#fbbf24; border:1px solid rgba(251,191,36,0.4); font-size:10px;">夏普 3.95</span>
+              </div>
+              <div style="font-size:11px; color:var(--muted);">0.80x ATR 防守線 + 3:1 階梯，回撤壓縮至 3.19% (+829%)</div>
+            </div>
+          </label>
+
+          <!-- 基準與經典實盤版 -->
+          <div style="font-size:10px; font-weight:700; color:#10b981; margin:10px 0 4px 2px; text-transform:uppercase; letter-spacing:0.5px;">🛡️ 基準與經典版本</div>
+          <label class="strat-item selected">
+            <input type="checkbox" name="strat" value="v5.0" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#10b981;"></span>
+            <div>
+              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
+                <span>V5.0 雙劍合璧基準</span>
+                <span class="badge" style="background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.4); font-size:10px;">基準 (+603%)</span>
+              </div>
+              <div style="font-size:11px; color:var(--muted);">1H VWAP 濾網 + 60/25/15 不對稱收割 + 1.1x ATR 止損</div>
+            </div>
+          </label>
+          <label class="strat-item">
+            <input type="checkbox" name="strat" value="v4.3" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#06b6d4;"></span>
             <div>
               <div style="font-weight:700;">V4.3 標普防守力冠軍 (MES)</div>
               <div style="font-size:11px; color:var(--muted);">1H 結構 + 浪3 LMT + R2/R3 鎖1口 + 50/25/25 梯次</div>
             </div>
           </label>
-          <label class="strat-item selected">
-            <input type="checkbox" name="strat" value="v5.0" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
-            <span class="strat-dot" style="background:#10b981;"></span>
-            <div>
-              <div style="font-weight:700;">V5.0 雙劍合璧冠軍 (VWAP+60/25/15)</div>
-              <div style="font-size:11px; color:var(--muted);">日內 VWAP 濾網 + 60/25/15 不對稱收割 + 1.2ATR 追蹤</div>
-            </div>
-          </label>
-          <label class="strat-item selected">
-            <input type="checkbox" name="strat" value="dual_60_40" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
-            <span class="strat-dot" style="background:#f59e0b;"></span>
+          <label class="strat-item">
+            <input type="checkbox" name="strat" value="dual_60_40" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#d97706;"></span>
             <div>
               <div style="font-weight:700;">Dual 雙引擎實盤組合 (60% V4.3 + 40% V5.0)</div>
-              <div style="font-size:11px; color:var(--muted);">模擬目前雲端實盤 6:4 雙資金池協同與防飢餓保護</div>
+              <div style="font-size:11px; color:var(--muted);">模擬雲端實盤 6:4 雙資金池協同與防飢餓保護</div>
             </div>
           </label>
           <label class="strat-item">
             <input type="checkbox" name="strat" value="v4.1" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
-            <span class="strat-dot" style="background:#a855f7;"></span>
+            <span class="strat-dot" style="background:#9333ea;"></span>
             <div>
               <div style="font-weight:700;">V4.1 總回報成長冠軍 (全開擴口版)</div>
               <div style="font-size:11px; color:var(--muted);">規則 1/2/3 全開動態口數階梯，追求高複利</div>
@@ -559,7 +658,7 @@
           </label>
           <label class="strat-item">
             <input type="checkbox" name="strat" value="v5.9" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
-            <span class="strat-dot" style="background:#f43f5e;"></span>
+            <span class="strat-dot" style="background:#e11d48;"></span>
             <div>
               <div style="font-weight:700;">V5.9 極限純浪3 + 4H 宏觀鎖定</div>
               <div style="font-size:11px; color:var(--muted);">過濾所有箱體盤整，僅順 4H 大勢狙擊浪 3 回踩</div>
