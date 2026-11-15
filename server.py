@@ -10,7 +10,7 @@ import sys
 import json
 import socket
 import logging
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, date, timedelta
 
@@ -646,14 +646,32 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                 payload = {}
 
             try:
-                from ibkr_history_downloader import download_ibkr_history_to_csv
+                from ibkr_history_downloader import download_ibkr_history_to_csv, download_multi_chunks
                 port_val = payload.get("port")
-                resp = download_ibkr_history_to_csv(
-                    symbol=str(payload.get("symbol", "MES")),
-                    timeframe=str(payload.get("timeframe", "5m")),
-                    duration=str(payload.get("duration", "1 M")),
-                    port=int(port_val) if port_val else None
-                )
+                chunks = int(payload.get("chunks", 1))
+                sym = str(payload.get("symbol", "MES")).upper().strip()
+                tf = str(payload.get("timeframe", "1h")).lower().strip()
+                dur = str(payload.get("duration", "1 Y")).strip()
+                delay = float(payload.get("delay", 8.0))
+                cont = bool(payload.get("continue_from_cache", False))
+
+                if chunks > 1:
+                    resp = download_multi_chunks(
+                        symbol=sym,
+                        timeframe=tf,
+                        total_chunks=chunks,
+                        chunk_duration=dur,
+                        port=int(port_val) if port_val else None,
+                        pacing_delay_sec=delay,
+                        continue_from_cache=cont
+                    )
+                else:
+                    resp = download_ibkr_history_to_csv(
+                        symbol=sym,
+                        timeframe=tf,
+                        duration=dur,
+                        port=int(port_val) if port_val else None
+                    )
                 self.send_response(200)
             except Exception as e:
                 resp = {"status": "error", "message": f"IBKR 下載異常: {e}"}
@@ -680,13 +698,14 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
 
 def run_server(port=8080):
     server_address = ("0.0.0.0", port)
+    server_cls = ThreadingHTTPServer if "ThreadingHTTPServer" in globals() else HTTPServer
     try:
-        httpd = HTTPServer(server_address, ControlDashboardHandler)
+        httpd = server_cls(server_address, ControlDashboardHandler)
     except OSError:
         fallback_port = 8088 if port != 8088 else 8080
         print(f"[Dashboard Server] 端口 {port} 被佔用，改用備用端口 http://0.0.0.0:{fallback_port}/")
         server_address = ("0.0.0.0", fallback_port)
-        httpd = HTTPServer(server_address, ControlDashboardHandler)
+        httpd = server_cls(server_address, ControlDashboardHandler)
         port = fallback_port
 
     lan_ip = get_lan_ip()

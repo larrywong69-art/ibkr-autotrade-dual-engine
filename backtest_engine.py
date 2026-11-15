@@ -921,10 +921,10 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
     params = {
         "symbol": symbol,
         "initial_capital": float(payload.get("initial_capital", 30000.0)),
-        "point_multiplier": 2.0 if symbol == "MNQ" else 5.0,
+        "point_multiplier": 20.0 if symbol == "NQ" else (2.0 if symbol == "MNQ" else (50.0 if symbol == "ES" else 5.0)),
         "commission_per_side": float(payload.get("commission_per_side", 0.62)),
         "slippage_points": float(payload.get("slippage_points", 0.25)),
-        "margin_per_contract": float(payload.get("margin_per_contract", 2000.0 if symbol == "MNQ" else 2400.0)),
+        "margin_per_contract": float(payload.get("margin_per_contract", 20000.0 if symbol == "NQ" else (2000.0 if symbol == "MNQ" else (24000.0 if symbol == "ES" else 2400.0)))),
         "max_contracts_cap": int(payload.get("max_contracts_cap", 12)),
         "risk_multiplier": float(payload.get("risk_multiplier", 1.0))
     }
@@ -935,6 +935,17 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
     if data_source == "IBKR_CSV":
         from ibkr_history_downloader import get_cache_path
         cache_path = get_cache_path(symbol, timeframe)
+        loaded_sym = symbol
+        if not os.path.exists(cache_path):
+            # 智慧相容：若為微型合約但本地有同標的大合約數據 (如 MES 使用 ES 10年數據)，自動相容載入
+            fallback_sym = "ES" if symbol == "MES" else ("MES" if symbol == "ES" else ("NQ" if symbol == "MNQ" else ("MNQ" if symbol == "NQ" else None)))
+            if fallback_sym:
+                alt_path = get_cache_path(fallback_sym, timeframe)
+                if os.path.exists(alt_path):
+                    cache_path = alt_path
+                    loaded_sym = fallback_sym
+                    data_note = f"本地已有 {fallback_sym} ({timeframe}) 快取數據，CME 點位走勢完全相同，已自動載入！"
+
         if os.path.exists(cache_path):
             df_c = pd.read_csv(cache_path, parse_dates=["datetime"], index_col="datetime").sort_index()
             s_dt = pd.to_datetime(start_date)
@@ -942,9 +953,9 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
             df_sub = df_c[(df_c.index >= s_dt) & (df_c.index <= e_dt)].copy()
             if len(df_sub) < 35:
                 df_sub = df_c.copy()
-                data_note = f"選定日期區間內僅有較少快取筆數，已改用全部 {len(df_sub)} 根 IBKR 本地快取 K 棒"
+                data_note = (data_note + " " if data_note else "") + f"選定日期區間內僅有較少快取筆數，已改用全部 {len(df_sub)} 根 IBKR 本地快取 K 棒"
             df_base = _add_indicators(df_sub)
-            data_source_label = f"🔵 IBKR 本地快取 CSV ({symbol} · {timeframe.upper()} · {len(df_base)} 根真實K棒)"
+            data_source_label = f"🔵 IBKR 本地快取 CSV ({loaded_sym} · {timeframe.upper()} · {len(df_base)} 根真實K棒)"
         else:
             df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
             data_source_label = "🟡 高擬真合成數據 (尚未下載該週期 IBKR 本地快取)"

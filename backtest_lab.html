@@ -338,8 +338,26 @@
 
         <!-- IBKR 本地歷史下載快取區 -->
         <div style="background:#090d16; border:1px solid var(--border); border-radius:8px; padding:9px; margin-bottom:10px;">
-          <div style="font-size:11px; font-weight:700; color:var(--blue); margin-bottom:6px;">⬇️ IBKR 本地歷史下載並快取 CSV</div>
+          <div style="font-size:11px; font-weight:700; color:var(--blue); margin-bottom:6px;">⬇️ IBKR 歷史下載快取 (支援分批抓取多年數據)</div>
           <div class="form-grid" style="margin-bottom:6px;">
+            <div>
+              <label class="form-label" for="inp-ib-mode">下載模式</label>
+              <select id="inp-ib-mode" onchange="toggleIBDownloadMode()">
+                <option value="MULTI" selected>⚡ 分批多次下載 (10年1H/多年推薦)</option>
+                <option value="SINGLE">單次下載 (指定長度)</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label" for="inp-ib-sym">下載標的</label>
+              <select id="inp-ib-sym">
+                <option value="ES" selected>ES (標普 · 10+年完整數據推薦)</option>
+                <option value="MES">MES (微型標普 · 2019/5上市)</option>
+                <option value="NQ">NQ (納指 · 10+年完整數據推薦)</option>
+                <option value="MNQ">MNQ (微型納指 · 2019/5上市)</option>
+              </select>
+            </div>
+          </div>
+          <div id="ib-single-box" class="form-grid" style="display:none; margin-bottom:6px;">
             <div>
               <label class="form-label" for="inp-ib-dur">下載長度</label>
               <select id="inp-ib-dur">
@@ -347,21 +365,49 @@
                 <option value="1 M" selected>1 個月 (5m/15m)</option>
                 <option value="3 M">3 個月 (5m/15m)</option>
                 <option value="1 Y">1 年 (1H/1D)</option>
-                <option value="2 Y">2 年 (1H/1D)</option>
+                <option value="2 Y">2 年 (1D)</option>
                 <option value="5 Y">5 年 (1D)</option>
-                <option value="10 Y">10 年 (1D)</option>
               </select>
             </div>
             <div>
-              <label class="form-label" for="inp-ib-port">本機端口</label>
-              <select id="inp-ib-port">
+              <label class="form-label" for="inp-ib-port-single">本機端口</label>
+              <select id="inp-ib-port-single">
                 <option value="4002" selected>4002 (IB Gateway)</option>
                 <option value="7497">7497 (TWS)</option>
               </select>
             </div>
           </div>
+          <div id="ib-multi-box" class="form-grid" style="margin-bottom:6px;">
+            <div>
+              <label class="form-label" for="inp-ib-chunks">分批次數 (次)</label>
+              <select id="inp-ib-chunks">
+                <option value="5">分 5 次 (每次2年或1年)</option>
+                <option value="10" selected>分 10 次 (10年1H K線最穩)</option>
+                <option value="3">分 3 次 (如3年數據)</option>
+                <option value="2">分 2 次 (如2年數據)</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label" for="inp-ib-chunk-dur">單批長度</label>
+              <select id="inp-ib-chunk-dur">
+                <option value="1 Y" selected>1 年 (IBKR 1H K線官方上限)</option>
+                <option value="2 Y">2 年 (日K/長週期)</option>
+                <option value="6 M">6 個月 (短週期)</option>
+              </select>
+            </div>
+          </div>
+          <div style="font-size:10px; color:#94a3b8; margin-bottom:6px; line-height:1.4;">
+            💡 <strong>10年1H K線說明</strong>：IBKR 對 1H K 線限制單次最多 1 年。程式每批自動安全休眠 8 秒以符合官方 Pacing 規範。因 MES 於 2019/5 才上市，若回測完整 10 年標普請選 <strong>ES</strong>（點位完全相同，回測引擎已自動相容）。
+          </div>
+          <div style="margin-bottom:6px;">
+            <label class="form-label" for="inp-ib-port">連線端口</label>
+            <select id="inp-ib-port">
+              <option value="4002" selected>4002 (IB Gateway Paper)</option>
+              <option value="7497">7497 (TWS Paper)</option>
+            </select>
+          </div>
           <button style="width:100%; justify-content:center;" onclick="downloadIBKRHistory()">
-            📥 連線本機 IBKR 下載並快取
+            📥 連線本機 IBKR 開始下載並快取
           </button>
           <div id="ibkr-cache-list" style="margin-top:6px; font-size:11px; color:var(--muted);"></div>
         </div>
@@ -394,8 +440,10 @@
           <div class="form-group">
             <label class="form-label" for="inp-symbol">交易標的 (CME)</label>
             <select id="inp-symbol" onchange="onSymbolChange()">
-              <option value="MES" selected>MES (微型標普 $5/點)</option>
-              <option value="MNQ">MNQ (微型納指 $2/點)</option>
+              <option value="MES" selected>MES (微型標普 $5/點 · 2019後)</option>
+              <option value="ES">ES (標準標普 $50/點 · 10+年)</option>
+              <option value="MNQ">MNQ (微型納指 $2/點 · 2019後)</option>
+              <option value="NQ">NQ (標準納指 $20/點 · 10+年)</option>
             </select>
           </div>
           <div class="form-group">
@@ -698,7 +746,23 @@
 
     function onSymbolChange() {
       const sym = document.getElementById('inp-symbol').value;
-      document.getElementById('inp-margin').value = sym === 'MNQ' ? 2000 : 2400;
+      if (sym === 'MNQ') document.getElementById('inp-margin').value = 2000;
+      else if (sym === 'NQ') document.getElementById('inp-margin').value = 20000;
+      else if (sym === 'ES') document.getElementById('inp-margin').value = 24000;
+      else document.getElementById('inp-margin').value = 2400; // MES
+    }
+
+    function toggleIBDownloadMode() {
+      const mode = document.getElementById('inp-ib-mode').value;
+      const sBox = document.getElementById('ib-single-box');
+      const mBox = document.getElementById('ib-multi-box');
+      if (mode === 'MULTI') {
+        sBox.style.display = 'none';
+        mBox.style.display = 'grid';
+      } else {
+        sBox.style.display = 'grid';
+        mBox.style.display = 'none';
+      }
     }
 
     function onStrategyToggle(cb) {
@@ -1415,15 +1479,31 @@
     }
 
     async function downloadIBKRHistory() {
-      const sym = document.getElementById('inp-symbol').value;
-      const dur = document.getElementById('inp-ib-dur').value;
+      const symEl = document.getElementById('inp-ib-sym');
+      const sym = symEl ? symEl.value : document.getElementById('inp-symbol').value;
+      const mode = document.getElementById('inp-ib-mode').value;
       const port = parseInt(document.getElementById('inp-ib-port').value, 10);
-      showToast(`⏳ 正在連線本機 IBKR (Port ${port}) 下載 ${sym} (${currentTimeframe}, ${dur})...`);
+
+      let payload = { symbol: sym, timeframe: currentTimeframe, port };
+      if (mode === 'MULTI') {
+        const chunks = parseInt(document.getElementById('inp-ib-chunks').value, 10);
+        const dur = document.getElementById('inp-ib-chunk-dur').value;
+        payload.chunks = chunks;
+        payload.duration = dur;
+        payload.delay = 8.0;
+        showToast(`⏳ 正在連線本機 IBKR (Port ${port}) 分批下載 ${sym} (${currentTimeframe})，共 ${chunks} 批（每批間隔 8 秒保護頻率）...`);
+      } else {
+        const dur = document.getElementById('inp-ib-dur').value;
+        payload.chunks = 1;
+        payload.duration = dur;
+        showToast(`⏳ 正在連線本機 IBKR (Port ${port}) 下載 ${sym} (${currentTimeframe}, ${dur})...`);
+      }
+
       try {
         const resp = await fetch('/api/backtest/ibkr-download', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbol: sym, timeframe: currentTimeframe, duration: dur, port })
+          body: JSON.stringify(payload)
         });
         const data = await resp.json();
         if (data.status === 'ok') {
