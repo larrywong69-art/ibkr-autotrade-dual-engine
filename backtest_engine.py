@@ -38,69 +38,35 @@ REPORTS_DIR = os.path.join(CURRENT_DIR, "reports", "backtests")
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 STRATEGY_CATALOG = {
-    # 基準與演化系列 (V5 基準 vs V6~V9 突破)
-    "v5.0": {
-        "id": "v5.0",
-        "name": "V5.0 雙劍合璧基準 (VWAP+60/25/15)",
-        "color": "#10b981",
-        "stage": "Baseline (基準)",
-        "description": "基準版本：日內 VWAP 機構濾網 + 60/25/15 不對稱收割 + 1.1x ATR 止損"
-    },
-    "v6.0": {
-        "id": "v6.0",
-        "name": "V6.0 4H宏觀趨勢共振 + 3:1對稱階梯",
-        "color": "#0ea5e9",
-        "stage": "Prototype 1 (原型一)",
-        "description": "4H EMA 宏觀趨勢過濾 + 3.0:1 盈虧比階梯 (40/40/20) + 0.85x ATR 緊密止損 (回撤 2.62%)"
-    },
-    "v6.1": {
-        "id": "v6.1",
-        "name": "V6.1 4H微調強化版 (動態保本防護)",
-        "color": "#38bdf8",
-        "stage": "Finetuned (原型一微調)",
-        "description": "0.82x ATR 銳利止損 + TP1 觸及即啟動保本平價保護 + 順勢浪3濾網靈敏度微調 (夏普 3.98)"
-    },
-    "v7.0": {
-        "id": "v7.0",
-        "name": "V7.0 日線牛熊分水嶺 + 3.2:1奔馳擴張",
-        "color": "#8b5cf6",
-        "stage": "Prototype 2 (原型二)",
-        "description": "1D 日線 EMA50 大週期多空定界 + 3.2:1 奔馳擴張目標 (35/45/20) + 專攻大單邊波段"
-    },
-    "v7.1": {
-        "id": "v7.1",
-        "name": "V7.1 日線波段精準收割微調版",
-        "color": "#a855f7",
-        "stage": "Finetuned (原型二微調)",
-        "description": "微調 TP1 至 1.55R、TP2 3.10R，結合 0.85x ATR 止損，顯著提高獲利因子"
-    },
-    "v8.0": {
-        "id": "v8.0",
-        "name": "V8.0 4H+1D雙宏觀共振 + 動態追蹤止損",
-        "color": "#f59e0b",
-        "stage": "Prototype 3 (原型三)",
-        "description": "4H 與 1D 雙週期共振濾網 + 2.8:1 穩健防守階梯 + 尾倉 ATR 追蹤止損"
+    # 3 大精選演化冠軍策略 (由 10 年 288 組參數全面汰弱留強精選)
+    "v9.1": {
+        "id": "v9.1",
+        "name": "V9.1 旗艦自適應擴口終極版 (Master Hybrid Plus)",
+        "color": "#f43f5e",
+        "stage": "👑 總利潤之王 (+1003%)",
+        "description": "動態資金階梯放大優勢，順勢浪 3 獲利最大化，10年淨利突破 $300,000 (+1,003%)"
     },
     "v8.1": {
         "id": "v8.1",
         "name": "V8.1 雙共振自適應波動微調版",
         "color": "#fbbf24",
-        "stage": "Finetuned (原型三微調)",
-        "description": "0.80x ATR 防守線 + 3:1 階梯，進一步壓縮回撤幅度，追求極致夏普比率 (3.95)"
+        "stage": "⚖️ 極致平衡之王 (夏普 3.95)",
+        "description": "0.80x ATR 防守線 + 3:1 階梯 + 尾倉 ATR 追蹤止損，回撤僅 3.19%，夏普 3.95"
     },
-    "v9.0": {
-        "id": "v9.0",
-        "name": "V9.0 旗艦三合一融合版 (Master Hybrid)",
-        "color": "#ec4899",
-        "stage": "Master Hybrid (旗艦合拼)",
-        "description": "終極合拼：融合 V6 的 4H 大勢鎖定 + V7 的 3:1 盈虧比階梯 + V8 的動態移動追蹤止損 (+938%)"
+    "v6.0": {
+        "id": "v6.0",
+        "name": "V6.0 4H宏觀趨勢共振 + 3:1對稱階梯",
+        "color": "#0ea5e9",
+        "stage": "🛡️ 極限防守之王 (回撤 2.62%)",
+        "description": "4H EMA 宏觀趨勢過濾 + 3.0:1 盈虧比階梯 (40/40/20) + 0.85x ATR 緊密止損 (回撤 2.62%)"
     },
-    "v9.1": {
-        "id": "v9.1",
-        "name": "V9.1 旗艦自適應擴口終極版 (Master Hybrid Plus)",
-        "color": "#f43f5e",
-        "stage": "Master Hybrid Plus (終極旗艦)",
-        "description": "動態資金階梯放大優勢，順勢浪 3 獲利最大化，10年淨利突破 $300,000 (+1,003%)"
+    # 基準與經典對照版本
+    "v5.0": {
+        "id": "v5.0",
+        "name": "V5.0 雙劍合璧基準 (VWAP+60/25/15)",
+        "color": "#10b981",
+        "stage": "📌 基準對照組 (+603%)",
+        "description": "基準版本：日內 VWAP 機構濾網 + 60/25/15 不對稱收割 + 1.1x ATR 止損"
     },
     "v4.3": {
         "id": "v4.3",
@@ -115,20 +81,6 @@ STRATEGY_CATALOG = {
         "color": "#d97706",
         "stage": "實盤組合",
         "description": "60% 資金配置 V4.3 (MES) + 40% 配置 V5.0 (MNQ) + 保證金防飢餓保護"
-    },
-    "v4.1": {
-        "id": "v4.1",
-        "name": "V4.1 總回報成長冠軍 (全開擴口版)",
-        "color": "#9333ea",
-        "stage": "經典版",
-        "description": "規則 1/2/3 全開動態口數階梯，追求極致複利成長"
-    },
-    "v5.9": {
-        "id": "v5.9",
-        "name": "V5.9 極限純浪3 + 4H 宏觀鎖定",
-        "color": "#e11d48",
-        "stage": "經典版",
-        "description": "嚴格過濾盤整，僅在 4H 與 1H 共振時執行規則 1 斐波浪 3 狙擊"
     }
 }
 
@@ -505,7 +457,7 @@ def _determine_contracts(
 ) -> int:
     """根據資金階梯、策略規則與 IBKR 保證金上限決定口數"""
     if rule_type in ("R2_RANGE_BOUNCE", "R3_FALSE_BREAKOUT") and variant in (
-        "v4.3", "v5.0", "dual_60_40", "v6.0", "v6.1", "v7.0", "v7.1", "v8.0", "v8.1", "v9.0", "v9.1"
+        "v4.3", "v5.0", "dual_60_40", "v6.0", "v8.1", "v9.1"
     ):
         base_c = 1
     else:
