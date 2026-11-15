@@ -3,7 +3,7 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd "$DIR"
 
 echo "======================================================================"
-echo "🌟 啟動 AutoTrade 雲端守護系統 (V9.1 Master Hybrid Plus)"
+echo "🌟 啟動 AutoTrade 雲端守護系統 (V9.3 Master Hybrid Live)"
 echo "======================================================================"
 
 # 確保虛擬環境就緒 (相容 venv 或 .venv)
@@ -37,6 +37,6 @@ if command -v websockify &> /dev/null; then
     tmux send-keys -t autotrade:noVNC "websockify --web=/usr/share/novnc 0.0.0.0:6080 127.0.0.1:5900" C-m
 fi
 
-echo "✅ 系統已在 Tmux 背景守護中運行 (V9.1 Master Hybrid Plus)！"
+echo "✅ 系統已在 Tmux 背景守護中運行 (V9.3 Master Hybrid Live)！"
 echo "👉 查看運行日誌指令: tmux attach -t autotrade"
 echo "👉 儀表板與安全隧道將在 5 秒內生成並推播至 Telegram..."

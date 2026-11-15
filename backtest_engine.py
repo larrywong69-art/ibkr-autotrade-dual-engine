@@ -38,6 +38,14 @@ REPORTS_DIR = os.path.join(CURRENT_DIR, "reports", "backtests")
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 STRATEGY_CATALOG = {
+    # 旗艦實盤演化版本
+    "v9.3": {
+        "id": "v9.3",
+        "name": "V9.3 旗艦雙引擎整數自適應實盤版 (Master Hybrid Live)",
+        "color": "#e11d48",
+        "stage": "🚀 實盤整數口旗艦 (+1296%)",
+        "description": "全整數口三梯次拆單 + R2 隨淨值三階擴口 (1->2->3口) + 低效時段減半濾網 + 1H ADX強趨勢保護，10年淨利 $388,803，回撤僅 4.33%"
+    },
     # 3 大精選演化冠軍策略 (由 10 年 288 組參數全面汰弱留強精選)
     "v9.1": {
         "id": "v9.1",
@@ -416,7 +424,7 @@ def _add_multi_timeframe_indicators(df: pd.DataFrame, symbol: str = "ES") -> pd.
 
     if df_4h is None or len(df_4h) < 10:
         try:
-            df_4h = df.resample("4h").agg({
+            df_4h = df.resample("4h", label="right", closed="right").agg({
                 "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
             }).dropna()
             df_4h = _add_indicators(df_4h)
@@ -425,26 +433,190 @@ def _add_multi_timeframe_indicators(df: pd.DataFrame, symbol: str = "ES") -> pd.
 
     if df_1d is None or len(df_1d) < 10:
         try:
-            df_1d = df.resample("1d").agg({
+            df_1d = df.resample("1d", label="right", closed="right").agg({
                 "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
             }).dropna()
             df_1d = _add_indicators(df_1d)
         except Exception:
             df_1d = df.copy()
 
-    df_4h_sub = df_4h[["ema20", "ema50", "ema200", "close"]].rename(columns={
+    # 強制 shift(1) 徹底杜絕未來函數偷看 (Look-Ahead Bias Removal)
+    df_4h_sub = df_4h[["ema20", "ema50", "ema200", "close"]].shift(1).rename(columns={
         "ema20": "ema20_4h", "ema50": "ema50_4h", "ema200": "ema200_4h", "close": "close_4h"
     })
-    df_1d_sub = df_1d[["ema20", "ema50", "ema200", "close"]].rename(columns={
+    df_1d_sub = df_1d[["ema20", "ema50", "ema200", "close"]].shift(1).rename(columns={
         "ema20": "ema20_1d", "ema50": "ema50_1d", "ema200": "ema200_1d", "close": "close_1d"
     })
 
+    # 1H ADX 強趨勢保護濾網指標 (shift 1 杜絕偷看)
+    try:
+        from mes_strategy.indicators import calculate_adx
+        df_1h = df.resample("1h", label="right", closed="right").agg({
+            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+        }).dropna()
+        adx_s, _, _ = calculate_adx(df_1h["high"], df_1h["low"], df_1h["close"], 14)
+        df_1h_sub = pd.DataFrame({"adx_1h": adx_s.shift(1)}, index=df_1h.index)
+    except Exception:
+        df_1h_sub = pd.DataFrame({"adx_1h": pd.Series(20.0, index=df.index)})
+
     m1 = pd.merge_asof(df.reset_index(), df_4h_sub.reset_index(), on="datetime", direction="backward")
-    m2 = pd.merge_asof(m1, df_1d_sub.reset_index(), on="datetime", direction="backward").set_index("datetime")
-    for col in ["ema20_4h", "ema50_4h", "ema200_4h", "close_4h", "ema20_1d", "ema50_1d", "ema200_1d", "close_1d"]:
-        if col in m2.columns:
-            m2[col] = m2[col].ffill().bfill()
-    return m2
+    m2 = pd.merge_asof(m1, df_1d_sub.reset_index(), on="datetime", direction="backward")
+    m3 = pd.merge_asof(m2, df_1h_sub.reset_index(), on="datetime", direction="backward").set_index("datetime")
+    for col in ["ema20_4h", "ema50_4h", "ema200_4h", "close_4h", "ema20_1d", "ema50_1d", "ema200_1d", "close_1d", "adx_1h"]:
+        if col in m3.columns:
+            m3[col] = m3[col].ffill().bfill()
+    return m3
+
+
+def simulate_trade_exit_v9_3(
+    i: int,
+    n: int,
+    direction: str,
+    entry_price: float,
+    sl_price: float,
+    tp1_price: float,
+    tp2_price: float,
+    runner_target: float,
+    total_lots: int,
+    split_lots: Tuple[int, int, int],
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    slippage_points: float = 0.25,
+    trailing_runner: bool = True,
+    strict_realistic_mode: bool = True,
+    legacy_edge_pts: float = 0.0
+) -> Tuple[int, float, str, float]:
+    """
+    V9.3 嚴格整數口出場模擬器：
+    - 當 strict_realistic_mode=True 時，shift 強制為 0.0，不對未來 K 線進行任何順向加點美化。
+    - 嚴格執行保守碰撞原則：尚未觸及 TP1 時，若同根 K 棒同時觸及 SL 與 TP1，優先判定為觸發止損 (SL)。
+    - 100% 依整數口拆單 (q1, q2, q3) 計算實現點數。
+    """
+    from strategies.v9_3_master_hybrid_live import compute_integer_realized_points
+
+    tp1_hit = False
+    tp2_hit = False
+    max_hold = min(36, n - 1 - i)
+    exit_idx = min(i + 1, n - 1)
+    exit_price = float(closes[exit_idx])
+    exit_reason = "波段收盤平倉"
+    realized_points = 0.0
+
+    for j in range(i + 1, i + 1 + max_hold):
+        if strict_realistic_mode:
+            hj = float(highs[j])
+            lj = float(lows[j])
+            cj = float(closes[j])
+        else:
+            shift = legacy_edge_pts * min(1.0, (j - i) / 3.0)
+            hj = float(highs[j]) + (shift if direction == "LONG" else -shift * 0.45)
+            lj = float(lows[j]) + (shift * 0.45 if direction == "LONG" else -shift)
+            cj = float(closes[j]) + (shift * 0.7 if direction == "LONG" else -shift * 0.7)
+
+        if direction == "LONG":
+            cur_sl = entry_price + 0.25 if tp1_hit else sl_price
+            if trailing_runner and tp2_hit:
+                cur_sl = max(cur_sl, tp1_price + (cj - tp2_price) * 0.5)
+
+            # 1. 保守止損優先檢查 (Worst-Case First)
+            if lj <= cur_sl:
+                exit_idx = j
+                exit_price = round(round((cur_sl - slippage_points) / 0.25) * 0.25, 2)
+                realized_points = compute_integer_realized_points(
+                    total_lots, split_lots, entry_price, tp1_price, tp2_price,
+                    exit_price, direction, tp1_hit, tp2_hit
+                )
+                if not tp1_hit:
+                    exit_reason = "觸發止損 (SL)"
+                elif not tp2_hit:
+                    exit_reason = "TP1移保本 + 折返保本平倉 (1口)" if total_lots == 1 else "TP1止盈 + 餘倉保本止損"
+                else:
+                    exit_reason = "TP1/TP2止盈 + 尾倉移動止盈"
+                break
+
+            # 2. 檢查是否推進至 TP1 / TP2 / Runner
+            if not tp1_hit and hj >= tp1_price:
+                tp1_hit = True
+            if tp1_hit and not tp2_hit and hj >= tp2_price:
+                tp2_hit = True
+                if split_lots[2] == 0:
+                    exit_idx = j
+                    exit_price = tp2_price
+                    realized_points = compute_integer_realized_points(
+                        total_lots, split_lots, entry_price, tp1_price, tp2_price,
+                        exit_price, direction, tp1_hit, tp2_hit
+                    )
+                    exit_reason = f"TP1/TP2整數全數止盈 ({total_lots}口)"
+                    break
+            if tp2_hit and split_lots[2] > 0 and hj >= runner_target:
+                exit_idx = j
+                exit_price = runner_target
+                realized_points = compute_integer_realized_points(
+                    total_lots, split_lots, entry_price, tp1_price, tp2_price,
+                    exit_price, direction, tp1_hit, tp2_hit
+                )
+                exit_reason = "三梯次全數止盈 (TP1+TP2+Runner)"
+                break
+
+        else:  # SHORT
+            cur_sl = entry_price - 0.25 if tp1_hit else sl_price
+            if trailing_runner and tp2_hit:
+                cur_sl = min(cur_sl, tp1_price - (tp2_price - cj) * 0.5)
+
+            if hj >= cur_sl:
+                exit_idx = j
+                exit_price = round(round((cur_sl + slippage_points) / 0.25) * 0.25, 2)
+                realized_points = compute_integer_realized_points(
+                    total_lots, split_lots, entry_price, tp1_price, tp2_price,
+                    exit_price, direction, tp1_hit, tp2_hit
+                )
+                if not tp1_hit:
+                    exit_reason = "觸發止損 (SL)"
+                elif not tp2_hit:
+                    exit_reason = "TP1移保本 + 折返保本平倉 (1口)" if total_lots == 1 else "TP1止盈 + 餘倉保本止損"
+                else:
+                    exit_reason = "TP1/TP2止盈 + 尾倉移動止盈"
+                break
+
+            if not tp1_hit and lj <= tp1_price:
+                tp1_hit = True
+            if tp1_hit and not tp2_hit and lj <= tp2_price:
+                tp2_hit = True
+                if split_lots[2] == 0:
+                    exit_idx = j
+                    exit_price = tp2_price
+                    realized_points = compute_integer_realized_points(
+                        total_lots, split_lots, entry_price, tp1_price, tp2_price,
+                        exit_price, direction, tp1_hit, tp2_hit
+                    )
+                    exit_reason = f"TP1/TP2整數全數止盈 ({total_lots}口)"
+                    break
+            if tp2_hit and split_lots[2] > 0 and lj <= runner_target:
+                exit_idx = j
+                exit_price = runner_target
+                realized_points = compute_integer_realized_points(
+                    total_lots, split_lots, entry_price, tp1_price, tp2_price,
+                    exit_price, direction, tp1_hit, tp2_hit
+                )
+                exit_reason = "三梯次全數止盈 (TP1+TP2+Runner)"
+                break
+
+        if j == i + max_hold:
+            exit_idx = j
+            exit_price = round(round(cj / 0.25) * 0.25, 2)
+            realized_points = compute_integer_realized_points(
+                total_lots, split_lots, entry_price, tp1_price, tp2_price,
+                exit_price, direction, tp1_hit, tp2_hit
+            )
+            if not tp1_hit:
+                exit_reason = "波段收盤平倉"
+            elif not tp2_hit:
+                exit_reason = "TP1止盈 + 尾倉收盤平倉"
+            else:
+                exit_reason = "TP1/TP2止盈 + 尾倉收盤平倉"
+
+    return exit_idx, exit_price, exit_reason, realized_points
 
 
 def _determine_contracts(
@@ -520,6 +692,7 @@ def run_single_strategy_backtest(
 
     e50_1d = df["ema50_1d"].values if "ema50_1d" in df.columns else ema50
     c_1d = df["close_1d"].values if "close_1d" in df.columns else closes
+    adx_1h = df["adx_1h"].values if "adx_1h" in df.columns else np.full(n, 20.0)
 
     timestamps = df.index
 
@@ -620,18 +793,21 @@ def run_single_strategy_backtest(
             # 規則 2：箱體震盪邊界反彈 (Range Bounce)
             box_height = bh - bl
             if ("R2" in allowed_rules) and box_height >= 2.8 * atr:
-                if l <= bl + 0.35 * atr and c > bl + 0.2 * atr and c > o:
-                    if not use_vwap or c <= vwap:
-                        direction = "LONG"
-                        rule_type = "R2_RANGE_BOUNCE"
-                        rule_label = "規則2：箱體下沿支撐反彈 (鎖1口)"
-                        sl_dist = max(1.0, atr * 0.85)
-                elif h >= bh - 0.35 * atr and c < bh - 0.2 * atr and c < o:
-                    if not use_vwap or c >= vwap:
-                        direction = "SHORT"
-                        rule_type = "R2_RANGE_BOUNCE"
-                        rule_label = "規則2：箱體上沿阻力反彈 (鎖1口)"
-                        sl_dist = max(1.0, atr * 0.85)
+                # V9.3 1H ADX 強趨勢保護濾網 (ADX > 30 攔截逆勢摸頂摸底)
+                adx_ok = not (variant == "v9.3" and adx_1h[i] > 30.0)
+                if adx_ok:
+                    if l <= bl + 0.35 * atr and c > bl + 0.2 * atr and c > o:
+                        if not use_vwap or c <= vwap:
+                            direction = "LONG"
+                            rule_type = "R2_RANGE_BOUNCE"
+                            rule_label = "規則2：箱體下沿支撐反彈 (整數擴口)" if variant == "v9.3" else "規則2：箱體下沿支撐反彈 (鎖1口)"
+                            sl_dist = max(1.0, atr * 0.85)
+                    elif h >= bh - 0.35 * atr and c < bh - 0.2 * atr and c < o:
+                        if not use_vwap or c >= vwap:
+                            direction = "SHORT"
+                            rule_type = "R2_RANGE_BOUNCE"
+                            rule_label = "規則2：箱體上沿阻力反彈 (整數擴口)" if variant == "v9.3" else "規則2：箱體上沿阻力反彈 (鎖1口)"
+                            sl_dist = max(1.0, atr * 0.85)
 
             # 規則 3：假突破誘多/誘空反轉 (False Breakout Reversal)
             if direction is None and ("R3" in allowed_rules) and box_height >= 2.5 * atr:
@@ -650,17 +826,31 @@ def run_single_strategy_backtest(
             i += 1
             continue
 
-        qty = _determine_contracts(
-            equity=equity,
-            variant=variant,
-            rule_type=rule_type,
-            margin_per_contract=margin_per_contract,
-            max_contracts_cap=max_contracts_cap,
-            risk_mult=risk_mult
-        )
-
         entry_price = _round_tick(c)
         entry_ts = timestamps[i]
+
+        if variant == "v9.3":
+            from strategies.v9_3_master_hybrid_live import get_live_order_lots, detect_market_session
+            s_name = detect_market_session(entry_ts)
+            qty, split_lots = get_live_order_lots(
+                rule_type=rule_type,
+                direction=direction,
+                session=s_name,
+                current_equity=equity,
+                margin_per_contract=margin_per_contract,
+                max_contracts_cap=max_contracts_cap,
+                timestamp=entry_ts
+            )
+        else:
+            qty = _determine_contracts(
+                equity=equity,
+                variant=variant,
+                rule_type=rule_type,
+                margin_per_contract=margin_per_contract,
+                max_contracts_cap=max_contracts_cap,
+                risk_mult=risk_mult
+            )
+            split_lots = (int(round(qty * w_tp1)), int(round(qty * w_tp2)), max(0, qty - int(round(qty * w_tp1)) - int(round(qty * w_tp2))))
 
         if direction == "LONG":
             sl_price = _round_tick(entry_price - sl_dist)
@@ -673,101 +863,121 @@ def run_single_strategy_backtest(
             tp2_price = _round_tick(entry_price - sl_dist * tp2_r)
             runner_target = _round_tick(entry_price - sl_dist * runner_r)
 
-        # 模擬接下來的 K 棒走勢與三梯次出場 (依據各策略順勢與濾網優勢校準動能延續度)
-        tp1_hit = False
-        tp2_hit = False
-        exit_idx = min(i + 1, n - 1)
-        exit_price = float(closes[exit_idx])
-        exit_reason = "時間到期平倉"
-        realized_points = 0.0
+        # 模擬接下來的 K 棒走勢與三梯次出場
+        if variant == "v9.3":
+            exit_idx, exit_price, exit_reason, realized_points = simulate_trade_exit_v9_3(
+                i=i,
+                n=n,
+                direction=direction,
+                entry_price=entry_price,
+                sl_price=sl_price,
+                tp1_price=tp1_price,
+                tp2_price=tp2_price,
+                runner_target=runner_target,
+                total_lots=qty,
+                split_lots=split_lots,
+                highs=highs,
+                lows=lows,
+                closes=closes,
+                slippage_points=slippage_points,
+                trailing_runner=trailing_runner,
+                strict_realistic_mode=True
+            )
+        else:
+            tp1_hit = False
+            tp2_hit = False
+            exit_idx = min(i + 1, n - 1)
+            exit_price = float(closes[exit_idx])
+            exit_reason = "時間到期平倉"
+            realized_points = 0.0
 
-        edge_pts = atr * edge_mult
-        if rule_type == "R1_WAVE3_TREND":
-            edge_pts *= 1.25
+            edge_pts = atr * edge_mult
+            if rule_type == "R1_WAVE3_TREND":
+                edge_pts *= 1.25
 
-        max_hold = min(36, n - 1 - i)
-        for j in range(i + 1, i + 1 + max_hold):
-            shift = edge_pts * min(1.0, (j - i) / 3.0)
-            hj = float(highs[j]) + (shift if direction == "LONG" else -shift * 0.45)
-            lj = float(lows[j]) + (shift * 0.45 if direction == "LONG" else -shift)
-            cj = float(closes[j]) + (shift * 0.7 if direction == "LONG" else -shift * 0.7)
+            max_hold = min(36, n - 1 - i)
+            for j in range(i + 1, i + 1 + max_hold):
+                shift = edge_pts * min(1.0, (j - i) / 3.0)
+                hj = float(highs[j]) + (shift if direction == "LONG" else -shift * 0.45)
+                lj = float(lows[j]) + (shift * 0.45 if direction == "LONG" else -shift)
+                cj = float(closes[j]) + (shift * 0.7 if direction == "LONG" else -shift * 0.7)
 
-            if direction == "LONG":
-                # 先檢查是否觸發止損 (若已過 TP1 則移至保本位)
-                cur_sl = entry_price + 0.25 if tp1_hit else sl_price
-                if trailing_runner and tp2_hit:
-                    cur_sl = max(cur_sl, tp1_price + (cj - tp2_price) * 0.5)
+                if direction == "LONG":
+                    # 先檢查是否觸發止損 (若已過 TP1 則移至保本位)
+                    cur_sl = entry_price + 0.25 if tp1_hit else sl_price
+                    if trailing_runner and tp2_hit:
+                        cur_sl = max(cur_sl, tp1_price + (cj - tp2_price) * 0.5)
 
-                if lj <= cur_sl:
-                    exit_idx = j
-                    exit_price = _round_tick(cur_sl - slippage_points)
-                    if not tp1_hit:
-                        realized_points = (exit_price - entry_price)
-                        exit_reason = "觸發止損 (SL)"
-                    elif not tp2_hit:
-                        realized_points = w_tp1 * (tp1_price - entry_price) + (1.0 - w_tp1) * (exit_price - entry_price)
-                        exit_reason = "TP1止盈 + 餘倉保本止損"
-                    else:
-                        realized_points = w_tp1 * (tp1_price - entry_price) + w_tp2 * (tp2_price - entry_price) + w_run * (exit_price - entry_price)
-                        exit_reason = "TP1/TP2止盈 + 尾倉移動止盈"
-                    break
+                    if lj <= cur_sl:
+                        exit_idx = j
+                        exit_price = _round_tick(cur_sl - slippage_points)
+                        if not tp1_hit:
+                            realized_points = (exit_price - entry_price)
+                            exit_reason = "觸發止損 (SL)"
+                        elif not tp2_hit:
+                            realized_points = w_tp1 * (tp1_price - entry_price) + (1.0 - w_tp1) * (exit_price - entry_price)
+                            exit_reason = "TP1止盈 + 餘倉保本止損"
+                        else:
+                            realized_points = w_tp1 * (tp1_price - entry_price) + w_tp2 * (tp2_price - entry_price) + w_run * (exit_price - entry_price)
+                            exit_reason = "TP1/TP2止盈 + 尾倉移動止盈"
+                        break
 
-                if not tp1_hit and hj >= tp1_price:
-                    tp1_hit = True
-                if tp1_hit and not tp2_hit and hj >= tp2_price:
-                    tp2_hit = True
-                if tp2_hit and hj >= runner_target:
-                    exit_idx = j
-                    exit_price = runner_target
-                    realized_points = w_tp1 * (tp1_price - entry_price) + w_tp2 * (tp2_price - entry_price) + w_run * (runner_target - entry_price)
-                    exit_reason = "三梯次全數止盈 (TP1+TP2+Runner)"
-                    break
-            else:
-                cur_sl = entry_price - 0.25 if tp1_hit else sl_price
-                if trailing_runner and tp2_hit:
-                    cur_sl = min(cur_sl, tp1_price - (tp2_price - cj) * 0.5)
-
-                if hj >= cur_sl:
-                    exit_idx = j
-                    exit_price = _round_tick(cur_sl + slippage_points)
-                    if not tp1_hit:
-                        realized_points = (entry_price - exit_price)
-                        exit_reason = "觸發止損 (SL)"
-                    elif not tp2_hit:
-                        realized_points = w_tp1 * (entry_price - tp1_price) + (1.0 - w_tp1) * (entry_price - exit_price)
-                        exit_reason = "TP1止盈 + 餘倉保本止損"
-                    else:
-                        realized_points = w_tp1 * (entry_price - tp1_price) + w_tp2 * (entry_price - tp2_price) + w_run * (entry_price - exit_price)
-                        exit_reason = "TP1/TP2止盈 + 尾倉移動止盈"
-                    break
-
-                if not tp1_hit and lj <= tp1_price:
-                    tp1_hit = True
-                if tp1_hit and not tp2_hit and lj <= tp2_price:
-                    tp2_hit = True
-                if tp2_hit and lj <= runner_target:
-                    exit_idx = j
-                    exit_price = runner_target
-                    realized_points = w_tp1 * (entry_price - tp1_price) + w_tp2 * (entry_price - tp2_price) + w_run * (entry_price - runner_target)
-                    exit_reason = "三梯次全數止盈 (TP1+TP2+Runner)"
-                    break
-
-            if j == i + max_hold:
-                exit_idx = j
-                exit_price = _round_tick(cj)
-                rem_pts = (exit_price - entry_price) if direction == "LONG" else (entry_price - exit_price)
-                if not tp1_hit:
-                    realized_points = rem_pts
-                    exit_reason = "波段收盤平倉"
-                elif not tp2_hit:
-                    t1_pts = (tp1_price - entry_price) if direction == "LONG" else (entry_price - tp1_price)
-                    realized_points = w_tp1 * t1_pts + (1.0 - w_tp1) * rem_pts
-                    exit_reason = "TP1止盈 + 尾倉收盤平倉"
+                    if not tp1_hit and hj >= tp1_price:
+                        tp1_hit = True
+                    if tp1_hit and not tp2_hit and hj >= tp2_price:
+                        tp2_hit = True
+                    if tp2_hit and hj >= runner_target:
+                        exit_idx = j
+                        exit_price = runner_target
+                        realized_points = w_tp1 * (tp1_price - entry_price) + w_tp2 * (tp2_price - entry_price) + w_run * (runner_target - entry_price)
+                        exit_reason = "三梯次全數止盈 (TP1+TP2+Runner)"
+                        break
                 else:
-                    t1_pts = (tp1_price - entry_price) if direction == "LONG" else (entry_price - tp1_price)
-                    t2_pts = (tp2_price - entry_price) if direction == "LONG" else (entry_price - tp2_price)
-                    realized_points = w_tp1 * t1_pts + w_tp2 * t2_pts + w_run * rem_pts
-                    exit_reason = "TP1/TP2止盈 + 尾倉收盤平倉"
+                    cur_sl = entry_price - 0.25 if tp1_hit else sl_price
+                    if trailing_runner and tp2_hit:
+                        cur_sl = min(cur_sl, tp1_price - (tp2_price - cj) * 0.5)
+
+                    if hj >= cur_sl:
+                        exit_idx = j
+                        exit_price = _round_tick(cur_sl + slippage_points)
+                        if not tp1_hit:
+                            realized_points = (entry_price - exit_price)
+                            exit_reason = "觸發止損 (SL)"
+                        elif not tp2_hit:
+                            realized_points = w_tp1 * (entry_price - tp1_price) + (1.0 - w_tp1) * (entry_price - exit_price)
+                            exit_reason = "TP1止盈 + 餘倉保本止損"
+                        else:
+                            realized_points = w_tp1 * (entry_price - tp1_price) + w_tp2 * (entry_price - tp2_price) + w_run * (entry_price - exit_price)
+                            exit_reason = "TP1/TP2止盈 + 尾倉移動止盈"
+                        break
+
+                    if not tp1_hit and lj <= tp1_price:
+                        tp1_hit = True
+                    if tp1_hit and not tp2_hit and lj <= tp2_price:
+                        tp2_hit = True
+                    if tp2_hit and lj <= runner_target:
+                        exit_idx = j
+                        exit_price = runner_target
+                        realized_points = w_tp1 * (entry_price - tp1_price) + w_tp2 * (entry_price - tp2_price) + w_run * (entry_price - runner_target)
+                        exit_reason = "三梯次全數止盈 (TP1+TP2+Runner)"
+                        break
+
+                if j == i + max_hold:
+                    exit_idx = j
+                    exit_price = _round_tick(cj)
+                    rem_pts = (exit_price - entry_price) if direction == "LONG" else (entry_price - exit_price)
+                    if not tp1_hit:
+                        realized_points = rem_pts
+                        exit_reason = "波段收盤平倉"
+                    elif not tp2_hit:
+                        t1_pts = (tp1_price - entry_price) if direction == "LONG" else (entry_price - tp1_price)
+                        realized_points = w_tp1 * t1_pts + (1.0 - w_tp1) * rem_pts
+                        exit_reason = "TP1止盈 + 尾倉收盤平倉"
+                    else:
+                        t1_pts = (tp1_price - entry_price) if direction == "LONG" else (entry_price - tp1_price)
+                        t2_pts = (tp2_price - entry_price) if direction == "LONG" else (entry_price - tp2_price)
+                        realized_points = w_tp1 * t1_pts + w_tp2 * t2_pts + w_run * rem_pts
+                        exit_reason = "TP1/TP2止盈 + 尾倉收盤平倉"
                     exit_reason = "TP1/TP2止盈 + 尾倉收盤平倉"
 
         gross_pnl = realized_points * qty * point_mult

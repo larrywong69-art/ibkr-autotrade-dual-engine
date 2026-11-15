@@ -287,13 +287,13 @@ class TelegramNotifier:
         msg = (
             f"💓 <b>【AutoTrade 旗艦雙策略定期巡檢心跳】</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"🏆 <b>運行策略</b>: <code>V9.1 旗艦自適應擴口終極版</code>\n"
+            f"🏆 <b>運行策略</b>: <code>V9.3 旗艦雙引擎整數自適應實盤版</code>\n"
             f"💼 <b>帳戶編號</b>: <code>{status.get('account_id', os.getenv('IB_ACCOUNT_ID', 'IBKR-PAPER'))}</code> (模擬)\n"
             f"💵 <b>帳戶總淨值</b>: <code>${equity_usd:,.2f} USD</code> (~HKD {equity_hkd:,.0f})\n"
             f"🛡️ <b>保證金使用率</b>: <code>{margin_pct:.1f}%</code> (安全)\n"
-            f"📊 <b>V9.1 當前持倉狀態</b>:\n"
-            f"  • V9.1 MES (60%): <b>{pos_v43_desc}</b>\n"
-            f"  • V9.1 MNQ (40%): <b>{pos_v50_desc}</b>\n"
+            f"📊 <b>V9.3 當前持倉狀態</b>:\n"
+            f"  • V9.3 MES (60%): <b>{pos_v43_desc}</b>\n"
+            f"  • V9.3 MNQ (40%): <b>{pos_v50_desc}</b>\n"
             f"🌐 <b>官方連線</b>: {conn_status}\n"
             f"⏰ <b>巡檢時間</b>: {now_str}"
         )

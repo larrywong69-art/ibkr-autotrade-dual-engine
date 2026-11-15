@@ -1,0 +1,103 @@
+{
+  "version": "v9.3",
+  "name": "v9_3_Master_Hybrid_Live",
+  "title": "V9.3 旗艦雙引擎整數自適應實盤版 (Master Hybrid Live)",
+  "description": "4H宏觀趨勢鎖定 (4H_LOCK) + 1H ADX強趨勢保護 + 斐波那契浪3回踩 + 箱體支撐阻力反彈 + 全整數口三梯次拆單矩陣 (1~12口) + 1.55R/3.10R/5.50R + 0.82x ATR緊密止損 + 低效時段自適應減半 + 100% IBKR實盤整數委託合規",
+  "backtest_metrics_10yr": {
+    "initial_capital": 30000.0,
+    "final_equity": 418802.53,
+    "net_profit": 388802.53,
+    "total_return_pct": 1296.01,
+    "cagr_pct": 30.20,
+    "max_drawdown_pct": 4.33,
+    "sharpe_ratio": 3.09,
+    "win_rate_pct": 60.85,
+    "profit_factor": 2.02,
+    "total_trades": 4412
+  },
+  "account_config": {
+    "initial_capital": 30000.0,
+    "commission_tier1_per_side": 0.62,
+    "commission_tier2_per_side": 0.57,
+    "tier2_monthly_volume_threshold": 1000,
+    "typical_spread_points": 0.25,
+    "limit_entry_slippage_points": 0.00,
+    "limit_tp_slippage_points": 0.00,
+    "stop_loss_slippage_points": 0.25,
+    "point_multiplier": 5.0,
+    "overnight_margin_per_contract": 2400.0,
+    "margin_buffer_factor": 1.8
+  },
+  "indicator_params": {
+    "trend_mode": "4H_LOCK",
+    "price_sortino_trend_threshold": 1.25,
+    "price_sortino_range_threshold": 0.70,
+    "htf_slope_atr_multiplier": 0.20,
+    "adx_period": 14,
+    "r2_max_adx_filter": 30.0
+  },
+  "rule_params": {
+    "trend_mode": "4H_LOCK",
+    "allowed_rules": ["R1", "R2"],
+    "tp1_r": 1.55,
+    "tp2_r": 3.10,
+    "runner_r": 5.50,
+    "sl_atr": 0.82,
+    "r2_sl_atr": 0.85,
+    "trailing_runner": true,
+    "trailing_atr_mult": 1.20,
+    "breakeven_min_offset_points": 0.25,
+    "allow_rule2_entry": true,
+    "allow_rule3_entry": false,
+    "r2_max_adx_filter": 30.0,
+    "use_limit_orders": true,
+    "limit_order_expiry_bars": 3,
+    "limit_order_tick_offset": 0.00,
+    "edge_mult": 0.0,
+    "risk_mult": 1.15
+  },
+  "lot_split_map": {
+    "1": [0, 1, 0],
+    "2": [1, 1, 0],
+    "3": [1, 1, 1],
+    "4": [1, 2, 1],
+    "5": [2, 2, 1],
+    "6": [2, 3, 1],
+    "7": [3, 3, 1],
+    "8": [3, 3, 2],
+    "9": [3, 4, 2],
+    "10": [4, 4, 2],
+    "11": [4, 5, 2],
+    "12": [5, 5, 2]
+  },
+  "equity_sizing_tiers": [
+    {
+      "tier_name": "Tier_1_Starter_30k_to_45k",
+      "min_equity": 0.0,
+      "max_equity": 45000.0,
+      "r1_contracts": 2,
+      "r2_contracts": 1
+    },
+    {
+      "tier_name": "Tier_2_Standard_45k_to_75k",
+      "min_equity": 45000.0,
+      "max_equity": 75000.0,
+      "r1_contracts": 5,
+      "r2_contracts": 2
+    },
+    {
+      "tier_name": "Tier_3_AllWeather_75k_to_150k",
+      "min_equity": 75000.0,
+      "max_equity": 150000.0,
+      "r1_contracts": 7,
+      "r2_contracts": 3
+    },
+    {
+      "tier_name": "Tier_4_Heavy_Above_150k",
+      "min_equity": 150000.0,
+      "max_equity": 999999999.0,
+      "r1_contracts": 9,
+      "r2_contracts": 3
+    }
+  ]
+}

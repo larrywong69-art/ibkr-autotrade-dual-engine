@@ -148,7 +148,7 @@
       </div>
     </div>
 
-    <!-- 策略 1: V9.1 旗艦自適應擴口終極版 (MES 60%) -->
+    <!-- 策略 1: V9.3 旗艦自適應擴口實盤版 (MES 60%) -->
     <div class="bg-[var(--card)] border border-blue-500/20 rounded-xl p-3.5 shadow-sm space-y-2.5 relative overflow-hidden">
       <div class="absolute top-0 right-0 w-24 h-24 bg-blue-500/5 rounded-full blur-xl pointer-events-none"></div>
 
@@ -158,7 +158,7 @@
           <span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span>
           <div>
             <div class="text-xs font-bold text-white flex items-center gap-1.5">
-              <span>V9.1 旗艦自適應擴口 (MES)</span>
+              <span>V9.3 旗艦自適應擴口 (MES)</span>
               <span class="px-1.5 py-0.2 rounded text-[10px] bg-blue-500/15 text-blue-400 border border-blue-500/25">
                 權重 60% • 優先權
               </span>
@@ -201,7 +201,7 @@
       </div>
     </div>
 
-    <!-- 策略 2: V9.1 旗艦自適應擴口終極版 (MNQ 40%) -->
+    <!-- 策略 2: V9.3 旗艦自適應擴口實盤版 (MNQ 40%) -->
     <div class="bg-[var(--card)] border border-emerald-500/20 rounded-xl p-3.5 shadow-sm space-y-2.5 relative overflow-hidden">
       <div class="absolute top-0 right-0 w-24 h-24 bg-emerald-500/5 rounded-full blur-xl pointer-events-none"></div>
 
@@ -211,7 +211,7 @@
           <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
           <div>
             <div class="text-xs font-bold text-white flex items-center gap-1.5">
-              <span>V9.1 旗艦自適應擴口 (MNQ)</span>
+              <span>V9.3 旗艦自適應擴口 (MNQ)</span>
               <span class="px-1.5 py-0.2 rounded text-[10px] bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">
                 權重 40% • 防飢餓約束
               </span>
@@ -899,7 +899,7 @@
       container.innerHTML = filtered.map(t => {
         const sym = (t.symbol || (t.strategy && t.strategy.includes('4') ? 'MES' : 'MNQ')).toUpperCase();
         const isMes = sym.includes("MES") || (t.strategy && t.strategy.includes("4"));
-        const stratName = isMes ? "V9.1 MES" : "V9.1 MNQ";
+        const stratName = isMes ? "V9.3 MES" : "V9.3 MNQ";
         const stratIcon = "🔥";
         const stratBadge = isMes 
           ? "bg-blue-500/15 text-blue-400 border border-blue-500/30" 

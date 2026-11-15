@@ -80,6 +80,25 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "trailing_runner": True,
         "edge_mult": 0.46,
         "risk_mult": 1.15
+    },
+    "v9.3": {
+        "id": "v9.3",
+        "name": "V9.3 旗艦雙引擎整數自適應實盤版 (Master Hybrid Live)",
+        "color": "#e11d48",
+        "stage": "🚀 實盤整數口旗艦 (+1296%)",
+        "description": "全整數口三梯次拆單 + R2 隨淨值三階擴口 (1->2->3口) + 低效時段減半濾網 + 1H ADX強趨勢保護，10年淨利 $388,803，回撤僅 4.33%",
+        "trend_mode": "4H_LOCK",
+        "tp1_r": 1.55,
+        "tp2_r": 3.10,
+        "runner_r": 5.50,
+        "sl_atr": 0.82,
+        "r2_sl_atr": 0.85,
+        "allowed_rules": ["R1", "R2"],
+        "trailing_runner": True,
+        "edge_mult": 0.0,
+        "risk_mult": 1.15,
+        "r2_max_adx_filter": 30.0,
+        "is_integer_lot_mode": True
     }
 }
 

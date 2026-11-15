@@ -6,7 +6,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <title>AutoTrade 旗艦守護交易系統 (V9.1 Master Hybrid Plus) — 實體模擬監控儀表板</title>
+  <title>AutoTrade 旗艦守護交易系統 (V9.3 Master Hybrid Live) — 實體模擬監控儀表板</title>
   <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
   <style>
     :root {
@@ -49,13 +49,13 @@
         <div>
           <div class="flex items-center gap-2 flex-wrap">
             <h1 class="text-lg sm:text-xl font-bold text-[var(--foreground)] tracking-tight">
-              AutoTrade 旗艦守護引擎 (V9.1 Master Hybrid Plus)
+              AutoTrade 旗艦守護引擎 (V9.3 Master Hybrid Live)
             </h1>
             <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-500/15 text-blue-500 border border-blue-500/25">
-              🔥 V9.1 旗艦自適應擴口 (MES 60%)
+              🔥 V9.3 實盤整數自適應 (MES 60%)
             </span>
             <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-500 border border-emerald-500/25">
-              ⚡ V9.1 旗艦自適應擴口 (MNQ 40%)
+              ⚡ V9.3 實盤整數自適應 (MNQ 40%)
             </span>
             <span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-500/15 text-indigo-400 border border-indigo-500/25 flex items-center gap-1.5">
               <span class="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse"></span>
@@ -204,10 +204,10 @@
         <div class="flex items-center justify-between text-xs font-semibold">
           <span class="text-blue-500 flex items-center gap-1.5">
             <span class="w-2.5 h-2.5 rounded bg-blue-500 inline-block"></span>
-            V9.1 MES 優先資金池 (60% • <span id="pool-v43-val">US$ 73,800</span>)
+            V9.3 MES 優先資金池 (60% • <span id="pool-v43-val">US$ 73,800</span>)
           </span>
           <span class="text-emerald-500 flex items-center gap-1.5">
-            V9.1 MNQ 防飢餓資金池 (40% • <span id="pool-v50-val">US$ 49,200</span>)
+            V9.3 MNQ 防飢餓資金池 (40% • <span id="pool-v50-val">US$ 49,200</span>)
             <span class="w-2.5 h-2.5 rounded bg-emerald-500 inline-block"></span>
           </span>
         </div>
@@ -222,7 +222,7 @@
         <!-- V4.3 優先池規則 -->
         <div class="p-3 rounded-xl bg-blue-500/5 border border-blue-500/20 space-y-1.5">
           <div class="flex items-center justify-between text-xs">
-            <span class="font-bold text-blue-500 flex items-center gap-1">🔥 V9.1 MES 旗艦權益</span>
+            <span class="font-bold text-blue-500 flex items-center gap-1">🔥 V9.3 MES 旗艦權益</span>
             <span class="px-2 py-0.2 rounded-full text-[10px] font-bold bg-blue-500/20 text-blue-400">絕對開倉優先權</span>
           </div>
           <div class="text-[11px] text-[var(--muted-foreground)] leading-relaxed">
@@ -235,7 +235,7 @@
         <!-- V5.0 防飢餓池規則 -->
         <div class="p-3 rounded-xl bg-emerald-500/5 border border-emerald-500/20 space-y-1.5">
           <div class="flex items-center justify-between text-xs">
-            <span class="font-bold text-emerald-500 flex items-center gap-1">⚡ V9.1 MNQ 防飢餓閘門</span>
+            <span class="font-bold text-emerald-500 flex items-center gap-1">⚡ V9.3 MNQ 防飢餓閘門</span>
             <span class="px-2 py-0.2 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400">20% 安全底線鎖定</span>
           </div>
           <div class="text-[11px] text-[var(--muted-foreground)] leading-relaxed">
@@ -262,7 +262,7 @@
           <div class="flex items-center justify-between pb-3 border-b border-[var(--border)] flex-wrap gap-2">
             <div>
               <div class="flex items-center gap-2">
-                <span class="text-base font-bold text-blue-500">🔥 V9.1 旗艦自適應擴口 (MES)</span>
+                <span class="text-base font-bold text-blue-500">🔥 V9.3 旗艦自適應擴口 (MES)</span>
                 <span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20" id="v43-contract-badge">
                   CME MESZ6
                 </span>
@@ -326,7 +326,7 @@
           <!-- 三梯次分注止賺規劃 (50% / 25% / 25%) -->
           <div class="p-3 rounded-xl bg-[var(--background)]/50 border border-[var(--border)] space-y-1.5">
             <div class="flex items-center justify-between text-xs">
-              <span class="font-semibold text-[var(--foreground)]">V9.1 旗艦三梯次獲利收割 (38/42/20)</span>
+              <span class="font-semibold text-[var(--foreground)]">V9.3 旗艦三梯次獲利收割 (整數自適應)</span>
               <span class="text-[10px] text-blue-400 font-mono" id="v43-tranche-summary">等待信號</span>
             </div>
             <div class="w-full bg-[var(--border)] h-2 rounded-full overflow-hidden flex">
@@ -367,7 +367,7 @@
           <div class="flex items-center justify-between pb-3 border-b border-[var(--border)] flex-wrap gap-2">
             <div>
               <div class="flex items-center gap-2">
-                <span class="text-base font-bold text-emerald-500">⚡ V9.1 旗艦自適應擴口 (MNQ)</span>
+                <span class="text-base font-bold text-emerald-500">⚡ V9.3 旗艦自適應擴口 (MNQ)</span>
                 <span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" id="v50-contract-badge">
                   CME MNQZ6
                 </span>
@@ -431,7 +431,7 @@
           <!-- 不對稱梯次收割 (60% / 25% / 15%) -->
           <div class="p-3 rounded-xl bg-[var(--background)]/50 border border-[var(--border)] space-y-1.5">
             <div class="flex items-center justify-between text-xs">
-              <span class="font-semibold text-[var(--foreground)]">V9.1 旗艦三梯次獲利收割 (38/42/20)</span>
+              <span class="font-semibold text-[var(--foreground)]">V9.3 旗艦三梯次獲利收割 (整數自適應)</span>
               <span class="text-[10px] text-emerald-400 font-mono" id="v50-tranche-summary">等待信號</span>
             </div>
             <div class="w-full bg-[var(--border)] h-2 rounded-full overflow-hidden flex">
@@ -479,7 +479,7 @@
             </span>
           </div>
           <p class="text-xs text-[var(--muted-foreground)] mt-0.5">
-            實時同步 CME MES 與 CME MNQ (V9.1 旗艦自適應擴口) 官方成交流水 • 零模擬假數據
+            實時同步 CME MES 與 CME MNQ (V9.3 旗艦自適應擴口) 官方成交流水 • 零模擬假數據
           </p>
         </div>
 
@@ -832,8 +832,8 @@
 
         const sym = t.symbol || (t.position_id && t.position_id.includes('MNQ') ? 'MNQ' : 'MES');
         const symBadge = sym === 'MNQ'
-          ? '<span class="px-2 py-0.5 rounded text-[11px] font-bold bg-indigo-500/15 text-indigo-400 border border-indigo-500/30">⚡ V9.1 MNQ</span>'
-          : '<span class="px-2 py-0.5 rounded text-[11px] font-bold bg-rose-500/15 text-rose-400 border border-rose-500/30">🔥 V9.1 MES</span>';
+          ? '<span class="px-2 py-0.5 rounded text-[11px] font-bold bg-indigo-500/15 text-indigo-400 border border-indigo-500/30">⚡ V9.3 MNQ</span>'
+          : '<span class="px-2 py-0.5 rounded text-[11px] font-bold bg-rose-500/15 text-rose-400 border border-rose-500/30">🔥 V9.3 MES</span>';
 
         const pnlStr = t.pnl !== undefined ? `${t.pnl >= 0 ? '+' : ''}$${t.pnl.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}` : '-';
 

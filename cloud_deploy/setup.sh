@@ -92,7 +92,7 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd "$DIR"
 
 echo "======================================================================"
-echo "🌟 啟動 AutoTrade 雲端守護系統 (V9.1 Master Hybrid Plus)"
+echo "🌟 啟動 AutoTrade 雲端守護系統 (V9.3 Master Hybrid Live)"
 echo "======================================================================"
 
 # 確保虛擬環境就緒
