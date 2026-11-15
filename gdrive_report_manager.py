@@ -631,7 +631,8 @@ table.data-table tr:nth-child(even) {{
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(html_content)
 
-        upload_doc_cmd = f'gdrive mutate upload "{html_path}" --parent {self.folder_id} --mime-type "application/vnd.google-apps.document" --json'
+        parent_flag = f'--parent "{self.folder_id}" ' if self.folder_id else ''
+        upload_doc_cmd = f'gdrive mutate upload "{html_path}" {parent_flag}--mime-type "application/vnd.google-apps.document" --json'
         code, out, err = self._run_gdrive_cmd(upload_doc_cmd)
         doc_id = ""
         doc_url = ""
@@ -650,7 +651,8 @@ table.data-table tr:nth-child(even) {{
         csv_path = os.path.join(GDRIVE_TEMP_DIR, csv_filename)
         self.generate_executions_csv(report_data, csv_path)
 
-        upload_sheet_cmd = f'gdrive mutate upload "{csv_path}" --parent {self.folder_id} --mime-type "application/vnd.google-apps.spreadsheet" --json'
+        parent_flag = f'--parent "{self.folder_id}" ' if self.folder_id else ''
+        upload_sheet_cmd = f'gdrive mutate upload "{csv_path}" {parent_flag}--mime-type "application/vnd.google-apps.spreadsheet" --json'
         code_s, out_s, err_s = self._run_gdrive_cmd(upload_sheet_cmd)
         sheet_id = ""
         sheet_url = ""
@@ -677,7 +679,8 @@ table.data-table tr:nth-child(even) {{
 
         if not master_sheet_id:
             # 建立新的 Master Google Sheet
-            master_upload_cmd = f'gdrive mutate upload "{master_upload_csv}" --parent {self.folder_id} --mime-type "application/vnd.google-apps.spreadsheet" --json'
+            parent_flag = f'--parent "{self.folder_id}" ' if self.folder_id else ''
+            master_upload_cmd = f'gdrive mutate upload "{master_upload_csv}" {parent_flag}--mime-type "application/vnd.google-apps.spreadsheet" --json'
             code_m, out_m, _ = self._run_gdrive_cmd(master_upload_cmd)
             if code_m == 0:
                 for line in out_m.splitlines():
