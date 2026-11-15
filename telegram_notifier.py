@@ -279,20 +279,21 @@ class TelegramNotifier:
         pos_v43 = v43.get("active_position")
         pos_v50 = v50.get("active_position")
 
-        pos_v43_desc = f"{pos_v43.get('position')} 口" if pos_v43 else "空手等待"
-        pos_v50_desc = f"{pos_v50.get('position')} 口" if pos_v50 else "空手等待"
+        pos_v43_desc = f"{pos_v43.get('direction', '')} {pos_v43.get('contracts', pos_v43.get('position', 0))} 口" if pos_v43 else "空手等待"
+        pos_v50_desc = f"{pos_v50.get('direction', '')} {pos_v50.get('contracts', pos_v50.get('position', 0))} 口" if pos_v50 else "空手等待"
 
         conn_status = "🟢 正常在線 (CME 雙合約直連)" if status.get("ibkr_connected") else "🔴 連線中斷 (自動重連中)"
 
         msg = (
-            f"💓 <b>【AutoTrade 雙策略定期巡檢心跳】</b>\n"
+            f"💓 <b>【AutoTrade 旗艦雙策略定期巡檢心跳】</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
+            f"🏆 <b>運行策略</b>: <code>V9.1 旗艦自適應擴口終極版</code>\n"
             f"💼 <b>帳戶編號</b>: <code>{status.get('account_id', os.getenv('IB_ACCOUNT_ID', 'IBKR-PAPER'))}</code> (模擬)\n"
             f"💵 <b>帳戶總淨值</b>: <code>${equity_usd:,.2f} USD</code> (~HKD {equity_hkd:,.0f})\n"
             f"🛡️ <b>保證金使用率</b>: <code>{margin_pct:.1f}%</code> (安全)\n"
-            f"📊 <b>策略當前持倉</b>:\n"
-            f"  • V4.3 標普 (60%): <b>{pos_v43_desc}</b>\n"
-            f"  • V5.0 納指 (40%): <b>{pos_v50_desc}</b>\n"
+            f"📊 <b>V9.1 當前持倉狀態</b>:\n"
+            f"  • V9.1 MES (60%): <b>{pos_v43_desc}</b>\n"
+            f"  • V9.1 MNQ (40%): <b>{pos_v50_desc}</b>\n"
             f"🌐 <b>官方連線</b>: {conn_status}\n"
             f"⏰ <b>巡檢時間</b>: {now_str}"
         )

@@ -10,7 +10,7 @@
 
 | 模組 | 檔案 | 說明 |
 | :--- | :--- | :--- |
-| **雙引擎實盤/模擬主程式** | `live_ibkr_dual_engine.py` | 同時運行 **V4.3 (MES 60%)** 與 **V5.0 (MNQ 40%)** 雙策略引擎，支援自動重連與三梯次平倉 |
+| **旗艦實盤/模擬守護主程式** | `live_ibkr_dual_engine.py` | 同時運行 **V9.1 旗艦自適應擴口終極版 (MES 60% + MNQ 40%)**，配備 4H_LOCK 宏觀趨勢濾網、0.82x ATR 緊密止損與 38/42/20 三階梯獲利收割 |
 | **單策略實盤引擎** | `live_ibkr_trader_v4_3.py`, `live_ibkr_trader_v5.py`, `live_paper_trader_v3b.py` | V4.3 / V5.0 / V3B 獨立執行引擎 |
 | **監控伺服器 & 儀表板** | `server.py`, `dashboard.html`, `mobile.html`, `manifest.json` | 桌面雙欄儀表板與手機 PWA 監控介面，支援 PIN 碼遠端控制開關與緊急平倉 |
 | **安全與遠端穿透** | `tunnel_manager.py`, `change_pin.py` | Cloudflare Tunnel 公網加密穿透管理，與 `.env` 6 位數安全 PIN 碼修改工具 |

@@ -2,25 +2,27 @@
 """
 ================================================================================
 live_ibkr_dual_engine.py
-AutoTrade 雙策略並行守護引擎 (Dual-Engine Live Daemon)
+AutoTrade 旗艦守護引擎 (V9.1 Master Hybrid Plus Live Daemon)
 ================================================================================
 核心架構規格：
 1. 資金分配 6:4：
-   - V4.3 專屬資金池：總資產 60%
-   - V5.0 專屬資金池：總資產 40%
-2. 絕對優先權在 V4.3：
-   - V4.3 享有絕對開火權，無條件優先保證保證金
-   - V5.0 送出前執行防飢餓校驗：可用資金扣除 V5.0 所需保證金後，必須高於 V4.3 的 60% 預留底線
-   - 保證金緊張時 V5.0 自適應降口 (Downsizing) 至 1 口，或暫緩開倉
-3. 物理標的分流（零撮合衝突）：
-   - V4.3 負責 CME MES (微型標普500期貨主力合約)
-   - V5.0 負責 CME MNQ (微型納斯達克100期貨主力合約)
-4. 單一 Socket 直連 IB Gateway (Port 4002) 或 TWS (Port 7497)：
+   - V9.1 MES 專屬資金池：總資產 60% (享有絕對開火權)
+   - V9.1 MNQ 專屬資金池：總資產 40% (受防飢餓動態約束)
+2. 旗艦策略升級為 V9.1 Master Hybrid Plus：
+   - 4H 宏觀趨勢鎖定 (4H_LOCK: 4H EMA20 > EMA50 且 4H Close > EMA200 始得多頭開火)
+   - 緊密止損錨定 0.82x ATR，單筆下行風險極致壓縮
+   - 38% / 42% / 20% 三階梯獲利收割 (1.55R / 3.10R / 5.50R + ATR 動態跑道移動止盈)
+   - 1.15x 動態槓桿與資產階梯自適應擴口 (10 年回測總報酬 1,003%，MDD 僅 4.80%)
+   - 規則 2 (箱體邊界) & 規則 3 (假突破反轉) 嚴格鎖定 1 口合約
+3. 防飢餓保護機制 (Anti-Starvation Gatekeeper)：
+   - V9.1 MNQ 送出前執行防飢餓校驗：可用資金扣除 MNQ 所需保證金後，必須高於 MES 的 60% 預留底線
+   - 保證金緊張時 MNQ 自適應降口至 1 口或暫緩開倉
+4. 物理標的分流（零撮合衝突）：
+   - 主策略 1 負責 CME MES (微型標普500期貨主力合約)
+   - 主策略 2 負責 CME MNQ (微型納斯達克100期貨主力合約)
+5. 單一 Socket 直連 IB Gateway (Port 4002) 或 TWS (Port 7497)：
    - 杜絕進程間 ClientId 競爭與端口衝突
    - 統一同步 IBKR 官方淨值、持倉、掛單與成交流水
-5. 獨立控制與日熔斷隔離：
-   - 支援獨立暫停/啟動 V4.3 或 V5.0
-   - 支援單獨一鍵平倉 MES 或 MNQ
 ================================================================================
 """
 
@@ -56,6 +58,7 @@ except ImportError:
     except ImportError:
         IB_ASYNC_AVAILABLE = False
 
+from strategies.defense_champion_v9_1.strategy import StrategyEngineV91
 from strategies.defense_champion_v4_3.strategy import StrategyEngineV43
 from strategies.defense_champion_v5.strategy import StrategyEngineV5
 from mes_strategy.strategy_models import Direction, SignalType, TradeSignal
@@ -65,6 +68,7 @@ LOG_FILE = os.path.join(CURRENT_DIR, "mes_dual_engine_live.log")
 STATUS_FILE = os.path.join(CURRENT_DIR, "trade_status.json")
 CONTROL_FILE = os.path.join(CURRENT_DIR, "trade_control.json")
 
+CONFIG_V91 = os.path.join(CURRENT_DIR, "strategies", "defense_champion_v9_1", "config.json")
 CONFIG_V43 = os.path.join(CURRENT_DIR, "strategies", "defense_champion_v4.3", "config.json")
 CONFIG_V50 = os.path.join(CURRENT_DIR, "strategies", "defense_champion_v5", "config.json")
 
@@ -108,13 +112,21 @@ def calculate_session_vwap(df: pd.DataFrame) -> pd.Series:
 class LiveIBKRDualEngine:
     def __init__(self, check_interval_sec: float = 2.0):
         self.interval = check_interval_sec
-        self.engine_v43 = StrategyEngineV43(CONFIG_V43)
-        self.engine_v50 = StrategyEngineV5(CONFIG_V50)
+        # 旗艦 V9.1 策略引擎實例 (MES 享有 60% 優先池，MNQ 享有 40% 防飢餓池)
+        self.engine_v91_mes = StrategyEngineV91(CONFIG_V91)
+        self.engine_v91_mnq = StrategyEngineV91(CONFIG_V91)
+        # 向下相容別名，確保原有調用與 API 無縫銜接
+        self.engine_v43 = self.engine_v91_mes
+        self.engine_v50 = self.engine_v91_mnq
         self.ib: Optional[IB] = None
         self.client_id = 25
         self.account_id: str = ""
         self.currency: str = "HKD"
         self.is_connected = False
+
+        # 4H 宏觀趨勢濾網快取 (4H_LOCK: 15 分鐘動態更新)
+        self.macro_cache_mes: Dict[str, Any] = {"ts": 0.0, "long": True, "short": False, "e20": 0.0, "e50": 0.0, "e200": 0.0, "c": 0.0}
+        self.macro_cache_mnq: Dict[str, Any] = {"ts": 0.0, "long": True, "short": False, "e20": 0.0, "e50": 0.0, "e200": 0.0, "c": 0.0}
 
         # 控制開關
         self.trading_enabled_global = True
@@ -222,7 +234,7 @@ class LiveIBKRDualEngine:
         """官方即時成交流水回呼鉤子"""
         try:
             sym = getattr(fill.contract, "symbol", "")
-            strat = "v4.3" if sym == "MES" else ("v5.0" if sym == "MNQ" else "UNKNOWN")
+            strat = "v9.1" if sym in ("MES", "MNQ") else "UNKNOWN"
             comm = getattr(fill.commissionReport, "commission", 0.0) if hasattr(fill, "commissionReport") and fill.commissionReport else 0.0
             pnl = getattr(fill.commissionReport, "realizedPNL", 0.0) if hasattr(fill, "commissionReport") and fill.commissionReport else 0.0
             self.ledger_mgr.record_execution(
@@ -246,7 +258,7 @@ class LiveIBKRDualEngine:
                 from telegram_notifier import notifier
                 action_text = "買入 (好倉)" if fill.execution.side == "BOT" else "沽出 (淡倉/平倉)"
                 notifier.notify_trade(
-                    strategy=strat.upper(),
+                    strategy=f"V9.1 旗艦版 ({sym})",
                     symbol=sym,
                     contract=getattr(fill.contract, "localSymbol", sym),
                     action=action_text,
@@ -280,7 +292,7 @@ class LiveIBKRDualEngine:
             fills = self.ib.fills()
             for f in fills:
                 sym = getattr(f.contract, "symbol", "")
-                strat = "v4.3" if sym == "MES" else ("v5.0" if sym == "MNQ" else "UNKNOWN")
+                strat = "v9.1" if sym in ("MES", "MNQ") else "UNKNOWN"
                 comm = getattr(f.commissionReport, "commission", 0.0) if hasattr(f, "commissionReport") and f.commissionReport else 0.0
                 pnl = getattr(f.commissionReport, "realizedPNL", 0.0) if hasattr(f, "commissionReport") and f.commissionReport else 0.0
                 self.ledger_mgr.record_execution(
@@ -389,7 +401,7 @@ class LiveIBKRDualEngine:
                     # 同步歷史成交分錄
                     self._sync_historical_fills()
 
-                    self.status_message = f"雙引擎已就緒！帳戶: {self.account_id} | V4.3: {self.symbol_mes} | V5.0: {self.symbol_mnq}"
+                    self.status_message = f"V9.1 旗艦雙策略已就緒！帳戶: {self.account_id} | MES: {self.symbol_mes} (60%) | MNQ: {self.symbol_mnq} (40%)"
                     return True
 
                 except Exception as e:
@@ -445,7 +457,7 @@ class LiveIBKRDualEngine:
                 tradingClass="MES"
             )
             self.symbol_mes = self.contract_mes.localSymbol or "MESZ6"
-            logger.info(f"[✓] 成功鎖定 V4.3 標的: CME {self.symbol_mes} (ConId: {self.contract_mes.conId})")
+            logger.info(f"[✓] 成功鎖定 V9.1 MES 標的: CME {self.symbol_mes} (ConId: {self.contract_mes.conId})")
             try:
                 self.ticker_mes = self.ib.reqMktData(self.contract_mes, '', False, False)
             except Exception as me:
@@ -466,7 +478,7 @@ class LiveIBKRDualEngine:
                 tradingClass="MNQ"
             )
             self.symbol_mnq = self.contract_mnq.localSymbol or "MNQZ6"
-            logger.info(f"[✓] 成功鎖定 V5.0 標的: CME {self.symbol_mnq} (ConId: {self.contract_mnq.conId})")
+            logger.info(f"[✓] 成功鎖定 V9.1 MNQ 標的: CME {self.symbol_mnq} (ConId: {self.contract_mnq.conId})")
             try:
                 self.ticker_mnq = self.ib.reqMktData(self.contract_mnq, '', False, False)
             except Exception as me:
@@ -597,8 +609,9 @@ class LiveIBKRDualEngine:
                     cur_p = self.price_mes if self.price_mes > 0 else entry_p
                     pts = (cur_p - entry_p) if pos_direction == "LONG" else (entry_p - cur_p)
                     u_pnl = round(pts * qty * multiplier, 2)
+                    c_a, c_b, c_c = self.engine_v91_mes.calculate_tranches(qty)
                     pos_v43 = {
-                        "strategy": "v4.3",
+                        "strategy": "v9.1",
                         "symbol": "MES",
                         "position_id": f"POS_{self.symbol_mes}",
                         "direction": pos_direction,
@@ -607,9 +620,9 @@ class LiveIBKRDualEngine:
                         "current_price": cur_p,
                         "unrealized_pnl": u_pnl,
                         "floating_points": round(pts, 2),
-                        "tranche_a_contracts": qty // 2,
-                        "tranche_b_contracts": qty // 4,
-                        "tranche_c_contracts": qty - (qty // 2) - (qty // 4)
+                        "tranche_a_contracts": c_a,
+                        "tranche_b_contracts": c_b,
+                        "tranche_c_contracts": c_c
                     }
 
                 elif sym == "MNQ":
@@ -618,11 +631,9 @@ class LiveIBKRDualEngine:
                     cur_p = self.price_mnq if self.price_mnq > 0 else entry_p
                     pts = (cur_p - entry_p) if pos_direction == "LONG" else (entry_p - cur_p)
                     u_pnl = round(pts * qty * multiplier, 2)
-                    c_a = max(1, int(round(qty * 0.60))) if qty >= 3 else (qty // 2 or 1)
-                    c_b = max(1, int(round(qty * 0.25))) if qty >= 3 else 1
-                    c_c = max(0, qty - c_a - c_b)
+                    c_a, c_b, c_c = self.engine_v91_mnq.calculate_tranches(qty)
                     pos_v50 = {
-                        "strategy": "v5.0",
+                        "strategy": "v9.1",
                         "symbol": "MNQ",
                         "position_id": f"POS_{self.symbol_mnq}",
                         "direction": pos_direction,
@@ -726,12 +737,95 @@ class LiveIBKRDualEngine:
         """將委託價格對齊 CME 最小跳動點位 (MES/MNQ 為 0.25)，避免 Error 110 拒單"""
         return round(round(float(price) / tick) * tick, 2)
 
-    def place_v43_bracket_order(self, signal: TradeSignal):
+    def get_4h_macro_regime(self, contract: Any, symbol: str) -> Dict[str, Any]:
         """
-        向 IBKR 下發 V4.3 MES 專屬 Bracket 訂單 (享有一票優先權)
+        獲取 4H 宏觀趨勢狀態 (4H_LOCK: 4H EMA20 > EMA50 且 4H Close > EMA200 為做多)
+        具備 15 分鐘動態快取，避免頻繁請求 IBKR 歷史數據接口
         """
-        if not self.ib or not self.ib.isConnected() or not self.contract_mes:
+        now = time.time()
+        cache = self.macro_cache_mes if symbol == "MES" else self.macro_cache_mnq
+        if now - cache.get("ts", 0.0) < 900.0 and cache.get("c", 0.0) > 0:
+            return cache
+
+        try:
+            if self.ib and self.ib.isConnected() and contract:
+                bars_4h = self.ib.reqHistoricalData(
+                    contract,
+                    endDateTime='',
+                    durationStr='60 D',
+                    barSizeSetting='4 hours',
+                    whatToShow='TRADES',
+                    useRTH=False,
+                    formatDate=1,
+                    timeout=10
+                )
+                if bars_4h and len(bars_4h) >= 20:
+                    df_4h = util.df(bars_4h)
+                    e20 = float(df_4h['close'].ewm(span=20, adjust=False).mean().iloc[-1])
+                    e50 = float(df_4h['close'].ewm(span=50, adjust=False).mean().iloc[-1])
+                    e200 = float(df_4h['close'].ewm(span=200, adjust=False).mean().iloc[-1])
+                    c = float(df_4h['close'].iloc[-1])
+                    cache["long"] = (e20 > e50) and (c > e200)
+                    cache["short"] = (e20 < e50) and (c < e200)
+                    cache["e20"] = e20
+                    cache["e50"] = e50
+                    cache["e200"] = e200
+                    cache["c"] = c
+                    cache["ts"] = now
+                    logger.info(
+                        f"📊 [4H 宏觀趨勢更新] {symbol}: 4H收盤 {c:.2f} | EMA20 {e20:.2f} | "
+                        f"EMA50 {e50:.2f} | EMA200 {e200:.2f} -> 允許做多: {cache['long']} / 允許做空: {cache['short']}"
+                    )
+        except Exception as e:
+            logger.warning(f"獲取 {symbol} 4H 宏觀趨勢異常: {e}")
+
+        return cache
+
+    def place_v91_bracket_order(self, symbol: str, signal: TradeSignal):
+        """
+        向 IBKR 下發 V9.1 旗艦自適應擴口終極版專屬 Bracket 訂單 (38% TP1 / 42% TP2 / 20% Runner + 0.82x ATR 緊密止損)
+        """
+        if not self.ib or not self.ib.isConnected():
             return
+        target_contract = self.contract_mes if symbol == "MES" else self.contract_mnq
+        if not target_contract:
+            return
+
+        # -------------------------------------------------------------
+        # 若為 MNQ，執行核心防飢餓保護機制 (Anti-Starvation Gatekeeper)
+        # -------------------------------------------------------------
+        if symbol == "MNQ":
+            usd_rate = 7.78 if self.currency == "HKD" else 1.0
+            avail_usd = self.available_funds / usd_rate
+            est_margin_per_contract = 2000.0
+            mes_reserved_floor = self.pool_v43_usd * 0.20
+
+            req_margin = signal.contracts * est_margin_per_contract
+            if (avail_usd - req_margin) < mes_reserved_floor:
+                if signal.contracts > 1:
+                    logger.warning(f"⚠️ [保證金防飢餓] 可用資金 (${avail_usd:,.0f}) 偏緊，自動將 V9.1 MNQ 開倉由 {signal.contracts} 口降至 1 口以保障 MES 配額。")
+                    self.incident_mgr.record_incident(
+                        severity="WARNING",
+                        category="MARGIN",
+                        code=4001,
+                        message=f"V9.1 保證金防飢餓調整: MNQ 開倉口數由 {signal.contracts} 口自適應降至 1 口以保留 MES 專屬維持金 (${mes_reserved_floor:,.0f} USD)",
+                        details={"avail_usd": round(avail_usd, 2), "floor_usd": round(mes_reserved_floor, 2)},
+                        source="GATEKEEPER"
+                    )
+                    signal.contracts = 1
+                    req_margin = 1 * est_margin_per_contract
+
+                if (avail_usd - req_margin) < mes_reserved_floor:
+                    logger.critical(f"🛑 [保證金安全攔截] 拒絕 V9.1 MNQ 開倉！可用資金 (${avail_usd:,.0f}) 需全額優先保留給 MES (${mes_reserved_floor:,.0f})。")
+                    self.incident_mgr.record_incident(
+                        severity="ERROR",
+                        category="MARGIN",
+                        code=4002,
+                        message=f"V9.1 保證金安全攔截: 拒絕 MNQ 開倉！可用資金 (${avail_usd:,.0f} USD) 需全額優先保留給 MES (${mes_reserved_floor:,.0f} USD)",
+                        details={"avail_usd": round(avail_usd, 2), "floor_usd": round(mes_reserved_floor, 2)},
+                        source="GATEKEEPER"
+                    )
+                    return
 
         direction_action = "BUY" if signal.direction == Direction.LONG else "SELL"
         exit_action = "SELL" if signal.direction == Direction.LONG else "BUY"
@@ -741,10 +835,18 @@ class LiveIBKRDualEngine:
         sl_p = self._round_to_tick(signal.sl_price, 0.25)
         tp1_p = self._round_to_tick(signal.tp1_price, 0.25)
         tp2_p = self._round_to_tick(signal.tp2_price, 0.25)
+        runner_calc = entry_p + 5.50 * abs(entry_p - sl_p) if signal.direction == Direction.LONG else entry_p - 5.50 * abs(entry_p - sl_p)
+        runner_p = self._round_to_tick(getattr(signal, "runner_price", runner_calc), 0.25)
 
-        logger.info(f"👑 [V4.3 優先開火] 送出 MES Bracket: {direction_action} {qty} 口 @ LMT {entry_p:.2f} | 止蝕: {sl_p:.2f} | TP1: {tp1_p:.2f}")
+        engine_inst = self.engine_v91_mes if symbol == "MES" else self.engine_v91_mnq
+        cnt_a, cnt_b, cnt_c = engine_inst.calculate_tranches(qty)
 
-        # 1. 主單 (LMT)
+        prefix = f"V91_{symbol}"
+        logger.info(
+            f"🚀 [{prefix} 旗艦開火] 送出 {symbol} Bracket: {direction_action} {qty} 口 @ LMT {entry_p:.2f} | "
+            f"止蝕: {sl_p:.2f} (0.82x ATR) | TP1(38%): {tp1_p:.2f} ({cnt_a}口) | TP2(42%): {tp2_p:.2f} ({cnt_b}口) | Runner(20%): {runner_p:.2f} ({cnt_c}口)"
+        )
+
         parent = LimitOrder(
             action=direction_action,
             totalQuantity=qty,
@@ -753,10 +855,9 @@ class LiveIBKRDualEngine:
             outsideRth=True
         )
         parent.orderId = self.ib.client.getReqId()
-        parent.orderRef = "V43_MES"
+        parent.orderRef = prefix
         parent.transmit = False
 
-        # 2. CME 原生硬止蝕單
         sl_order = StopOrder(
             action=exit_action,
             totalQuantity=qty,
@@ -766,189 +867,70 @@ class LiveIBKRDualEngine:
         )
         sl_order.orderId = self.ib.client.getReqId()
         sl_order.parentId = parent.orderId
-        sl_order.orderRef = "V43_MES_SL"
+        sl_order.orderRef = f"{prefix}_SL"
         sl_order.transmit = False
 
         orders = [parent, sl_order]
 
-        # 3. 梯次止賺 (50% / 25% / 25%)
         if qty == 1:
             tp1 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=tp1_p, tif="GTC", outsideRth=True)
             tp1.orderId = self.ib.client.getReqId()
             tp1.parentId = parent.orderId
-            tp1.orderRef = "V43_MES_TP1"
+            tp1.orderRef = f"{prefix}_TP1"
             tp1.transmit = True
             orders.append(tp1)
         elif qty == 2:
             tp1 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=tp1_p, tif="GTC", outsideRth=True)
             tp1.orderId = self.ib.client.getReqId()
             tp1.parentId = parent.orderId
-            tp1.orderRef = "V43_MES_TP1"
+            tp1.orderRef = f"{prefix}_TP1"
             tp1.transmit = False
             orders.append(tp1)
 
             tp2 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=tp2_p, tif="GTC", outsideRth=True)
             tp2.orderId = self.ib.client.getReqId()
             tp2.parentId = parent.orderId
-            tp2.orderRef = "V43_MES_TP2"
+            tp2.orderRef = f"{prefix}_TP2"
             tp2.transmit = True
             orders.append(tp2)
         else:
-            cnt_a = max(1, int(round(qty * 0.50)))
-            cnt_b = max(1, int(round(qty * 0.25)))
-            if cnt_a + cnt_b > qty:
-                cnt_b = max(1, qty - cnt_a)
-
             tp1 = LimitOrder(action=exit_action, totalQuantity=cnt_a, lmtPrice=tp1_p, tif="GTC", outsideRth=True)
             tp1.orderId = self.ib.client.getReqId()
             tp1.parentId = parent.orderId
-            tp1.orderRef = "V43_MES_TP1"
+            tp1.orderRef = f"{prefix}_TP1"
             tp1.transmit = False
             orders.append(tp1)
 
             tp2 = LimitOrder(action=exit_action, totalQuantity=cnt_b, lmtPrice=tp2_p, tif="GTC", outsideRth=True)
             tp2.orderId = self.ib.client.getReqId()
             tp2.parentId = parent.orderId
-            tp2.orderRef = "V43_MES_TP2"
-            tp2.transmit = True
+            tp2.orderRef = f"{prefix}_TP2"
+            tp2.transmit = (cnt_c == 0)
             orders.append(tp2)
 
-        for o in orders:
-            self.ib.placeOrder(self.contract_mes, o)
+            if cnt_c > 0:
+                tp3 = LimitOrder(action=exit_action, totalQuantity=cnt_c, lmtPrice=runner_p, tif="GTC", outsideRth=True)
+                tp3.orderId = self.ib.client.getReqId()
+                tp3.parentId = parent.orderId
+                tp3.orderRef = f"{prefix}_RUNNER"
+                tp3.transmit = True
+                orders.append(tp3)
 
-        logger.info(f"[✓] V4.3 MES 實單已下發至芝商所 (OrderId: {parent.orderId})")
+        for o in orders:
+            self.ib.placeOrder(target_contract, o)
+
+        logger.info(f"[✓] {prefix} 實單已下發至芝商所 (OrderId: {parent.orderId})")
+
+    def place_v43_bracket_order(self, signal: TradeSignal):
+        """向下相容別名：MES V9.1 下單"""
+        self.place_v91_bracket_order("MES", signal)
 
     def place_v50_bracket_order(self, signal: TradeSignal):
-        """
-        向 IBKR 下發 V5.0 MNQ 專屬 Bracket 訂單 (具備 60% 預留防飢餓校驗)
-        """
-        if not self.ib or not self.ib.isConnected() or not self.contract_mnq:
-            return
-
-        # -------------------------------------------------------------
-        # 核心防飢餓保護機制 (Anti-Starvation Gatekeeper)
-        # -------------------------------------------------------------
-        usd_rate = 7.78 if self.currency == "HKD" else 1.0
-        avail_usd = self.available_funds / usd_rate
-        # MNQ 每口保證金估算約 $2,000 USD
-        est_margin_per_contract = 2000.0
-        # V4.3 優先保留底線：V4.3 專屬資金池 (總淨值 60%) 的 20% 安全維持金
-        v43_reserved_floor = self.pool_v43_usd * 0.20
-
-        req_margin = signal.contracts * est_margin_per_contract
-        if (avail_usd - req_margin) < v43_reserved_floor:
-            # 嘗試自適應降口為 1 口
-            if signal.contracts > 1:
-                logger.warning(f"⚠️ [保證金防飢餓] 可用資金 (${avail_usd:,.0f}) 偏緊，自動將 V5.0 MNQ 開倉由 {signal.contracts} 口降至 1 口以保障 V4.3 配額。")
-                self.incident_mgr.record_incident(
-                    severity="WARNING",
-                    category="MARGIN",
-                    code=4001,
-                    message=f"V5.0 保證金防飢餓調整: 開倉口數由 {signal.contracts} 口自適應降至 1 口以保留 V4.3 專屬維持金 (${v43_reserved_floor:,.0f} USD)",
-                    details={"avail_usd": round(avail_usd, 2), "floor_usd": round(v43_reserved_floor, 2)},
-                    source="GATEKEEPER"
-                )
-                signal.contracts = 1
-                req_margin = 1 * est_margin_per_contract
-
-            # 若降至 1 口仍觸犯 V4.3 優先保留底線，則嚴格放棄進場！
-            if (avail_usd - req_margin) < v43_reserved_floor:
-                logger.critical(f"🛑 [保證金安全攔截] 拒絕 V5.0 MNQ 開倉！可用資金 (${avail_usd:,.0f}) 需全額優先保留給 V4.3 (${v43_reserved_floor:,.0f})。")
-                self.incident_mgr.record_incident(
-                    severity="ERROR",
-                    category="MARGIN",
-                    code=4002,
-                    message=f"V5.0 保證金安全攔截: 拒絕 MNQ 開倉！可用資金 (${avail_usd:,.0f} USD) 需全額優先保留給 V4.3 (${v43_reserved_floor:,.0f} USD)",
-                    details={"avail_usd": round(avail_usd, 2), "floor_usd": round(v43_reserved_floor, 2)},
-                    source="GATEKEEPER"
-                )
-                return
-
-        direction_action = "BUY" if signal.direction == Direction.LONG else "SELL"
-        exit_action = "SELL" if signal.direction == Direction.LONG else "BUY"
-        qty = signal.contracts
-
-        entry_p = self._round_to_tick(signal.entry_price, 0.25)
-        sl_p = self._round_to_tick(signal.sl_price, 0.25)
-        tp1_p = self._round_to_tick(signal.tp1_price, 0.25)
-        tp2_p = self._round_to_tick(signal.tp2_price, 0.25)
-
-        logger.info(f"⚡ [V5.0 順勢開火] 送出 MNQ Bracket: {direction_action} {qty} 口 @ LMT {entry_p:.2f} | 止蝕: {sl_p:.2f} | TP1: {tp1_p:.2f}")
-
-        parent = LimitOrder(
-            action=direction_action,
-            totalQuantity=qty,
-            lmtPrice=entry_p,
-            tif="GTC",
-            outsideRth=True
-        )
-        parent.orderId = self.ib.client.getReqId()
-        parent.orderRef = "V50_MNQ"
-        parent.transmit = False
-
-        sl_order = StopOrder(
-            action=exit_action,
-            totalQuantity=qty,
-            stopPrice=sl_p,
-            tif="GTC",
-            outsideRth=True
-        )
-        sl_order.orderId = self.ib.client.getReqId()
-        sl_order.parentId = parent.orderId
-        sl_order.orderRef = "V50_MNQ_SL"
-        sl_order.transmit = False
-
-        orders = [parent, sl_order]
-
-        # V5.0 不對稱梯次止賺 (60% / 25% / 15%)
-        if qty == 1:
-            tp1 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=tp1_p, tif="GTC", outsideRth=True)
-            tp1.orderId = self.ib.client.getReqId()
-            tp1.parentId = parent.orderId
-            tp1.orderRef = "V50_MNQ_TP1"
-            tp1.transmit = True
-            orders.append(tp1)
-        elif qty == 2:
-            tp1 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=tp1_p, tif="GTC", outsideRth=True)
-            tp1.orderId = self.ib.client.getReqId()
-            tp1.parentId = parent.orderId
-            tp1.orderRef = "V50_MNQ_TP1"
-            tp1.transmit = False
-            orders.append(tp1)
-
-            tp2 = LimitOrder(action=exit_action, totalQuantity=1, lmtPrice=tp2_p, tif="GTC", outsideRth=True)
-            tp2.orderId = self.ib.client.getReqId()
-            tp2.parentId = parent.orderId
-            tp2.orderRef = "V50_MNQ_TP2"
-            tp2.transmit = True
-            orders.append(tp2)
-        else:
-            cnt_a = max(1, int(round(qty * 0.60)))
-            cnt_b = max(1, int(round(qty * 0.25)))
-            if cnt_a + cnt_b > qty:
-                cnt_b = max(1, qty - cnt_a)
-
-            tp1 = LimitOrder(action=exit_action, totalQuantity=cnt_a, lmtPrice=tp1_p, tif="GTC", outsideRth=True)
-            tp1.orderId = self.ib.client.getReqId()
-            tp1.parentId = parent.orderId
-            tp1.orderRef = "V50_MNQ_TP1"
-            tp1.transmit = False
-            orders.append(tp1)
-
-            tp2 = LimitOrder(action=exit_action, totalQuantity=cnt_b, lmtPrice=tp2_p, tif="GTC", outsideRth=True)
-            tp2.orderId = self.ib.client.getReqId()
-            tp2.parentId = parent.orderId
-            tp2.orderRef = "V50_MNQ_TP2"
-            tp2.transmit = True
-            orders.append(tp2)
-
-        for o in orders:
-            self.ib.placeOrder(self.contract_mnq, o)
-
-        logger.info(f"[✓] V5.0 MNQ 實單已下發至芝商所 (OrderId: {parent.orderId})")
+        """向下相容別名：MNQ V9.1 下單"""
+        self.place_v91_bracket_order("MNQ", signal)
 
     def evaluate_v43_bar(self):
-        """評估 V4.3 MES 策略 K 棒"""
+        """評估 V9.1 MES 策略 K 棒 (旗艦自適應擴口終極版)"""
         if not self.trading_enabled_global or not self.trading_enabled_v43:
             return
         if not self.contract_mes or not self.is_connected:
@@ -968,7 +950,7 @@ class LiveIBKRDualEngine:
             bars = self.ib.reqHistoricalData(
                 self.contract_mes,
                 endDateTime='',
-                durationStr='2 D',
+                durationStr='3 D',
                 barSizeSetting='5 mins',
                 whatToShow='TRADES',
                 useRTH=False,
@@ -989,20 +971,28 @@ class LiveIBKRDualEngine:
             df['price_sortino'] = calculate_price_sortino(df['close'], window=20).fillna(1.0)
             df['rvol'] = 1.0
 
+            # 注入 4H 宏觀趨勢狀態 (4H_LOCK)
+            macro = self.get_4h_macro_regime(self.contract_mes, "MES")
+            if macro.get("c", 0.0) > 0:
+                df["ema20_4h"] = macro.get("e20", df["close"].iloc[-1])
+                df["ema50_4h"] = macro.get("e50", df["close"].iloc[-1])
+                df["ema200_4h"] = macro.get("e200", df["close"].iloc[-1])
+                df["close_4h"] = macro.get("c", df["close"].iloc[-1])
+
             last_idx = len(df) - 1
             # 無持倉與掛單時清除殘留的記憶體限價單狀態，確保只評估最新 K 棒
-            self.engine_v43.pending_limit_order = None
-            # 使用 V4.3 專屬 60% 資金池計算口數
-            sig, pending = self.engine_v43.evaluate_bar(last_idx, df, self.pool_v43_usd, 0.5)
+            self.engine_v91_mes.pending_limit_order = None
+            # 使用 MES 專屬 60% 資金池計算口數
+            sig, pending = self.engine_v91_mes.evaluate_bar(last_idx, df, self.pool_v43_usd, 0.5)
             target_sig = sig or (pending.signal if pending else None)
             if target_sig:
-                self.engine_v43.pending_limit_order = None
-                self.place_v43_bracket_order(target_sig)
+                self.engine_v91_mes.pending_limit_order = None
+                self.place_v91_bracket_order("MES", target_sig)
         except Exception as e:
-            logger.warning(f"V4.3 MES K 棒評估異常: {e}")
+            logger.warning(f"V9.1 MES K 棒評估異常: {e}")
 
     def evaluate_v50_bar(self):
-        """評估 V5.0 MNQ 策略 K 棒 (包含 VWAP 動態濾網)"""
+        """評估 V9.1 MNQ 策略 K 棒 (旗艦自適應擴口終極版 + 40% 資金防飢餓校驗)"""
         if not self.trading_enabled_global or not self.trading_enabled_v50:
             return
         if not self.contract_mnq or not self.is_connected:
@@ -1042,19 +1032,26 @@ class LiveIBKRDualEngine:
             from mes_strategy.indicators import calculate_price_sortino
             df['price_sortino'] = calculate_price_sortino(df['close'], window=20).fillna(1.0)
             df['rvol'] = 1.0
-            df['vwap'] = calculate_session_vwap(df)
+
+            # 注入 4H 宏觀趨勢狀態 (4H_LOCK)
+            macro = self.get_4h_macro_regime(self.contract_mnq, "MNQ")
+            if macro.get("c", 0.0) > 0:
+                df["ema20_4h"] = macro.get("e20", df["close"].iloc[-1])
+                df["ema50_4h"] = macro.get("e50", df["close"].iloc[-1])
+                df["ema200_4h"] = macro.get("e200", df["close"].iloc[-1])
+                df["close_4h"] = macro.get("c", df["close"].iloc[-1])
 
             last_idx = len(df) - 1
             # 無持倉與掛單時清除殘留的記憶體限價單狀態，確保只評估最新 K 棒
-            self.engine_v50.pending_limit_order = None
-            # 使用 V5.0 專屬 40% 資金池計算口數
-            sig, pending = self.engine_v50.evaluate_bar(last_idx, df, self.pool_v50_usd, 0.5)
+            self.engine_v91_mnq.pending_limit_order = None
+            # 使用 MNQ 專屬 40% 資金池計算口數
+            sig, pending = self.engine_v91_mnq.evaluate_bar(last_idx, df, self.pool_v50_usd, 0.5)
             target_sig = sig or (pending.signal if pending else None)
             if target_sig:
-                self.engine_v50.pending_limit_order = None
-                self.place_v50_bracket_order(target_sig)
+                self.engine_v91_mnq.pending_limit_order = None
+                self.place_v91_bracket_order("MNQ", target_sig)
         except Exception as e:
-            logger.warning(f"V5.0 MNQ K 棒評估異常: {e}")
+            logger.warning(f"V9.1 MNQ K 棒評估異常: {e}")
 
     def emergency_flat_symbol(self, symbol: str, reason: str = "手動平倉") -> Dict[str, Any]:
         """一鍵平倉指定標的 (MES 或 MNQ) 並撤銷其所有掛單，附帶審計與日誌記錄"""
@@ -1217,7 +1214,9 @@ class LiveIBKRDualEngine:
 
         status = {
             "mode": "DUAL_ENGINE_PARALLEL",
-            "version": "v4.3 (MES 60%) + v5.0 (MNQ 40%)",
+            "version": "v9.1 旗艦自適應擴口終極版 (MES 60% + MNQ 40%)",
+            "strategy_id": "v9.1",
+            "strategy_title": "V9.1 旗艦自適應擴口終極版 (Master Hybrid Plus)",
             "ibkr_connected": self.is_connected,
             "reconnecting": self.is_reconnecting,
             "reconnect_attempts": self.reconnect_attempts,
@@ -1244,19 +1243,22 @@ class LiveIBKRDualEngine:
 
             # 6:4 資金調度池
             "capital_allocation": {
-                "ratio_rule": "60% V4.3 (MES) : 40% V5.0 (MNQ) 優先權在 V4.3",
+                "ratio_rule": "60% V9.1 (MES) : 40% V9.1 (MNQ) 優先權在 MES",
                 "total_equity_usd": round(self.equity_usd_total, 2),
                 "v43_pool_usd": round(self.pool_v43_usd, 2),
                 "v50_pool_usd": round(self.pool_v50_usd, 2),
+                "mes_pool_usd": round(self.pool_v43_usd, 2),
+                "mnq_pool_usd": round(self.pool_v50_usd, 2),
                 "v43_weight_pct": 60,
                 "v50_weight_pct": 40,
                 "v43_priority": "ABSOLUTE_PRIORITY",
                 "v50_priority": "ANTI_STARVATION_CONSTRAINED"
             },
 
-            # V4.3 (MES 標普) 實況子樹
+            # V9.1 MES 實況子樹 (兼容 v43 key 以免舊版前端讀取不到)
             "v43": {
-                "name": "防守力冠軍策略 (v4.3)",
+                "name": "V9.1 旗艦自適應擴口策略 (MES 60%)",
+                "strategy_id": "v9.1",
                 "symbol": "MES",
                 "active_contract": self.symbol_mes,
                 "trading_enabled": self.trading_enabled_global and self.trading_enabled_v43,
@@ -1269,9 +1271,10 @@ class LiveIBKRDualEngine:
                 "recent_trades": trades_v43
             },
 
-            # V5.0 (MNQ 納指) 實況子樹
+            # V9.1 MNQ 實況子樹 (兼容 v50 key 以免舊版前端讀取不到)
             "v50": {
-                "name": "雙劍合璧防守冠軍 (v5.0 VWAP+60/25/15)",
+                "name": "V9.1 旗艦自適應擴口策略 (MNQ 40%)",
+                "strategy_id": "v9.1",
                 "symbol": "MNQ",
                 "active_contract": self.symbol_mnq,
                 "trading_enabled": self.trading_enabled_global and self.trading_enabled_v50,
@@ -1284,7 +1287,16 @@ class LiveIBKRDualEngine:
                 "recent_trades": trades_v50
             },
 
-            # 向下相容傳統儀表板單側視圖 (預設展示 V4.3 或活躍方)
+            # V9.1 主視圖索引
+            "v91": {
+                "name": "V9.1 旗艦自適應擴口終極版 (Master Hybrid Plus)",
+                "symbol_mes": self.symbol_mes,
+                "symbol_mnq": self.symbol_mnq,
+                "mes": pos_v43,
+                "mnq": pos_v50
+            },
+
+            # 向下相容傳統儀表板單側視圖 (預設展示 MES 或活躍方)
             "active_contract": f"MES: {self.symbol_mes} | MNQ: {self.symbol_mnq}",
             "trading_enabled": self.trading_enabled_global,
             "active_position": pos_v43 or pos_v50,
@@ -1339,8 +1351,9 @@ class LiveIBKRDualEngine:
     def run_loop(self):
         """雙引擎主輪詢循環，具備 CME 休市自動暫停/開市自動連線與斷線重連守護"""
         logger.info("======================================================================")
-        logger.info(" 🏛️  AutoTrade 雙策略並行守護引擎啟動 (6:4 資金分配 | V4.3 優先權)")
-        logger.info(" ⏰  CME (MES/MNQ) 自動開休市排程 & 斷線自動再連線守護已就緒")
+        logger.info(" 🏛️  AutoTrade 旗艦守護引擎啟動 (V9.1 Master Hybrid Plus | 6:4 資金配置)")
+        logger.info(" ⏰  4H 宏觀趨勢鎖定 (4H_LOCK) & 38/42/20 三階梯獲利收割 (1.55R/3.10R/5.50R)")
+        logger.info(" 🛡️  CME 原生硬止損 (0.82x ATR) & 斷線自動再連線守護已就緒")
         logger.info("======================================================================")
 
         self.market_paused = False
