@@ -289,15 +289,17 @@
       position: fixed;
       bottom: 20px;
       right: 20px;
-      background: #1e293b;
+      background: #0f172a;
       border: 1px solid var(--blue);
       color: #fff;
-      padding: 12px 16px;
+      padding: 14px 18px;
       border-radius: 10px;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-      z-index: 100;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+      z-index: 1000;
       display: none;
-      max-width: 420px;
+      max-width: 540px;
+      font-size: 13px;
+      line-height: 1.5;
     }
   </style>
 </head>
@@ -726,13 +728,13 @@
     let dragStartViewEnd = 0;
     let hoverBarIdx = -1;
 
-    function showToast(msg, isError = false) {
+    function showToast(msg, isError = false, durationMs = 5000) {
       const el = document.getElementById('toast');
       el.style.display = 'block';
       el.style.borderColor = isError ? 'var(--red)' : 'var(--blue)';
       el.innerHTML = msg;
       clearTimeout(window._toastTimer);
-      window._toastTimer = setTimeout(() => { el.style.display = 'none'; }, 5000);
+      window._toastTimer = setTimeout(() => { el.style.display = 'none'; }, durationMs);
     }
 
     function setRangePreset(years, pillEl) {
@@ -1426,19 +1428,29 @@
     })();
 
     async function pushReportToGDrive() {
+      showToast('⏳ 正在生成並上傳回測分析報告 (Google Docs) 與交易明細 (Google Sheets) 至 Google Drive...', false, 15000);
       try {
         const resp = await fetch('/api/backtest/export-gdrive', { method: 'POST' });
         const data = await resp.json();
         if (data.status === 'ok') {
-          const linkHtml = data.gdrive_folder_url
-            ? ` <a href="${data.gdrive_folder_url}" target="_blank" style="text-decoration:underline;">開啟 Google Drive ↗</a>`
-            : ` <a href="${data.html_url}" target="_blank" style="text-decoration:underline;">開啟報告 ↗</a>`;
-          showToast('✅ ' + data.message + linkHtml);
+          let links = [];
+          if (data.doc_url) links.push(`<a href="${data.doc_url}" target="_blank" style="color:#38bdf8; text-decoration:underline; font-weight:700;">📄 開啟 Google Doc 報告 ↗</a>`);
+          if (data.sheet_url) links.push(`<a href="${data.sheet_url}" target="_blank" style="color:#10b981; text-decoration:underline; font-weight:700;">📊 開啟 Google Sheet 明細 ↗</a>`);
+          if (data.gdrive_folder_url) links.push(`<a href="${data.gdrive_folder_url}" target="_blank" style="color:#f59e0b; text-decoration:underline;">📁 打開 Drive 資料夾 ↗</a>`);
+
+          const msgHtml = `<div style="font-weight:700; color:#10b981; margin-bottom:4px;">✅ ${data.message}</div><div style="margin-top:6px; display:flex; gap:12px; flex-wrap:wrap;">${links.join(' ')}</div>`;
+          showToast(msgHtml, false, 25000);
+
+          if (data.doc_url) {
+            window.open(data.doc_url, '_blank');
+          } else if (data.gdrive_folder_url) {
+            window.open(data.gdrive_folder_url, '_blank');
+          }
         } else {
-          showToast('⚠️ ' + (data.message || '匯出失敗'), true);
+          showToast('⚠️ ' + (data.message || '匯出失敗'), true, 6000);
         }
       } catch (e) {
-        showToast('❌ 匯出失敗: ' + e.message, true);
+        showToast('❌ 匯出失敗: ' + e.message, true, 6000);
       }
     }
 

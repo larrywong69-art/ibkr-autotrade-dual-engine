@@ -24,6 +24,8 @@ import os
 import json
 import math
 import time
+import subprocess
+import re
 import urllib.request
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
@@ -1146,15 +1148,73 @@ tr:nth-child(even) {{ background: #f8fafc; }}
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
-    folder_id = os.getenv("GDRIVE_FOLDER_ID", "").strip()
-    folder_url = f"https://drive.google.com/drive/folders/{folder_id}" if folder_id else ""
+    folder_id = os.getenv("GDRIVE_FOLDER_ID", "1HJvzwWJrGl087cOSgwJYvx0usSE-wazl").strip()
+    if not folder_id:
+        folder_id = "1HJvzwWJrGl087cOSgwJYvx0usSE-wazl"
+    folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+
+    parent_flag = f'--parent "{folder_id}" ' if folder_id else ''
+
+    doc_id = ""
+    doc_url = ""
+    sheet_id = ""
+    sheet_url = ""
+
+    # 1. 真實上傳 HTML 轉原生 Google Doc
+    upload_doc_cmd = f'gdrive mutate upload "{html_path}" {parent_flag}--mime-type "application/vnd.google-apps.document" --json'
+    try:
+        p_doc = subprocess.run(upload_doc_cmd, shell=True, capture_output=True, text=True)
+        if p_doc.returncode == 0:
+            for line in p_doc.stdout.splitlines():
+                if "ID:" in line:
+                    doc_id = line.split("ID:")[1].strip().rstrip(")")
+                elif '"id":' in line:
+                    try:
+                        doc_id = json.loads(line.strip().rstrip(",")).get("id", doc_id)
+                    except Exception:
+                        pass
+            if not doc_id:
+                m = re.search(r"ID:\s*([a-zA-Z0-9_-]+)", p_doc.stdout)
+                if m:
+                    doc_id = m.group(1)
+            if doc_id:
+                doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
+    except Exception:
+        pass
+
+    # 2. 真實上傳 CSV 轉原生 Google Sheet
+    if os.path.exists(csv_path):
+        upload_sheet_cmd = f'gdrive mutate upload "{csv_path}" {parent_flag}--mime-type "application/vnd.google-apps.spreadsheet" --json'
+        try:
+            p_sheet = subprocess.run(upload_sheet_cmd, shell=True, capture_output=True, text=True)
+            if p_sheet.returncode == 0:
+                for line in p_sheet.stdout.splitlines():
+                    if "ID:" in line:
+                        sheet_id = line.split("ID:")[1].strip().rstrip(")")
+                    elif '"id":' in line:
+                        try:
+                            sheet_id = json.loads(line.strip().rstrip(",")).get("id", sheet_id)
+                        except Exception:
+                            pass
+                if not sheet_id:
+                    m = re.search(r"ID:\s*([a-zA-Z0-9_-]+)", p_sheet.stdout)
+                    if m:
+                        sheet_id = m.group(1)
+                if sheet_id:
+                    sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
+        except Exception:
+            pass
 
     return {
         "status": "ok",
-        "message": "回測分析報告與交易明細 CSV 已成功匯出至 Google Drive 同步目錄！",
+        "message": "已成功將回測分析報告 (Google Docs) 與交易明細 (Google Sheets) 輸出至 Google Drive！",
         "html_file": html_path,
         "csv_file": csv_path,
         "html_url": f"/reports/gdrive_exports/{html_filename}",
         "csv_url": f"/reports/gdrive_exports/{csv_filename}",
+        "doc_id": doc_id,
+        "doc_url": doc_url,
+        "sheet_id": sheet_id,
+        "sheet_url": sheet_url,
         "gdrive_folder_url": folder_url
     }
