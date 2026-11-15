@@ -932,7 +932,8 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
     data_source_label = "🟡 高擬真合成數據 (Synthetic CME Globex)"
     data_note = ""
 
-    if data_source == "IBKR_CSV":
+    # 智能優先模式：若已有本地下載快取則優先使用，若無則切換為 REAL_YF 或 SYNTHETIC
+    if data_source in ("AUTO", "IBKR_CSV"):
         from ibkr_history_downloader import get_cache_path
         cache_path = get_cache_path(symbol, timeframe)
         loaded_sym = symbol
@@ -953,12 +954,24 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
             df_sub = df_c[(df_c.index >= s_dt) & (df_c.index <= e_dt)].copy()
             if len(df_sub) < 35:
                 df_sub = df_c.copy()
-                data_note = (data_note + " " if data_note else "") + f"選定日期區間內僅有較少快取筆數，已改用全部 {len(df_sub)} 根 IBKR 本地快取 K 棒"
+                data_note = (data_note + " " if data_note else "") + f"選定日期區間內僅有較少快取筆數，已改用全部 {len(df_sub):,} 根本地快取 K 棒"
             df_base = _add_indicators(df_sub)
-            data_source_label = f"🔵 IBKR 本地快取 CSV ({loaded_sym} · {timeframe.upper()} · {len(df_base)} 根真實K棒)"
+            data_source_label = f"🔵 智能載入本地 10 年快取 ({loaded_sym} · {timeframe.upper()} · {len(df_base):,} 根真實K棒)"
+        elif data_source == "AUTO":
+            # AUTO 模式下若無快取，自動優雅降級至 Yahoo Finance 或合成數據
+            try:
+                df_base, data_source_label, data_note = fetch_real_yahoo_data(
+                    symbol=symbol, start_date=start_date, end_date=end_date, timeframe=timeframe
+                )
+                if len(df_base) < 35:
+                    raise ValueError("真實市場數據筆數不足")
+            except Exception as e:
+                df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
+                data_source_label = "🟡 高擬真合成數據 (自動切換)"
+                data_note = f"未找到本地快取且線上數據抓取失敗 ({e})，已自動切換為高擬真合成數據"
         else:
             df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
-            data_source_label = "🟡 高擬真合成數據 (尚未下載該週期 IBKR 本地快取)"
+            data_source_label = "🟡 高擬真合成數據 (尚未下載該週期本地快取)"
             data_note = f"尚未找到 {symbol}_{timeframe}.csv，請先點擊左側「從本機 IBKR 下載並快取 CSV」按鈕"
     elif data_source == "REAL_YF":
         try:

@@ -330,9 +330,10 @@
         <div class="form-group">
           <label class="form-label" for="inp-data-source">歷史行情數據來源</label>
           <select id="inp-data-source">
-            <option value="REAL_YF" selected>🟢 真實市場數據 (Yahoo Finance ES=F / NQ=F)</option>
-            <option value="IBKR_CSV">🔵 IBKR 本地快取 CSV (從本機 Gateway 下載)</option>
-            <option value="SYNTHETIC">🟡 高擬真合成數據 (10年完整5分K壓力測試)</option>
+            <option value="AUTO" selected>⚡ 智能優先 (已下載 10 年快取優先 · 自動秒級載入)</option>
+            <option value="IBKR_CSV">🔵 僅使用本地快取 CSV (嚴格離線)</option>
+            <option value="REAL_YF">🟢 線上真實市場數據 (Yahoo Finance)</option>
+            <option value="SYNTHETIC">🟡 高擬真合成數據 (基準測試)</option>
           </select>
         </div>
 
@@ -1472,7 +1473,7 @@
           box.innerHTML = '尚無本地快取 CSV（下載後自動存於 data/ibkr_cache/）';
           return;
         }
-        box.innerHTML = items.map(it =>
+        box.innerHTML = '<div style="color:#10b981; font-weight:700; margin-bottom:4px;">🟢 已在庫 10 年快取（回測自動優先使用）：</div>' + items.map(it =>
           `<div style="margin-top:3px; color:#cbd5e1;">• <strong>${it.filename}</strong> (${it.bars.toLocaleString()} 根 · ${it.start.slice(0,10)} ~ ${it.end.slice(0,10)})</div>`
         ).join('');
       } catch (e) {}
