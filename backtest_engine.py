@@ -454,7 +454,8 @@ def run_single_strategy_backtest(
     w_run = 1.0 - w_tp1 - w_tp2
 
     i = 30
-    cooldown = max(4, n // 450)  # 適應不同時間跨度的信號冷卻步長
+    # 策略信號冷卻步長 (每筆交易平倉後等待 3 根 K 棒避免反覆進場，真實反映全歷史交易頻率)
+    cooldown = 3
 
     while i < n - 12:
         equity_curve[i] = equity
