@@ -5,9 +5,9 @@
 策略名稱：V9.3 旗艦雙引擎整數自適應實盤版 (Master Hybrid Live)
 類型：IBKR 實盤整數口優化旗艦版 (由 V9.1 Master Hybrid Plus 升級)
 
-核心量化突破與實盤修正 (修補漏洞後完整版)：
+核心量化突破與實盤修正 (審計整合優化版)：
 1. 廢除小數點倉位漏洞 (Fractional Lot Fix)：
-   - 徹底移除 V9.1 無法在 IBKR 下單的浮點數權重 (w_tp1: 0.38, w_tp2: 0.42)。
+   - 移除 V9.1 無法在 IBKR 下單的浮點數權重 (w_tp1: 0.38, w_tp2: 0.42)。
    - 導入 LOT_SPLIT_MAP 整數口三梯次拆單矩陣 (涵蓋 1 至 12 口)，確保每筆委託皆為合法正整數。
 2. 雙引擎動態擴口 (R1 + R2 Adaptive Scaling)：
    - R1 (浪3斐波回踩)：依淨值階梯下 2 -> 5 -> 7 -> 9 口，並對低效時段 (歐盤做多、亞盤做空) 自動減半口數。
@@ -17,20 +17,10 @@
    - 當 1H ADX > 30 強單邊趨勢時，自動攔截 R2 逆勢摸頂摸底訊號，避免單邊大行情中遭受連續磨損。
 4. 回測引擎審計防呆 (Strict Realistic Execution)：
    - 強制關閉回測引擎中的人為順向價格偏移 (edge_mult = 0.0 for live/strict mode)。
-   - 修正 4H/1D 多週期指標對齊，強制 shift(1) 杜絕未來函數 (Look-Ahead Bias)。
-
-10 年回測表現 (2016-11 至 2026-11，基於 V9.1 同基準點位整數化重算)：
-- 最終淨值：$418,802.53 (初始本金 $30,000.00)
-- 淨利潤：+$388,802.53 (+1,296.01%)
-- 年化 CAGR：30.20%
-- 最大回撤 (MDD)：-4.33% (-$5,937.75)
-- 夏普比率 (Sharpe)：3.09
-- 卡瑪比率 (Calmar)：6.97
-- 獲利因子 (Profit Factor)：2.02
-- 總交易筆數：4,412 筆 (100% 整數口執行)
+   - 修正 4H/1D 多週期指標對齊，強制以真實收盤時間對齊杜絕未來函數 (Look-Ahead Bias)。
+   - 統一時段判別為美東時間 (America/New_York)，消除 naive datetime 被誤判為 UTC 的偏差。
 """
 
-import math
 from typing import Dict, Any, Tuple, Optional
 import pandas as pd
 
@@ -38,8 +28,8 @@ CONFIG: Dict[str, Any] = {
     "id": "v9.3",
     "name": "V9.3 旗艦雙引擎整數自適應實盤版 (Master Hybrid Live)",
     "color": "#e11d48",
-    "stage": "🚀 實盤整數口旗艦 (+1296%)",
-    "description": "全整數口三梯次拆單 + R2 隨淨值三階擴口 (1->2->3口) + 低效時段減半濾網 + 1H ADX強趨勢保護，10年淨利 $388,803，回撤僅 4.33%",
+    "stage": "🚀 實盤整數口旗艦 (零未來函數審計版)",
+    "description": "全整數口三梯次拆單 + R2 隨淨值三階擴口 (1->2->3口) + 低效時段減半濾網 + 1H ADX>30 強趨勢保護",
     "trend_mode": "4H_LOCK",
     "tp1_r": 1.55,
     "tp2_r": 3.10,
@@ -51,7 +41,7 @@ CONFIG: Dict[str, Any] = {
     "edge_mult": 0.0,                       # 實盤與嚴格回測強制歸零，禁止人為順向偏移未來 K 線
     "legacy_edge_mult": 0.46,               # 僅供對照舊版 V9.1 合成偏移曲線時使用
     "risk_mult": 1.15,
-    "r2_max_adx_filter": 30.0,              # 當 1H ADX > 30 強單邊趨勢時，禁止 R2 逆勢摸頂做空
+    "r2_max_adx_filter": 30.0,              # 當 1H ADX > 30 強單邊趨勢時，禁止 R2 逆勢摸頂摸底
     # 實盤整數口三梯次拆單查找表: 總口數 -> (TP1平倉口數, TP2平倉口數, Runner尾倉口數)
     "lot_split_map": {
         1: (0, 1, 0),   # 1口單：觸及 TP1(1.55R) 自動移止損至保本價(BE)，觸及 TP2(3.10R) 全出 1 口
@@ -72,35 +62,42 @@ CONFIG: Dict[str, Any] = {
 
 def detect_market_session(dt: Any) -> str:
     """
-    從時間戳識別交易時段 (支援時區自動對齊)：
-    - 亞盤 (Asia): 00:00 - 08:00 UTC (08:00 - 16:00 HKT / 20:00 - 04:00 ET)
-    - 歐盤 (Europe): 08:00 - 13:30 UTC (16:00 - 21:30 HKT / 03:00 - 08:30 ET)
-    - 美盤 (US): 13:30 - 21:00 UTC (21:30 - 05:00 HKT / 08:30 - 16:00 ET)
+    從時間戳識別交易時段 (統一對齊美東時間 America/New_York，與回測及實盤時鐘一致)：
+    - 美盤 (US RTH): 09:00 - 16:00 ET (21:00 - 04:00 HKT)
+    - 歐盤 (Europe): 02:00 - 09:00 ET (14:00 - 21:00 HKT)
+    - 亞盤 (Asia/Night): 16:00 - 02:00 ET (04:00 - 14:00 HKT)
+    若輸入帶有 tzinfo，將自動轉換為 America/New_York；naive 時間戳則視為已是 ET。
     """
     if dt is None:
         return "美盤"
     if isinstance(dt, (int, float)):
-        dt = pd.to_datetime(dt, unit="s")
+        dt = pd.to_datetime(dt, unit="s", utc=True)
     elif isinstance(dt, str):
         try:
             dt = pd.to_datetime(dt)
         except Exception:
             return "美盤"
 
-    h = dt.hour
     if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
         try:
-            dt_utc = dt.tz_convert("UTC")
-            h = dt_utc.hour
+            dt_et = pd.Timestamp(dt).tz_convert("America/New_York")
+            h = dt_et.hour
         except Exception:
             h = dt.hour
+    else:
+        h = dt.hour
 
-    if 8 <= h < 13:
-        return "歐盤"
-    elif 13 <= h < 21:
+    if 9 <= h < 16:
         return "美盤"
+    elif 2 <= h < 9:
+        return "歐盤"
     else:
         return "亞盤"
+
+
+def _normalize_direction(direction: Any) -> str:
+    s = str(direction).upper().strip()
+    return "LONG" if s in ("LONG", "DIRECTION.LONG", "1", "BOT", "BUY") else "SHORT"
 
 
 def get_live_order_lots(
@@ -116,7 +113,7 @@ def get_live_order_lots(
     根據當前淨值、規則類型與交易時段，計算實盤應下總口數與 (TP1口數, TP2口數, Runner口數)。
     全部回傳正整數口數，可直接送入 IBKR API 建立 Bracket / OCA 訂單。
     """
-    dir_str = "LONG" if (str(direction).upper() in ("LONG", "DIRECTION.LONG", "1", "BOT", "BUY")) else "SHORT"
+    dir_str = _normalize_direction(direction)
 
     if not session and timestamp is not None:
         session = detect_market_session(timestamp)
@@ -132,7 +129,7 @@ def get_live_order_lots(
         else:
             total_lots = 9
 
-        # 低效時段過濾：R1 歐盤做多 (PF 1.34) 與 R1 亞盤做空 (PF 1.37) 口數自動減半
+        # 低效時段過濾：R1 歐盤做多與 R1 亞盤做空口數自動減半
         is_europe = ("歐盤" in session_str or "EUROPE" in session_str.upper())
         is_asia = ("亞盤" in session_str or "ASIA" in session_str.upper())
         if (dir_str == "LONG" and is_europe) or (dir_str == "SHORT" and is_asia):
@@ -189,7 +186,7 @@ def compute_integer_realized_points(
         return 0.0
 
     q1, q2, q3 = split_lots
-    dir_str = "LONG" if (str(direction).upper() in ("LONG", "DIRECTION.LONG", "1", "BOT", "BUY")) else "SHORT"
+    dir_str = _normalize_direction(direction)
     sign = 1.0 if dir_str == "LONG" else -1.0
     tp1_pts = sign * (tp1_price - entry_price)
     tp2_pts = sign * (tp2_price - entry_price)
@@ -198,9 +195,7 @@ def compute_integer_realized_points(
     # 1 口單特殊處理：q1=0, q2=1, q3=0
     # 觸及 TP1(1.55R) 移止損至保本(BE +0.25 pt)，觸及 TP2(3.10R) 全出 1 口
     if total_lots == 1:
-        if not tp1_hit:
-            return rem_pts
-        if tp1_hit and not tp2_hit:
+        if not tp2_hit:
             return rem_pts
         return tp2_pts
 

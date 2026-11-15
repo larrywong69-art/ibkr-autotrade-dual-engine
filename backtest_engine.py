@@ -1,28 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-backtest_engine.py
+backtest_engine.py (V9.3 IBKR API 實盤審計整合優化版)
+=====================================================
 IBKR 本地量化回測實驗室核心引擎 (支援最長 10 年、最多 3 策略並行對比、多週期 K 線聚合與 Google Drive 報告匯出)
 
-支援功能：
-1. 多週期 K 線重採樣與開平倉標記對齊：1m, 5m, 15m, 1h, 4h, 1d
-2. 最長 10 年歷史回測 (支援 IBKR 歷史數據優先或高擬真 CME Globex 歷史行情生成)
-3. 完整 Interactive Brokers (IBKR) 交易參數：初始資金、單邊佣金 ($0.62)、滑價 (Tick)、保證金、口數上限
-4. 同時選擇最多 3 個策略並排對比：
-   - v4.3: 標普防守力冠軍 (1H 結構 + 浪3 LMT + R2/R3 鎖 1 口 + 50/25/25 梯次)
-   - v5.0: 雙劍合璧防守冠軍 (日內 VWAP 濾網 + 60/25/15 不對稱收割 + 1.2x ATR 追蹤)
-   - dual_60_40: 雙引擎 6:4 實盤組合 (60% V4.3 MES + 40% V5.0 MNQ 資金池協同)
-   - v4.1: 總回報成長冠軍 (趨勢與箱體全開動態擴口版)
-   - v5.9: 極限純浪 3 + 4H 宏觀鎖定 (僅順 4H 大勢做規則 1 浪 3 回調)
-5. 進階機構級分析：
-   - 蒙地卡羅壓力測試 (Monte Carlo 500 次隨機重排最大回撤分佈)
-   - 年度與月度報酬熱力圖 (Annual & Monthly Return Matrix)
-   - 規則 1 / 2 / 3 歸因分析與美盤(RTH)/夜盤(ETH)時段勝率拆解
+已完整整合並修復以下 10 大回測與數據對接漏洞：
+1. [修復] IBKR API 左標記 (Left-Labeled) K 線在 4H/1D merge_asof 時造成的盤中未來函數偷看。
+2. [修復] 移除 merge_asof 與指標計算後的 .bfill()，杜絕初期 K 棒偷看未來第一根宏觀均線。
+3. [修復] CME Globex 交易日 VWAP 重置時間對齊至美東 18:00 ET (原版誤在 00:00 午夜切斷)。
+4. [修復] 自動審計本地 CSV 快取，攔截舊版由 1D 日線均分偽造的非 0.25 Tick 假小時/分鐘線。
+5. [修復] 預設強制關閉 edge_mult 人為順向價格偏移作弊 (strict_realistic_mode = True)。
+6. [修復] 廢除 0.38 / 0.42 小數點口數切雞蛋幻覺，全面導入 LOT_SPLIT_MAP 正整數口三梯次拆單。
+7. [修復] 同根 K 線碰撞順序改為保守止損優先 (Worst-Case First)，且同根 K 棒觸及 TP1 後下根才移保本。
+8. [修復] 交易明細 exit_price 改為記錄三梯次真實加權出場均價，且收盤強平與止損一致扣除滑價。
+9. [修復] run_multi_strategy_backtest_api 在 data_source="AUTO" 載入本地快取時遭重複 resample 的漏洞。
+10. [優化] 在 5m/15m 子週期回測時透過真 1H 收盤對齊計算 `adx_1h` (非僅讀取當前週期 ADX)，並完整保留 `simulate_trade_exit_v9_3` 與 `.env` GDRIVE_FOLDER_ID 連結輸出。
 """
 
 import os
 import json
-import math
 import time
 import subprocess
 import re
@@ -33,47 +30,194 @@ from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+# 智慧載入 V9.3 整數口拆單與配置模組 (優先 strategies 子目錄，相容根目錄或內建後備定義)
+try:
+    from strategies.v9_3_master_hybrid_live import (
+        CONFIG as V93_CONFIG,
+        get_live_order_lots,
+        compute_integer_realized_points,
+        detect_market_session,
+    )
+except ImportError:
+    try:
+        from v9_3_master_hybrid_live import (
+            CONFIG as V93_CONFIG,
+            get_live_order_lots,
+            compute_integer_realized_points,
+            detect_market_session,
+        )
+    except ImportError:
+        V93_CONFIG = {
+            "id": "v9.3",
+            "name": "V9.3 旗艦雙引擎整數自適應實盤版 (Master Hybrid Live)",
+            "color": "#e11d48",
+            "stage": "🚀 實盤整數口旗艦 (零未來函數審計版)",
+            "description": "全整數口三梯次拆單 + R2 隨淨值三階擴口 (1->2->3口) + 低效時段減半濾網 + 1H ADX>30 強趨勢保護",
+            "trend_mode": "4H_LOCK",
+            "tp1_r": 1.55,
+            "tp2_r": 3.10,
+            "runner_r": 5.50,
+            "sl_atr": 0.82,
+            "r2_sl_atr": 0.85,
+            "allowed_rules": ["R1", "R2"],
+            "trailing_runner": True,
+            "edge_mult": 0.0,
+            "legacy_edge_mult": 0.46,
+            "risk_mult": 1.15,
+            "r2_max_adx_filter": 30.0,
+            "lot_split_map": {
+                1: (0, 1, 0),
+                2: (1, 1, 0),
+                3: (1, 1, 1),
+                4: (1, 2, 1),
+                5: (2, 2, 1),
+                6: (2, 3, 1),
+                7: (3, 3, 1),
+                8: (3, 3, 2),
+                9: (3, 4, 2),
+                10: (4, 4, 2),
+                11: (4, 5, 2),
+                12: (5, 5, 2),
+            }
+        }
+
+        def detect_market_session(dt: Any) -> str:
+            if dt is None:
+                return "美盤"
+            if isinstance(dt, (int, float)):
+                dt = pd.to_datetime(dt, unit="s", utc=True)
+            elif isinstance(dt, str):
+                try:
+                    dt = pd.to_datetime(dt)
+                except Exception:
+                    return "美盤"
+            if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
+                try:
+                    h = pd.Timestamp(dt).tz_convert("America/New_York").hour
+                except Exception:
+                    h = dt.hour
+            else:
+                h = dt.hour
+            if 9 <= h < 16:
+                return "美盤"
+            if 2 <= h < 9:
+                return "歐盤"
+            return "亞盤"
+
+        def get_live_order_lots(
+            rule_type: str,
+            direction: Any,
+            session: Optional[str] = None,
+            current_equity: float = 30000.0,
+            margin_per_contract: float = 2400.0,
+            max_contracts_cap: int = 12,
+            timestamp: Any = None
+        ) -> Tuple[int, Tuple[int, int, int]]:
+            dir_str = "LONG" if str(direction).upper() in ("LONG", "DIRECTION.LONG", "1", "BOT", "BUY") else "SHORT"
+            if not session and timestamp is not None:
+                session = detect_market_session(timestamp)
+            session_str = str(session or "美盤")
+            if rule_type in ("R1", "R1_WAVE3_TREND"):
+                if current_equity < 45000:
+                    total_lots = 2
+                elif current_equity < 75000:
+                    total_lots = 5
+                elif current_equity < 150000:
+                    total_lots = 7
+                else:
+                    total_lots = 9
+                if (dir_str == "LONG" and ("歐盤" in session_str or "EUROPE" in session_str.upper())) or (
+                    dir_str == "SHORT" and ("亞盤" in session_str or "ASIA" in session_str.upper())
+                ):
+                    total_lots = max(2, total_lots // 2)
+            elif rule_type in ("R2", "R2_RANGE_BOUNCE"):
+                if current_equity < 60000:
+                    total_lots = 1
+                elif current_equity < 140000:
+                    total_lots = 2
+                else:
+                    total_lots = 3
+            else:
+                return 0, (0, 0, 0)
+
+            max_by_margin = max(1, int((current_equity * 0.65) // max(500.0, margin_per_contract)))
+            total_lots = min(total_lots, max_by_margin, max_contracts_cap)
+            split_map = V93_CONFIG["lot_split_map"]
+            if total_lots in split_map:
+                split_lots = split_map[total_lots]
+            else:
+                q1 = max(1, int(round(total_lots * 0.38)))
+                q2 = max(1, int(round(total_lots * 0.42)))
+                q3 = max(0, total_lots - q1 - q2)
+                split_lots = (q1, q2, q3)
+            return total_lots, split_lots
+
+        def compute_integer_realized_points(
+            total_lots: int,
+            split_lots: Tuple[int, int, int],
+            entry_price: float,
+            tp1_price: float,
+            tp2_price: float,
+            exit_price: float,
+            direction: Any,
+            tp1_hit: bool,
+            tp2_hit: bool
+        ) -> float:
+            if total_lots <= 0:
+                return 0.0
+            q1, q2, q3 = split_lots
+            dir_str = "LONG" if str(direction).upper() in ("LONG", "DIRECTION.LONG", "1", "BOT", "BUY") else "SHORT"
+            sign = 1.0 if dir_str == "LONG" else -1.0
+            tp1_pts = sign * (tp1_price - entry_price)
+            tp2_pts = sign * (tp2_price - entry_price)
+            rem_pts = sign * (exit_price - entry_price)
+            if total_lots == 1:
+                return tp2_pts if tp2_hit else rem_pts
+            if not tp1_hit:
+                return rem_pts
+            if tp1_hit and not tp2_hit:
+                rem_lots = q2 + q3
+                return (q1 * tp1_pts + rem_lots * rem_pts) / float(total_lots)
+            return (q1 * tp1_pts + q2 * tp2_pts + q3 * rem_pts) / float(total_lots)
+
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPORTS_DIR = os.path.join(CURRENT_DIR, "reports", "backtests")
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 STRATEGY_CATALOG = {
-    # 旗艦實盤演化版本
     "v9.3": {
         "id": "v9.3",
         "name": "V9.3 旗艦雙引擎整數自適應實盤版 (Master Hybrid Live)",
         "color": "#e11d48",
-        "stage": "🚀 實盤整數口旗艦 (+1296%)",
-        "description": "全整數口三梯次拆單 + R2 隨淨值三階擴口 (1->2->3口) + 低效時段減半濾網 + 1H ADX強趨勢保護，10年淨利 $388,803，回撤僅 4.33%"
+        "stage": "🚀 實盤整數口旗艦 (零未來函數審計版)",
+        "description": "全整數口三梯次拆單 + R2 隨淨值三階擴口 (1->2->3口) + 1H ADX>30 強趨勢保護 + 嚴格零偏移執行"
     },
-    # 3 大精選演化冠軍策略 (由 10 年 288 組參數全面汰弱留強精選)
     "v9.1": {
         "id": "v9.1",
         "name": "V9.1 旗艦自適應擴口終極版 (Master Hybrid Plus)",
         "color": "#f43f5e",
-        "stage": "👑 總利潤之王 (+1003%)",
-        "description": "動態資金階梯放大優勢，順勢浪 3 獲利最大化，10年淨利突破 $300,000 (+1,003%)"
+        "stage": "👑 總利潤之王",
+        "description": "動態資金階梯放大優勢，順勢浪 3 獲利最大化，4H 宏觀趨勢鎖定"
     },
     "v8.1": {
         "id": "v8.1",
         "name": "V8.1 雙共振自適應波動微調版",
         "color": "#fbbf24",
-        "stage": "⚖️ 極致平衡之王 (夏普 3.95)",
-        "description": "0.80x ATR 防守線 + 3:1 階梯 + 尾倉 ATR 追蹤止損，回撤僅 3.19%，夏普 3.95"
+        "stage": "⚖️ 極致平衡之王",
+        "description": "0.80x ATR 防守線 + 3:1 階梯 + 尾倉 ATR 追蹤止損"
     },
     "v6.0": {
         "id": "v6.0",
         "name": "V6.0 4H宏觀趨勢共振 + 3:1對稱階梯",
         "color": "#0ea5e9",
-        "stage": "🛡️ 極限防守之王 (回撤 2.62%)",
-        "description": "4H EMA 宏觀趨勢過濾 + 3.0:1 盈虧比階梯 (40/40/20) + 0.85x ATR 緊密止損 (回撤 2.62%)"
+        "stage": "🛡️ 極限防守之王",
+        "description": "4H EMA 宏觀趨勢過濾 + 3.0:1 盈虧比階梯 (40/40/20) + 0.85x ATR 緊密止損"
     },
-    # 基準與經典對照版本
     "v5.0": {
         "id": "v5.0",
         "name": "V5.0 雙劍合璧基準 (VWAP+60/25/15)",
         "color": "#10b981",
-        "stage": "📌 基準對照組 (+603%)",
+        "stage": "📌 基準對照組",
         "description": "基準版本：日內 VWAP 機構濾網 + 60/25/15 不對稱收割 + 1.1x ATR 止損"
     },
     "v4.3": {
@@ -92,35 +236,64 @@ STRATEGY_CATALOG = {
     }
 }
 
+DEFAULT_LOT_SPLIT_MAP: Dict[int, Tuple[int, int, int]] = V93_CONFIG["lot_split_map"]
+
 
 def _round_tick(val: float, tick: float = 0.25) -> float:
     return round(round(float(val) / tick) * tick, 2)
 
 
-def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """為任何 OHLCV DataFrame 統一計算技術指標 (ATR14, EMA20/50/200, 日內 VWAP, 箱體高低)"""
-    tr = np.maximum(
-        df["high"] - df["low"],
-        np.maximum(
-            (df["high"] - df["close"].shift(1)).abs(),
-            (df["low"] - df["close"].shift(1)).abs()
-        )
-    )
-    df["atr"] = tr.rolling(14, min_periods=1).mean().bfill()
-    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
-    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
-    df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
+def _add_indicators(df: pd.DataFrame, tick: float = 0.25) -> pd.DataFrame:
+    """
+    為任何 OHLCV DataFrame 統一計算技術指標：
+    - 強制將 OHLC 對齊至 CME 0.25 Tick (消除舊版插值浮點誤差)
+    - ATR14, EMA20/50/200, Wilder's ADX14
+    - CME Globex 交易日 VWAP (以美東 18:00 ET 為新交易日界線，即 index + 6h 之 date)
+    - 箱體高低點 (前 24 根已收盤 K 棒，強制 shift(1) 避免包含當根，且不使用 .bfill())
+    """
+    df = df.copy()
+    for col in ("open", "high", "low", "close"):
+        if col in df.columns:
+            df[col] = np.round(df[col].astype(float) / tick) * tick
 
-    tp = (df["high"] + df["low"] + df["close"]) / 3.0
-    vol_safe = df["volume"].replace(0, 1)
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    prev_close = close.shift(1)
+
+    tr = np.maximum(
+        high - low,
+        np.maximum((high - prev_close).abs(), (low - prev_close).abs())
+    )
+    df["atr"] = tr.rolling(14, min_periods=1).mean()
+
+    df["ema20"] = close.ewm(span=20, adjust=False).mean()
+    df["ema50"] = close.ewm(span=50, adjust=False).mean()
+    df["ema200"] = close.ewm(span=200, adjust=False).mean()
+
+    # Wilder's ADX(14) 強趨勢指標 (供 V9.3 攔截單邊強趨勢中的 R2 逆勢摸頂)
+    up_move = high.diff()
+    dn_move = -low.diff()
+    plus_dm = np.where((up_move > dn_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((dn_move > up_move) & (dn_move > 0), dn_move, 0.0)
+    atr_smooth = tr.ewm(alpha=1.0 / 14.0, adjust=False).mean().replace(0, 1e-8)
+    plus_di = 100.0 * pd.Series(plus_dm, index=df.index).ewm(alpha=1.0 / 14.0, adjust=False).mean() / atr_smooth
+    minus_di = 100.0 * pd.Series(minus_dm, index=df.index).ewm(alpha=1.0 / 14.0, adjust=False).mean() / atr_smooth
+    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-8)
+    df["adx"] = dx.ewm(alpha=1.0 / 14.0, adjust=False).mean().fillna(20.0)
+
+    # CME Globex 交易日自美東 18:00 開盤起算 (位移 +6 小時歸屬同一 CME 交易日)
+    tp = (high + low + close) / 3.0
+    vol_safe = df["volume"].replace(0, 1).fillna(1)
     df["_pv"] = tp * vol_safe
     df["_vs"] = vol_safe
-    day_grp = df.index.date
-    df["vwap"] = df.groupby(day_grp)["_pv"].cumsum() / df.groupby(day_grp)["_vs"].cumsum()
+    cme_session_date = (pd.DatetimeIndex(df.index) + pd.Timedelta(hours=6)).date
+    df["vwap"] = df.groupby(cme_session_date)["_pv"].cumsum() / df.groupby(cme_session_date)["_vs"].cumsum()
     df.drop(columns=["_pv", "_vs"], inplace=True)
 
-    df["box_high"] = df["high"].shift(1).rolling(24, min_periods=5).max().bfill()
-    df["box_low"] = df["low"].shift(1).rolling(24, min_periods=5).min().bfill()
+    # 箱體高低嚴格使用 shift(1)，僅參考過去 24 根已收盤 K 棒
+    df["box_high"] = high.shift(1).rolling(24, min_periods=5).max()
+    df["box_low"] = low.shift(1).rolling(24, min_periods=5).min()
     return df
 
 
@@ -134,7 +307,7 @@ def fetch_real_yahoo_data(
     從 Yahoo Finance 抓取真實 CME 期貨歷史行情 (ES=F 對應 MES，NQ=F 對應 MNQ)。
     回傳: (df_ohlcv, data_source_label, warning_note)
     """
-    yf_sym = "NQ=F" if symbol.upper() == "MNQ" else "ES=F"
+    yf_sym = "NQ=F" if symbol.upper() in ("MNQ", "NQ") else "ES=F"
     tf = timeframe.lower().strip()
 
     s_dt = pd.to_datetime(start_date)
@@ -146,7 +319,6 @@ def fetch_real_yahoo_data(
     span_days = max(1, (e_dt - s_dt).days)
     note = ""
 
-    # Yahoo Finance 真實歷史資料週期上限自動適配
     if tf == "1m":
         yf_interval = "1m"
         if span_days > 7:
@@ -155,7 +327,6 @@ def fetch_real_yahoo_data(
     elif tf in ("5m", "15m"):
         yf_interval = tf
         if span_days > 58:
-            # 超過 58 天時改抓 1h 真實數據作為回測基準，或提示
             yf_interval = "1h"
             if span_days > 720:
                 yf_interval = "1d"
@@ -193,9 +364,10 @@ def fetch_real_yahoo_data(
     df["volume"] = df["volume"].fillna(1000).astype(int)
     df.index.name = "datetime"
 
-    # 若選 4h 且抓到 1h，重採樣為 4h
     if tf == "4h" and yf_interval == "1h" and len(df) > 0:
-        df = df.resample("4h").agg({
+        df_shifted = df.copy()
+        df_shifted.index = df_shifted.index + pd.Timedelta(hours=1)
+        df = df_shifted.resample("4h", label="right", closed="right").agg({
             "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
         }).dropna()
 
@@ -214,36 +386,32 @@ def generate_base_5m_data(start_date: str, end_date: str, symbol: str = "MES", s
     if e_dt <= s_dt:
         e_dt = s_dt + timedelta(days=90)
 
-    # 限制最長 10 年 (3653 天)
     if (e_dt - s_dt).days > 3653:
         s_dt = e_dt - timedelta(days=3653)
 
     b_days = pd.date_range(start=s_dt, end=e_dt, freq="B")
     if len(b_days) == 0:
-        b_days = pd.date_range(end= datetime.now(), periods=60, freq="B")
+        b_days = pd.date_range(end=datetime.now(), periods=60, freq="B")
 
     rng = np.random.default_rng(seed + (100 if symbol == "MNQ" else 0))
     base_price = 18000.0 if symbol == "MNQ" else 4800.0
     n_days = len(b_days)
 
-    # 每個交易日 23 小時 = 276 根 5m K 棒 (略過 17:00-18:00 ET 結算)
-    bars_per_day = 68  # 精簡高資訊密度日內 K 棒 (涵蓋亞歐美主力時段)，兼顧 10 年回測秒級反應與 K 線細節
+    bars_per_day = 68
     if n_days <= 90:
-        bars_per_day = 276  # 短中期回測使用完整 23 小時 5m K 棒
+        bars_per_day = 276
     elif n_days <= 365:
         bars_per_day = 138
 
     total_bars = n_days * bars_per_day
 
-    # 產生市場狀態轉換 (TREND_UP, TREND_DOWN, RANGE)，符合真實標普/納指長期年化波幅
-    regimes = rng.choice([0, 1, 2], size=n_days, p=[0.40, 0.40, 0.20])  # 0=RANGE, 1=UP, 2=DN
+    regimes = rng.choice([0, 1, 2], size=n_days, p=[0.40, 0.40, 0.20])
     daily_drifts = np.where(regimes == 1, 0.0018, np.where(regimes == 2, -0.0015, 0.0001))
     daily_vols = np.where(regimes == 1, 0.0085, np.where(regimes == 2, 0.0110, 0.0065))
 
     bar_drifts = np.repeat(daily_drifts / bars_per_day, bars_per_day)
     bar_vols = np.repeat(daily_vols / np.sqrt(bars_per_day), bars_per_day)
 
-    # 加入週期性日內推進與斐波回調波形
     t_idx = np.arange(total_bars, dtype=np.float64)
     wave = (0.0012 / np.sqrt(bars_per_day)) * np.sin(2.0 * np.pi * t_idx / 24.0)
     steps = rng.normal(bar_drifts, bar_vols) + wave
@@ -261,7 +429,6 @@ def generate_base_5m_data(start_date: str, end_date: str, symbol: str = "MES", s
     high_arr = np.maximum(open_arr, close_arr) + wick_up
     low_arr = np.minimum(open_arr, close_arr) - wick_dn
 
-    # 建立時間戳記
     step_mins = int(round((23 * 60) / bars_per_day))
     intraday_offsets = pd.to_timedelta(np.arange(bars_per_day) * step_mins, unit="m")
     day_starts = np.repeat(b_days.values, bars_per_day)
@@ -282,41 +449,15 @@ def generate_base_5m_data(start_date: str, end_date: str, symbol: str = "MES", s
     }, index=timestamps)
     df.index.name = "datetime"
 
-    # 預先計算核心技術指標 (ATR14, EMA20, EMA50, EMA200, Session VWAP, Rolling Sortino)
-    tr = np.maximum(
-        df["high"] - df["low"],
-        np.maximum(
-            (df["high"] - df["close"].shift(1)).abs(),
-            (df["low"] - df["close"].shift(1)).abs()
-        )
-    )
-    df["atr"] = tr.rolling(14, min_periods=1).mean().bfill()
-    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
-    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
-    df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
-
-    # 日內 VWAP
-    tp = (df["high"] + df["low"] + df["close"]) / 3.0
-    df["_pv"] = tp * df["volume"]
-    day_grp = df.index.date
-    df["vwap"] = df.groupby(day_grp)["_pv"].cumsum() / df.groupby(day_grp)["volume"].cumsum()
-    df.drop(columns=["_pv"], inplace=True)
-
-    # 滾動箱體高低點 (24 根 K 棒)
-    df["box_high"] = df["high"].shift(1).rolling(24, min_periods=5).max().bfill()
-    df["box_low"] = df["low"].shift(1).rolling(24, min_periods=5).min().bfill()
-
-    return df
+    return _add_indicators(df)
 
 
 def resample_ohlcv(df_base: pd.DataFrame, timeframe: str, max_bars: int = 1500) -> Tuple[List[Dict[str, Any]], pd.DatetimeIndex]:
     """
     將基準 K 線重採樣為指定週期：1m, 5m, 15m, 1h, 4h, 1d
-    若切換為 1m，則自最近區間展開高解析度 1 分鐘 K 線。
     """
     tf = timeframe.lower().strip()
     if tf == "1m":
-        # 取尾段區間展開為 1m K 線以供精細檢視
         sub = df_base.iloc[-min(len(df_base), 300):].copy()
         records = []
         rng = np.random.default_rng(77)
@@ -364,7 +505,7 @@ def resample_ohlcv(df_base: pd.DataFrame, timeframe: str, max_bars: int = 1500) 
     if rule is None:
         df_tf = df_base.copy()
     else:
-        df_tf = df_base.resample(rule).agg({
+        df_tf = df_base.resample(rule, label="right", closed="right").agg({
             "open": "first",
             "high": "max",
             "low": "min",
@@ -395,77 +536,291 @@ def resample_ohlcv(df_base: pd.DataFrame, timeframe: str, max_bars: int = 1500) 
     return candles, df_tf.index
 
 
+def _infer_bar_timedelta(index: pd.DatetimeIndex, default_hours: float = 1.0) -> pd.Timedelta:
+    """自動推斷左標記 K 線的時間跨度，用於將開盤時間戳轉為真實收盤完成時間戳"""
+    if len(index) < 2:
+        return pd.Timedelta(hours=default_hours)
+    diffs = pd.Series(index).diff().dropna()
+    median_diff = diffs.median()
+    if pd.isna(median_diff) or median_diff <= pd.Timedelta(seconds=0):
+        return pd.Timedelta(hours=default_hours)
+    return median_diff
+
+
 def _add_multi_timeframe_indicators(df: pd.DataFrame, symbol: str = "ES") -> pd.DataFrame:
-    """為 OHLCV 資料集補充 4H 及 1D 宏觀指標 (ema20/50/200_4h, ema50/close_1d)，支援本地快取或就地重採樣"""
-    if "ema20_4h" in df.columns and "ema50_1d" in df.columns:
+    """
+    修復漏洞 A2 + 1H ADX 子週期對齊：為 OHLCV 資料集補充 4H、1D 宏觀指標及真 1H ADX，
+    徹底杜絕 IBKR 左標記 K 線的未來函數偷看。
+    原理：
+    - IBKR API 的 1H K 線標記為開盤時間 T (例如 06:00)，實際在 T + 1h (07:00) 收盤時才觸發策略判斷。
+    - IBKR API 的 4H K 線標記為 T_4h (例如 06:00)，實際涵蓋 06:00~10:00，在 T_4h + 4h (10:00) 才收盤完成！
+    - IBKR API 的 1D K 線標記為日期 D (00:00)，實際在當日美東 16:00 (D + 16h) 才收盤完成！
+    因此必須以『各自的真實收盤完成時間 (close_ts)』執行 merge_asof(direction="backward")，且禁止 .bfill()！
+    """
+    if "ema20_4h" in df.columns and "ema50_1d" in df.columns and "adx_1h" in df.columns:
         return df
 
-    clean_sym = symbol.replace("CME_", "").upper()
-    sym_4h = "ES" if clean_sym in ("MES", "ES") else ("NQ" if clean_sym in ("MNQ", "NQ") else clean_sym)
+    if "adx" not in df.columns or "ema20" not in df.columns:
+        df = _add_indicators(df)
 
-    from ibkr_history_downloader import get_cache_path
-    cache_4h = get_cache_path(sym_4h, "4h")
-    cache_1d = get_cache_path(sym_4h, "1d")
+    clean_sym = symbol.replace("CME_", "").upper()
+    sym_macro = "ES" if clean_sym in ("MES", "ES") else ("NQ" if clean_sym in ("MNQ", "NQ") else clean_sym)
+
+    try:
+        from ibkr_history_downloader import get_cache_path, audit_cache_integrity
+        cache_4h = get_cache_path(sym_macro, "4h")
+        cache_1d = get_cache_path(sym_macro, "1d")
+        cache_1h = get_cache_path(sym_macro, "1h")
+    except Exception:
+        cache_4h, cache_1d, cache_1h = "", "", ""
+        audit_cache_integrity = None
 
     df_4h = None
     df_1d = None
-    if os.path.exists(cache_4h):
-        try:
-            df_4h = pd.read_csv(cache_4h, parse_dates=["datetime"], index_col="datetime").sort_index()
-            df_4h = _add_indicators(df_4h)
-        except Exception:
-            pass
-    if os.path.exists(cache_1d):
-        try:
-            df_1d = pd.read_csv(cache_1d, parse_dates=["datetime"], index_col="datetime").sort_index()
-            df_1d = _add_indicators(df_1d)
-        except Exception:
-            pass
 
-    if df_4h is None or len(df_4h) < 10:
+    if cache_4h and os.path.exists(cache_4h):
         try:
-            df_4h = df.resample("4h", label="right", closed="right").agg({
-                "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
-            }).dropna()
-            df_4h = _add_indicators(df_4h)
+            tmp_4h = pd.read_csv(cache_4h, parse_dates=["datetime"], index_col="datetime").sort_index()
+            is_ok, _ = audit_cache_integrity(tmp_4h, "4h") if audit_cache_integrity else (True, "")
+            if is_ok and len(tmp_4h) >= 10:
+                df_4h = _add_indicators(tmp_4h)
+                df_4h["close_ts"] = df_4h.index + pd.Timedelta(hours=4)
         except Exception:
-            df_4h = df.copy()
+            df_4h = None
 
-    if df_1d is None or len(df_1d) < 10:
+    if cache_1d and os.path.exists(cache_1d):
         try:
-            df_1d = df.resample("1d", label="right", closed="right").agg({
-                "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
-            }).dropna()
-            df_1d = _add_indicators(df_1d)
+            tmp_1d = pd.read_csv(cache_1d, parse_dates=["datetime"], index_col="datetime").sort_index()
+            is_ok, _ = audit_cache_integrity(tmp_1d, "1d") if audit_cache_integrity else (True, "")
+            if is_ok and len(tmp_1d) >= 10:
+                df_1d = _add_indicators(tmp_1d)
+                df_1d["close_ts"] = df_1d.index.normalize() + pd.Timedelta(hours=16)
         except Exception:
-            df_1d = df.copy()
+            df_1d = None
 
-    # 強制 shift(1) 徹底杜絕未來函數偷看 (Look-Ahead Bias Removal)
-    df_4h_sub = df_4h[["ema20", "ema50", "ema200", "close"]].shift(1).rename(columns={
-        "ema20": "ema20_4h", "ema50": "ema50_4h", "ema200": "ema200_4h", "close": "close_4h"
-    })
-    df_1d_sub = df_1d[["ema20", "ema50", "ema200", "close"]].shift(1).rename(columns={
-        "ema20": "ema20_1d", "ema50": "ema50_1d", "ema200": "ema200_1d", "close": "close_1d"
-    })
-
-    # 1H ADX 強趨勢保護濾網指標 (shift 1 杜絕偷看)
-    try:
-        from mes_strategy.indicators import calculate_adx
-        df_1h = df.resample("1h", label="right", closed="right").agg({
+    base_delta = _infer_bar_timedelta(df.index, default_hours=1.0)
+    if df_4h is None:
+        df_shifted = df.copy()
+        df_shifted.index = df_shifted.index + base_delta
+        df_4h = df_shifted.resample("4h", label="right", closed="right").agg({
             "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
         }).dropna()
-        adx_s, _, _ = calculate_adx(df_1h["high"], df_1h["low"], df_1h["close"], 14)
-        df_1h_sub = pd.DataFrame({"adx_1h": adx_s.shift(1)}, index=df_1h.index)
-    except Exception:
-        df_1h_sub = pd.DataFrame({"adx_1h": pd.Series(20.0, index=df.index)})
+        df_4h = _add_indicators(df_4h)
+        df_4h["close_ts"] = df_4h.index
 
-    m1 = pd.merge_asof(df.reset_index(), df_4h_sub.reset_index(), on="datetime", direction="backward")
-    m2 = pd.merge_asof(m1, df_1d_sub.reset_index(), on="datetime", direction="backward")
-    m3 = pd.merge_asof(m2, df_1h_sub.reset_index(), on="datetime", direction="backward").set_index("datetime")
+    if df_1d is None:
+        df_shifted = df.copy()
+        df_shifted.index = df_shifted.index + base_delta
+        df_1d = df_shifted.resample("1d", label="right", closed="right").agg({
+            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+        }).dropna()
+        df_1d = _add_indicators(df_1d)
+        df_1d["close_ts"] = df_1d.index
+
+    # 若主回測週期小於 1 小時 (如 5m/15m)，必須以真 1H 收盤 K 棒計算 adx_1h 避免用 5m 雜訊充當 1H 趨勢強度
+    df_1h_sub = None
+    if base_delta < pd.Timedelta(hours=1):
+        df_1h = None
+        if cache_1h and os.path.exists(cache_1h):
+            try:
+                tmp_1h = pd.read_csv(cache_1h, parse_dates=["datetime"], index_col="datetime").sort_index()
+                is_ok, _ = audit_cache_integrity(tmp_1h, "1h") if audit_cache_integrity else (True, "")
+                if is_ok and len(tmp_1h) >= 20:
+                    df_1h = _add_indicators(tmp_1h)
+                    df_1h["close_ts"] = df_1h.index + pd.Timedelta(hours=1)
+            except Exception:
+                df_1h = None
+        if df_1h is None:
+            df_shifted = df.copy()
+            df_shifted.index = df_shifted.index + base_delta
+            df_1h = df_shifted.resample("1h", label="right", closed="right").agg({
+                "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+            }).dropna()
+            df_1h = _add_indicators(df_1h)
+            df_1h["close_ts"] = df_1h.index
+        df_1h_sub = df_1h[["close_ts", "adx"]].rename(columns={"adx": "adx_1h"}).sort_values("close_ts")
+
+    df_4h_sub = df_4h[["close_ts", "ema20", "ema50", "ema200", "close"]].rename(columns={
+        "ema20": "ema20_4h", "ema50": "ema50_4h", "ema200": "ema200_4h", "close": "close_4h"
+    }).sort_values("close_ts")
+
+    df_1d_sub = df_1d[["close_ts", "ema20", "ema50", "ema200", "close"]].rename(columns={
+        "ema20": "ema20_1d", "ema50": "ema50_1d", "ema200": "ema200_1d", "close": "close_1d"
+    }).sort_values("close_ts")
+
+    base_reset = df.reset_index()
+    base_reset["close_ts"] = base_reset["datetime"] + base_delta
+
+    merged = pd.merge_asof(base_reset.sort_values("close_ts"), df_4h_sub, on="close_ts", direction="backward")
+    merged = pd.merge_asof(merged, df_1d_sub, on="close_ts", direction="backward")
+    if df_1h_sub is not None:
+        merged = pd.merge_asof(merged, df_1h_sub, on="close_ts", direction="backward")
+    merged = merged.sort_values("datetime").set_index("datetime").drop(columns=["close_ts"])
+
+    if "adx_1h" not in merged.columns:
+        merged["adx_1h"] = merged["adx"]
+
     for col in ["ema20_4h", "ema50_4h", "ema200_4h", "close_4h", "ema20_1d", "ema50_1d", "ema200_1d", "close_1d", "adx_1h"]:
-        if col in m3.columns:
-            m3[col] = m3[col].ffill().bfill()
-    return m3
+        if col in merged.columns:
+            merged[col] = merged[col].ffill()
+    return merged
+
+
+def _simulate_trade_exit_core(
+    i: int,
+    n: int,
+    direction: str,
+    entry_price: float,
+    sl_price: float,
+    tp1_price: float,
+    tp2_price: float,
+    runner_target: float,
+    total_lots: int,
+    split_lots: Tuple[int, int, int],
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    slippage_points: float = 0.25,
+    trailing_runner: bool = True,
+    strict_realistic_mode: bool = True,
+    legacy_edge_pts: float = 0.0
+) -> Tuple[int, float, str, float, int]:
+    """
+    嚴格整數口出場模擬器核心 (回傳: exit_idx, raw_exit_price, exit_reason, realized_points, slip_applied_lots)。
+    - strict_realistic_mode=True 時禁止對未來 K 線進行順向偏移作弊。
+    - 嚴格執行保守碰撞原則：同根 K 棒優先檢查止損/保本，觸及 TP1 後下一根才移保本。
+    - 尾倉強平與止損均依實際受滑價影響的口數扣除滑價。
+    """
+    tp1_hit = False
+    tp2_hit = False
+    max_hold = min(36, n - 1 - i)
+    exit_idx = min(i + 1, n - 1)
+    raw_exit_price = float(closes[exit_idx])
+    exit_reason = "波段收盤平倉"
+    realized_points = 0.0
+    slip_applied_lots = 0
+
+    for j in range(i + 1, i + 1 + max_hold):
+        if strict_realistic_mode or legacy_edge_pts <= 0.0:
+            hj = float(highs[j])
+            lj = float(lows[j])
+            cj = float(closes[j])
+        else:
+            shift = legacy_edge_pts * min(1.0, (j - i) / 3.0)
+            hj = float(highs[j]) + (shift if direction == "LONG" else -shift * 0.45)
+            lj = float(lows[j]) + (shift * 0.45 if direction == "LONG" else -shift)
+            cj = float(closes[j]) + (shift * 0.7 if direction == "LONG" else -shift * 0.7)
+
+        if direction == "LONG":
+            cur_sl = entry_price + 0.25 if tp1_hit else sl_price
+            if trailing_runner and tp2_hit:
+                cur_sl = max(cur_sl, _round_tick(tp1_price + (cj - tp2_price) * 0.5))
+
+            if lj <= cur_sl:
+                exit_idx = j
+                raw_exit_price = _round_tick(cur_sl - slippage_points)
+                realized_points = compute_integer_realized_points(
+                    total_lots, split_lots, entry_price, tp1_price, tp2_price,
+                    raw_exit_price, direction, tp1_hit, tp2_hit
+                )
+                if not tp1_hit:
+                    exit_reason = "觸發止損 (SL)"
+                    slip_applied_lots = total_lots
+                elif not tp2_hit:
+                    exit_reason = "TP1移保本 + 折返保本平倉 (1口)" if total_lots == 1 else "TP1止盈 + 餘倉保本止損"
+                    slip_applied_lots = split_lots[1] + split_lots[2]
+                else:
+                    exit_reason = "TP1/TP2止盈 + 尾倉移動止盈"
+                    slip_applied_lots = split_lots[2]
+                break
+
+            if not tp1_hit and hj >= tp1_price:
+                tp1_hit = True
+            if tp1_hit and not tp2_hit and hj >= tp2_price:
+                tp2_hit = True
+                if split_lots[2] == 0:
+                    exit_idx = j
+                    raw_exit_price = tp2_price
+                    realized_points = compute_integer_realized_points(
+                        total_lots, split_lots, entry_price, tp1_price, tp2_price,
+                        raw_exit_price, direction, tp1_hit, tp2_hit
+                    )
+                    exit_reason = "TP1移保本 + TP2整口止盈 (1口)" if total_lots == 1 else f"TP1/TP2整數全數止盈 ({total_lots}口)"
+                    break
+            if tp2_hit and split_lots[2] > 0 and hj >= runner_target:
+                exit_idx = j
+                raw_exit_price = runner_target
+                realized_points = compute_integer_realized_points(
+                    total_lots, split_lots, entry_price, tp1_price, tp2_price,
+                    raw_exit_price, direction, tp1_hit, tp2_hit
+                )
+                exit_reason = "三梯次全數止盈 (TP1+TP2+Runner)"
+                break
+
+        else:  # SHORT
+            cur_sl = entry_price - 0.25 if tp1_hit else sl_price
+            if trailing_runner and tp2_hit:
+                cur_sl = min(cur_sl, _round_tick(tp1_price - (tp2_price - cj) * 0.5))
+
+            if hj >= cur_sl:
+                exit_idx = j
+                raw_exit_price = _round_tick(cur_sl + slippage_points)
+                realized_points = compute_integer_realized_points(
+                    total_lots, split_lots, entry_price, tp1_price, tp2_price,
+                    raw_exit_price, direction, tp1_hit, tp2_hit
+                )
+                if not tp1_hit:
+                    exit_reason = "觸發止損 (SL)"
+                    slip_applied_lots = total_lots
+                elif not tp2_hit:
+                    exit_reason = "TP1移保本 + 折返保本平倉 (1口)" if total_lots == 1 else "TP1止盈 + 餘倉保本止損"
+                    slip_applied_lots = split_lots[1] + split_lots[2]
+                else:
+                    exit_reason = "TP1/TP2止盈 + 尾倉移動止盈"
+                    slip_applied_lots = split_lots[2]
+                break
+
+            if not tp1_hit and lj <= tp1_price:
+                tp1_hit = True
+            if tp1_hit and not tp2_hit and lj <= tp2_price:
+                tp2_hit = True
+                if split_lots[2] == 0:
+                    exit_idx = j
+                    raw_exit_price = tp2_price
+                    realized_points = compute_integer_realized_points(
+                        total_lots, split_lots, entry_price, tp1_price, tp2_price,
+                        raw_exit_price, direction, tp1_hit, tp2_hit
+                    )
+                    exit_reason = "TP1移保本 + TP2整口止盈 (1口)" if total_lots == 1 else f"TP1/TP2整數全數止盈 ({total_lots}口)"
+                    break
+            if tp2_hit and split_lots[2] > 0 and lj <= runner_target:
+                exit_idx = j
+                raw_exit_price = runner_target
+                realized_points = compute_integer_realized_points(
+                    total_lots, split_lots, entry_price, tp1_price, tp2_price,
+                    raw_exit_price, direction, tp1_hit, tp2_hit
+                )
+                exit_reason = "三梯次全數止盈 (TP1+TP2+Runner)"
+                break
+
+        if j == i + max_hold:
+            exit_idx = j
+            raw_exit_price = _round_tick(cj - slippage_points if direction == "LONG" else cj + slippage_points)
+            realized_points = compute_integer_realized_points(
+                total_lots, split_lots, entry_price, tp1_price, tp2_price,
+                raw_exit_price, direction, tp1_hit, tp2_hit
+            )
+            if not tp1_hit:
+                exit_reason = "波段收盤平倉"
+                slip_applied_lots = total_lots
+            elif not tp2_hit:
+                exit_reason = "TP1止盈 + 尾倉收盤平倉"
+                slip_applied_lots = split_lots[1] + split_lots[2]
+            else:
+                exit_reason = "TP1/TP2止盈 + 尾倉收盤平倉"
+                slip_applied_lots = split_lots[2]
+
+    return exit_idx, raw_exit_price, exit_reason, realized_points, slip_applied_lots
 
 
 def simulate_trade_exit_v9_3(
@@ -487,136 +842,27 @@ def simulate_trade_exit_v9_3(
     strict_realistic_mode: bool = True,
     legacy_edge_pts: float = 0.0
 ) -> Tuple[int, float, str, float]:
-    """
-    V9.3 嚴格整數口出場模擬器：
-    - 當 strict_realistic_mode=True 時，shift 強制為 0.0，不對未來 K 線進行任何順向加點美化。
-    - 嚴格執行保守碰撞原則：尚未觸及 TP1 時，若同根 K 棒同時觸及 SL 與 TP1，優先判定為觸發止損 (SL)。
-    - 100% 依整數口拆單 (q1, q2, q3) 計算實現點數。
-    """
-    from strategies.v9_3_master_hybrid_live import compute_integer_realized_points
-
-    tp1_hit = False
-    tp2_hit = False
-    max_hold = min(36, n - 1 - i)
-    exit_idx = min(i + 1, n - 1)
-    exit_price = float(closes[exit_idx])
-    exit_reason = "波段收盤平倉"
-    realized_points = 0.0
-
-    for j in range(i + 1, i + 1 + max_hold):
-        if strict_realistic_mode:
-            hj = float(highs[j])
-            lj = float(lows[j])
-            cj = float(closes[j])
-        else:
-            shift = legacy_edge_pts * min(1.0, (j - i) / 3.0)
-            hj = float(highs[j]) + (shift if direction == "LONG" else -shift * 0.45)
-            lj = float(lows[j]) + (shift * 0.45 if direction == "LONG" else -shift)
-            cj = float(closes[j]) + (shift * 0.7 if direction == "LONG" else -shift * 0.7)
-
-        if direction == "LONG":
-            cur_sl = entry_price + 0.25 if tp1_hit else sl_price
-            if trailing_runner and tp2_hit:
-                cur_sl = max(cur_sl, tp1_price + (cj - tp2_price) * 0.5)
-
-            # 1. 保守止損優先檢查 (Worst-Case First)
-            if lj <= cur_sl:
-                exit_idx = j
-                exit_price = round(round((cur_sl - slippage_points) / 0.25) * 0.25, 2)
-                realized_points = compute_integer_realized_points(
-                    total_lots, split_lots, entry_price, tp1_price, tp2_price,
-                    exit_price, direction, tp1_hit, tp2_hit
-                )
-                if not tp1_hit:
-                    exit_reason = "觸發止損 (SL)"
-                elif not tp2_hit:
-                    exit_reason = "TP1移保本 + 折返保本平倉 (1口)" if total_lots == 1 else "TP1止盈 + 餘倉保本止損"
-                else:
-                    exit_reason = "TP1/TP2止盈 + 尾倉移動止盈"
-                break
-
-            # 2. 檢查是否推進至 TP1 / TP2 / Runner
-            if not tp1_hit and hj >= tp1_price:
-                tp1_hit = True
-            if tp1_hit and not tp2_hit and hj >= tp2_price:
-                tp2_hit = True
-                if split_lots[2] == 0:
-                    exit_idx = j
-                    exit_price = tp2_price
-                    realized_points = compute_integer_realized_points(
-                        total_lots, split_lots, entry_price, tp1_price, tp2_price,
-                        exit_price, direction, tp1_hit, tp2_hit
-                    )
-                    exit_reason = f"TP1/TP2整數全數止盈 ({total_lots}口)"
-                    break
-            if tp2_hit and split_lots[2] > 0 and hj >= runner_target:
-                exit_idx = j
-                exit_price = runner_target
-                realized_points = compute_integer_realized_points(
-                    total_lots, split_lots, entry_price, tp1_price, tp2_price,
-                    exit_price, direction, tp1_hit, tp2_hit
-                )
-                exit_reason = "三梯次全數止盈 (TP1+TP2+Runner)"
-                break
-
-        else:  # SHORT
-            cur_sl = entry_price - 0.25 if tp1_hit else sl_price
-            if trailing_runner and tp2_hit:
-                cur_sl = min(cur_sl, tp1_price - (tp2_price - cj) * 0.5)
-
-            if hj >= cur_sl:
-                exit_idx = j
-                exit_price = round(round((cur_sl + slippage_points) / 0.25) * 0.25, 2)
-                realized_points = compute_integer_realized_points(
-                    total_lots, split_lots, entry_price, tp1_price, tp2_price,
-                    exit_price, direction, tp1_hit, tp2_hit
-                )
-                if not tp1_hit:
-                    exit_reason = "觸發止損 (SL)"
-                elif not tp2_hit:
-                    exit_reason = "TP1移保本 + 折返保本平倉 (1口)" if total_lots == 1 else "TP1止盈 + 餘倉保本止損"
-                else:
-                    exit_reason = "TP1/TP2止盈 + 尾倉移動止盈"
-                break
-
-            if not tp1_hit and lj <= tp1_price:
-                tp1_hit = True
-            if tp1_hit and not tp2_hit and lj <= tp2_price:
-                tp2_hit = True
-                if split_lots[2] == 0:
-                    exit_idx = j
-                    exit_price = tp2_price
-                    realized_points = compute_integer_realized_points(
-                        total_lots, split_lots, entry_price, tp1_price, tp2_price,
-                        exit_price, direction, tp1_hit, tp2_hit
-                    )
-                    exit_reason = f"TP1/TP2整數全數止盈 ({total_lots}口)"
-                    break
-            if tp2_hit and split_lots[2] > 0 and lj <= runner_target:
-                exit_idx = j
-                exit_price = runner_target
-                realized_points = compute_integer_realized_points(
-                    total_lots, split_lots, entry_price, tp1_price, tp2_price,
-                    exit_price, direction, tp1_hit, tp2_hit
-                )
-                exit_reason = "三梯次全數止盈 (TP1+TP2+Runner)"
-                break
-
-        if j == i + max_hold:
-            exit_idx = j
-            exit_price = round(round(cj / 0.25) * 0.25, 2)
-            realized_points = compute_integer_realized_points(
-                total_lots, split_lots, entry_price, tp1_price, tp2_price,
-                exit_price, direction, tp1_hit, tp2_hit
-            )
-            if not tp1_hit:
-                exit_reason = "波段收盤平倉"
-            elif not tp2_hit:
-                exit_reason = "TP1止盈 + 尾倉收盤平倉"
-            else:
-                exit_reason = "TP1/TP2止盈 + 尾倉收盤平倉"
-
-    return exit_idx, exit_price, exit_reason, realized_points
+    """對外相容介面：保留原 4 元組回傳格式供外部腳本或單元測試呼叫"""
+    exit_idx, raw_exit_price, exit_reason, realized_points, _ = _simulate_trade_exit_core(
+        i=i,
+        n=n,
+        direction=direction,
+        entry_price=entry_price,
+        sl_price=sl_price,
+        tp1_price=tp1_price,
+        tp2_price=tp2_price,
+        runner_target=runner_target,
+        total_lots=total_lots,
+        split_lots=split_lots,
+        highs=highs,
+        lows=lows,
+        closes=closes,
+        slippage_points=slippage_points,
+        trailing_runner=trailing_runner,
+        strict_realistic_mode=strict_realistic_mode,
+        legacy_edge_pts=legacy_edge_pts,
+    )
+    return exit_idx, raw_exit_price, exit_reason, realized_points
 
 
 def _determine_contracts(
@@ -627,11 +873,47 @@ def _determine_contracts(
     max_contracts_cap: int,
     risk_mult: float = 1.0
 ) -> int:
-    """根據資金階梯、策略規則與 IBKR 保證金上限決定口數"""
+    """相容舊版介面：根據資金階梯、策略規則與 IBKR 保證金上限決定口數"""
+    qty, _ = _determine_integer_lots(
+        equity=equity,
+        variant=variant,
+        rule_type=rule_type,
+        direction="LONG",
+        session_name="美盤 RTH (09:30-16:00 ET)",
+        margin_per_contract=margin_per_contract,
+        max_contracts_cap=max_contracts_cap,
+        risk_mult=risk_mult
+    )
+    return qty
+
+
+def _determine_integer_lots(
+    equity: float,
+    variant: str,
+    rule_type: str,
+    direction: str,
+    session_name: str,
+    margin_per_contract: float,
+    max_contracts_cap: int,
+    risk_mult: float = 1.0
+) -> Tuple[int, Tuple[int, int, int]]:
+    """
+    修復漏洞 B2：統一回傳合法的 IBKR 正整數口數與 (TP1口數, TP2口數, Runner尾倉口數)。
+    """
+    if variant == "v9.3":
+        return get_live_order_lots(
+            rule_type=rule_type,
+            direction=direction,
+            session=session_name,
+            current_equity=equity,
+            margin_per_contract=margin_per_contract,
+            max_contracts_cap=max_contracts_cap
+        )
+
     if rule_type in ("R2_RANGE_BOUNCE", "R3_FALSE_BREAKOUT") and variant in (
         "v4.3", "v5.0", "dual_60_40", "v6.0", "v8.1", "v9.1"
     ):
-        base_c = 1
+        total_lots = 1
     else:
         if equity < 45000:
             base_c = 2
@@ -643,395 +925,33 @@ def _determine_contracts(
             base_c = 8
         else:
             base_c = 12
+        total_lots = max(1, int(round(base_c * risk_mult)))
 
-    scaled = max(1, int(round(base_c * risk_mult)))
-    # IBKR 保證金安全限制 (最高動用 65% 淨值作為初始保證金)
     max_by_margin = max(1, int((equity * 0.65) // max(500.0, margin_per_contract)))
-    return min(scaled, max_by_margin, max_contracts_cap)
+    total_lots = min(total_lots, max_by_margin, max_contracts_cap)
 
-
-def run_single_strategy_backtest(
-    df: pd.DataFrame,
-    variant: str,
-    params: Dict[str, Any]
-) -> Dict[str, Any]:
-    """
-    高速執行單一策略回測，產生逐筆交易紀錄 (含開平倉座標、規則歸因、三梯次平倉明細) 與每日淨值序列。
-    """
-    initial_capital = float(params.get("initial_capital", 30000.0))
-    point_mult = float(params.get("point_multiplier", 5.0))
-    commission_per_side = float(params.get("commission_per_side", 0.62))
-    slippage_points = float(params.get("slippage_points", 0.25))
-    margin_per_contract = float(params.get("margin_per_contract", 2400.0))
-    max_contracts_cap = int(params.get("max_contracts_cap", 12))
-    risk_mult = float(params.get("risk_multiplier", 1.0))
-
-    if variant == "dual_60_40":
-        # 雙引擎組合：等效點值與雙資金池協同
-        risk_mult = risk_mult * 1.15
-
-    # 確保 4H 與 1D 宏觀指標存在
-    df = _add_multi_timeframe_indicators(df, symbol=params.get("symbol", "MES"))
-
-    closes = df["close"].values
-    opens = df["open"].values
-    highs = df["high"].values
-    lows = df["low"].values
-    atrs = df["atr"].values
-    ema20 = df["ema20"].values
-    ema50 = df["ema50"].values
-    ema200 = df["ema200"].values
-    vwaps = df["vwap"].values
-    box_highs = df["box_high"].values
-    box_lows = df["box_low"].values
-
-    e20_4h = df["ema20_4h"].values if "ema20_4h" in df.columns else ema20
-    e50_4h = df["ema50_4h"].values if "ema50_4h" in df.columns else ema50
-    e200_4h = df["ema200_4h"].values if "ema200_4h" in df.columns else ema200
-    c_4h = df["close_4h"].values if "close_4h" in df.columns else closes
-
-    e50_1d = df["ema50_1d"].values if "ema50_1d" in df.columns else ema50
-    c_1d = df["close_1d"].values if "close_1d" in df.columns else closes
-    adx_1h = df["adx_1h"].values if "adx_1h" in df.columns else np.full(n, 20.0)
-
-    timestamps = df.index
-
-    n = len(df)
-    equity = initial_capital
-    equity_curve = np.full(n, initial_capital, dtype=np.float64)
-
-    trades: List[Dict[str, Any]] = []
-    total_commission = 0.0
-    total_slippage = 0.0
-
-    # 策略特性參數 (優先自策略工廠提取)
-    from strategies.strategy_factory import STRATEGY_REGISTRY
-    cfg = STRATEGY_REGISTRY.get(variant)
-    if cfg:
-        trend_mode = cfg.get("trend_mode", "1H_VWAP")
-        tp1_r = float(cfg.get("tp1_r", 1.25))
-        tp2_r = float(cfg.get("tp2_r", 2.40))
-        runner_r = float(cfg.get("runner_r", 3.55))
-        w_tp1 = float(cfg.get("w_tp1", 0.60))
-        w_tp2 = float(cfg.get("w_tp2", 0.25))
-        w_run = round(1.0 - w_tp1 - w_tp2, 2)
-        sl_atr = float(cfg.get("sl_atr", 1.10))
-        trailing_runner = bool(cfg.get("trailing_runner", False))
-        edge_mult = float(cfg.get("edge_mult", 0.38))
-        risk_mult = risk_mult * float(cfg.get("risk_mult", 1.0))
-        allowed_rules = cfg.get("allowed_rules", ["R1", "R2", "R3"])
-        only_rule1 = (allowed_rules == ["R1"])
-        use_vwap = (trend_mode == "1H_VWAP")
+    if total_lots in DEFAULT_LOT_SPLIT_MAP:
+        split_lots = DEFAULT_LOT_SPLIT_MAP[total_lots]
     else:
-        trend_mode = "1H_VWAP" if variant in ("v5.0", "dual_60_40") else ("4H_LOCK" if variant == "v5.9" else "1H_VWAP")
-        use_vwap = variant in ("v5.0", "dual_60_40", "v5.9")
-        only_rule1 = (variant == "v5.9")
-        tp1_r = 1.25 if variant in ("v5.0", "dual_60_40") else 1.15
-        tp2_r = 2.40 if variant in ("v5.0", "dual_60_40") else 2.25
-        runner_r = tp2_r + 1.15
-        w_tp1 = 0.60 if variant in ("v5.0", "dual_60_40") else 0.50
-        w_tp2 = 0.25
-        w_run = round(1.0 - w_tp1 - w_tp2, 2)
-        sl_atr = 1.10 if variant in ("v5.0", "dual_60_40") else 0.95
-        trailing_runner = False
-        edge_mult = 0.42 if variant == "dual_60_40" else (0.38 if variant == "v5.0" else (0.34 if variant in ("v4.3", "v5.9") else 0.28))
-        allowed_rules = ["R1"] if only_rule1 else ["R1", "R2", "R3"]
+        q1 = max(1, int(round(total_lots * 0.40)))
+        q2 = max(1, int(round(total_lots * 0.40)))
+        q3 = max(0, total_lots - q1 - q2)
+        split_lots = (q1, q2, q3)
 
-    i = 30
-    # 策略信號冷卻步長 (每筆交易平倉後等待 3 根 K 棒避免反覆進場，真實反映全歷史交易頻率)
-    cooldown = 3
+    return total_lots, split_lots
 
-    while i < n - 12:
-        equity_curve[i] = equity
-        atr = max(1.0, float(atrs[i]))
-        c = float(closes[i])
-        o = float(opens[i])
-        h = float(highs[i])
-        l = float(lows[i])
-        e20 = float(ema20[i])
-        e50 = float(ema50[i])
-        e200 = float(ema200[i])
-        vwap = float(vwaps[i])
-        bh = float(box_highs[i])
-        bl = float(box_lows[i])
 
-        direction = None
-        rule_type = None
-        rule_label = ""
-        sl_dist = atr * sl_atr
-
-        macro_long = True
-        macro_short = True
-        if trend_mode == "4H_LOCK":
-            macro_long = (e20_4h[i] > e50_4h[i]) and (c_4h[i] > e200_4h[i])
-            macro_short = (e20_4h[i] < e50_4h[i]) and (c_4h[i] < e200_4h[i])
-        elif trend_mode == "1D_REGIME":
-            macro_long = (c_1d[i] > e50_1d[i])
-            macro_short = (c_1d[i] < e50_1d[i])
-        elif trend_mode == "HYBRID_4H_1D":
-            macro_long = (e20_4h[i] > e50_4h[i]) and (c_1d[i] > e50_1d[i])
-            macro_short = (e20_4h[i] < e50_4h[i]) and (c_1d[i] < e50_1d[i])
-        elif trend_mode == "1H_VWAP":
-            macro_long = (c >= vwap * 0.999)
-            macro_short = (c <= vwap * 1.001)
-
-        # 規則 1：順勢斐波那契浪 3 回踩進場 (Wave-3 Pullback)
-        trend_up = (e20 > e50) and macro_long
-        trend_dn = (e20 < e50) and macro_short
-
-        if ("R1" in allowed_rules) and trend_up and (l <= e20 + 0.25 * atr) and (c > o) and (c > e20):
-            direction = "LONG"
-            rule_type = "R1_WAVE3_TREND"
-            rule_label = "規則1：浪3斐波回踩做多"
-            sl_dist = max(1.0, atr * sl_atr)
-        elif ("R1" in allowed_rules) and trend_dn and (h >= e20 - 0.25 * atr) and (c < o) and (c < e20):
-            direction = "SHORT"
-            rule_type = "R1_WAVE3_TREND"
-            rule_label = "規則1：浪3斐波回踩做空"
-            sl_dist = max(1.0, atr * sl_atr)
-        elif not only_rule1:
-            # 規則 2：箱體震盪邊界反彈 (Range Bounce)
-            box_height = bh - bl
-            if ("R2" in allowed_rules) and box_height >= 2.8 * atr:
-                # V9.3 1H ADX 強趨勢保護濾網 (ADX > 30 攔截逆勢摸頂摸底)
-                adx_ok = not (variant == "v9.3" and adx_1h[i] > 30.0)
-                if adx_ok:
-                    if l <= bl + 0.35 * atr and c > bl + 0.2 * atr and c > o:
-                        if not use_vwap or c <= vwap:
-                            direction = "LONG"
-                            rule_type = "R2_RANGE_BOUNCE"
-                            rule_label = "規則2：箱體下沿支撐反彈 (整數擴口)" if variant == "v9.3" else "規則2：箱體下沿支撐反彈 (鎖1口)"
-                            sl_dist = max(1.0, atr * 0.85)
-                    elif h >= bh - 0.35 * atr and c < bh - 0.2 * atr and c < o:
-                        if not use_vwap or c >= vwap:
-                            direction = "SHORT"
-                            rule_type = "R2_RANGE_BOUNCE"
-                            rule_label = "規則2：箱體上沿阻力反彈 (整數擴口)" if variant == "v9.3" else "規則2：箱體上沿阻力反彈 (鎖1口)"
-                            sl_dist = max(1.0, atr * 0.85)
-
-            # 規則 3：假突破誘多/誘空反轉 (False Breakout Reversal)
-            if direction is None and ("R3" in allowed_rules) and box_height >= 2.5 * atr:
-                if h > bh + 0.15 * atr and c < bh - 0.1 * atr and c < o:
-                    direction = "SHORT"
-                    rule_type = "R3_FALSE_BREAKOUT"
-                    rule_label = "規則3：假突破上沿反轉做空 (鎖1口)"
-                    sl_dist = max(1.0, atr * 0.75)
-                elif l < bl - 0.15 * atr and c > bl + 0.1 * atr and c > o:
-                    direction = "LONG"
-                    rule_type = "R3_FALSE_BREAKOUT"
-                    rule_label = "規則3：假跌破下沿反轉做多 (鎖1口)"
-                    sl_dist = max(1.0, atr * 0.75)
-
-        if direction is None:
-            i += 1
-            continue
-
-        entry_price = _round_tick(c)
-        entry_ts = timestamps[i]
-
-        if variant == "v9.3":
-            from strategies.v9_3_master_hybrid_live import get_live_order_lots, detect_market_session
-            s_name = detect_market_session(entry_ts)
-            qty, split_lots = get_live_order_lots(
-                rule_type=rule_type,
-                direction=direction,
-                session=s_name,
-                current_equity=equity,
-                margin_per_contract=margin_per_contract,
-                max_contracts_cap=max_contracts_cap,
-                timestamp=entry_ts
-            )
-        else:
-            qty = _determine_contracts(
-                equity=equity,
-                variant=variant,
-                rule_type=rule_type,
-                margin_per_contract=margin_per_contract,
-                max_contracts_cap=max_contracts_cap,
-                risk_mult=risk_mult
-            )
-            split_lots = (int(round(qty * w_tp1)), int(round(qty * w_tp2)), max(0, qty - int(round(qty * w_tp1)) - int(round(qty * w_tp2))))
-
-        if direction == "LONG":
-            sl_price = _round_tick(entry_price - sl_dist)
-            tp1_price = _round_tick(entry_price + sl_dist * tp1_r)
-            tp2_price = _round_tick(entry_price + sl_dist * tp2_r)
-            runner_target = _round_tick(entry_price + sl_dist * runner_r)
-        else:
-            sl_price = _round_tick(entry_price + sl_dist)
-            tp1_price = _round_tick(entry_price - sl_dist * tp1_r)
-            tp2_price = _round_tick(entry_price - sl_dist * tp2_r)
-            runner_target = _round_tick(entry_price - sl_dist * runner_r)
-
-        # 模擬接下來的 K 棒走勢與三梯次出場
-        if variant == "v9.3":
-            exit_idx, exit_price, exit_reason, realized_points = simulate_trade_exit_v9_3(
-                i=i,
-                n=n,
-                direction=direction,
-                entry_price=entry_price,
-                sl_price=sl_price,
-                tp1_price=tp1_price,
-                tp2_price=tp2_price,
-                runner_target=runner_target,
-                total_lots=qty,
-                split_lots=split_lots,
-                highs=highs,
-                lows=lows,
-                closes=closes,
-                slippage_points=slippage_points,
-                trailing_runner=trailing_runner,
-                strict_realistic_mode=True
-            )
-        else:
-            tp1_hit = False
-            tp2_hit = False
-            exit_idx = min(i + 1, n - 1)
-            exit_price = float(closes[exit_idx])
-            exit_reason = "時間到期平倉"
-            realized_points = 0.0
-
-            edge_pts = atr * edge_mult
-            if rule_type == "R1_WAVE3_TREND":
-                edge_pts *= 1.25
-
-            max_hold = min(36, n - 1 - i)
-            for j in range(i + 1, i + 1 + max_hold):
-                shift = edge_pts * min(1.0, (j - i) / 3.0)
-                hj = float(highs[j]) + (shift if direction == "LONG" else -shift * 0.45)
-                lj = float(lows[j]) + (shift * 0.45 if direction == "LONG" else -shift)
-                cj = float(closes[j]) + (shift * 0.7 if direction == "LONG" else -shift * 0.7)
-
-                if direction == "LONG":
-                    # 先檢查是否觸發止損 (若已過 TP1 則移至保本位)
-                    cur_sl = entry_price + 0.25 if tp1_hit else sl_price
-                    if trailing_runner and tp2_hit:
-                        cur_sl = max(cur_sl, tp1_price + (cj - tp2_price) * 0.5)
-
-                    if lj <= cur_sl:
-                        exit_idx = j
-                        exit_price = _round_tick(cur_sl - slippage_points)
-                        if not tp1_hit:
-                            realized_points = (exit_price - entry_price)
-                            exit_reason = "觸發止損 (SL)"
-                        elif not tp2_hit:
-                            realized_points = w_tp1 * (tp1_price - entry_price) + (1.0 - w_tp1) * (exit_price - entry_price)
-                            exit_reason = "TP1止盈 + 餘倉保本止損"
-                        else:
-                            realized_points = w_tp1 * (tp1_price - entry_price) + w_tp2 * (tp2_price - entry_price) + w_run * (exit_price - entry_price)
-                            exit_reason = "TP1/TP2止盈 + 尾倉移動止盈"
-                        break
-
-                    if not tp1_hit and hj >= tp1_price:
-                        tp1_hit = True
-                    if tp1_hit and not tp2_hit and hj >= tp2_price:
-                        tp2_hit = True
-                    if tp2_hit and hj >= runner_target:
-                        exit_idx = j
-                        exit_price = runner_target
-                        realized_points = w_tp1 * (tp1_price - entry_price) + w_tp2 * (tp2_price - entry_price) + w_run * (runner_target - entry_price)
-                        exit_reason = "三梯次全數止盈 (TP1+TP2+Runner)"
-                        break
-                else:
-                    cur_sl = entry_price - 0.25 if tp1_hit else sl_price
-                    if trailing_runner and tp2_hit:
-                        cur_sl = min(cur_sl, tp1_price - (tp2_price - cj) * 0.5)
-
-                    if hj >= cur_sl:
-                        exit_idx = j
-                        exit_price = _round_tick(cur_sl + slippage_points)
-                        if not tp1_hit:
-                            realized_points = (entry_price - exit_price)
-                            exit_reason = "觸發止損 (SL)"
-                        elif not tp2_hit:
-                            realized_points = w_tp1 * (entry_price - tp1_price) + (1.0 - w_tp1) * (entry_price - exit_price)
-                            exit_reason = "TP1止盈 + 餘倉保本止損"
-                        else:
-                            realized_points = w_tp1 * (entry_price - tp1_price) + w_tp2 * (entry_price - tp2_price) + w_run * (entry_price - exit_price)
-                            exit_reason = "TP1/TP2止盈 + 尾倉移動止盈"
-                        break
-
-                    if not tp1_hit and lj <= tp1_price:
-                        tp1_hit = True
-                    if tp1_hit and not tp2_hit and lj <= tp2_price:
-                        tp2_hit = True
-                    if tp2_hit and lj <= runner_target:
-                        exit_idx = j
-                        exit_price = runner_target
-                        realized_points = w_tp1 * (entry_price - tp1_price) + w_tp2 * (entry_price - tp2_price) + w_run * (entry_price - runner_target)
-                        exit_reason = "三梯次全數止盈 (TP1+TP2+Runner)"
-                        break
-
-                if j == i + max_hold:
-                    exit_idx = j
-                    exit_price = _round_tick(cj)
-                    rem_pts = (exit_price - entry_price) if direction == "LONG" else (entry_price - exit_price)
-                    if not tp1_hit:
-                        realized_points = rem_pts
-                        exit_reason = "波段收盤平倉"
-                    elif not tp2_hit:
-                        t1_pts = (tp1_price - entry_price) if direction == "LONG" else (entry_price - tp1_price)
-                        realized_points = w_tp1 * t1_pts + (1.0 - w_tp1) * rem_pts
-                        exit_reason = "TP1止盈 + 尾倉收盤平倉"
-                    else:
-                        t1_pts = (tp1_price - entry_price) if direction == "LONG" else (entry_price - tp1_price)
-                        t2_pts = (tp2_price - entry_price) if direction == "LONG" else (entry_price - tp2_price)
-                        realized_points = w_tp1 * t1_pts + w_tp2 * t2_pts + w_run * rem_pts
-                        exit_reason = "TP1/TP2止盈 + 尾倉收盤平倉"
-                    exit_reason = "TP1/TP2止盈 + 尾倉收盤平倉"
-
-        gross_pnl = realized_points * qty * point_mult
-        comm_cost = qty * 2.0 * commission_per_side
-        slip_cost = (qty * slippage_points * point_mult) if "SL" in exit_reason else 0.0
-        net_pnl = round(gross_pnl - comm_cost, 2)
-
-        total_commission += comm_cost
-        total_slippage += slip_cost
-        equity = round(max(1000.0, equity + net_pnl), 2)
-
-        # 填補持倉與冷卻期間的淨值曲線 (確保無縫連續，絕不出現回落至初始本金的空洞)
-        next_i = min(n, exit_idx + cooldown)
-        equity_curve[i:next_i] = equity
-
-        exit_ts = timestamps[exit_idx]
-        hr = entry_ts.hour
-        if 9 <= hr < 16:
-            session_name = "美盤 RTH (09:30-16:00 ET)"
-        elif 2 <= hr < 9:
-            session_name = "歐盤倫敦 (02:00-09:30 ET)"
-        else:
-            session_name = "亞盤夜盤 (18:00-02:00 ET)"
-
-        trades.append({
-            "trade_id": len(trades) + 1,
-            "strategy": variant,
-            "direction": direction,
-            "rule_type": rule_type,
-            "rule_label": rule_label,
-            "session": session_name,
-            "contracts": qty,
-            "entry_time": entry_ts.strftime("%Y-%m-%d %H:%M"),
-            "entry_ts": int(entry_ts.timestamp()),
-            "entry_price": entry_price,
-            "sl_price": sl_price,
-            "tp1_price": tp1_price,
-            "tp2_price": tp2_price,
-            "exit_time": exit_ts.strftime("%Y-%m-%d %H:%M"),
-            "exit_ts": int(exit_ts.timestamp()),
-            "exit_price": exit_price,
-            "exit_reason": exit_reason,
-            "points": round(realized_points, 2),
-            "commission": round(comm_cost, 2),
-            "pnl": net_pnl,
-            "equity_after": equity
-        })
-
-        i = next_i
-
-    # 補齊尾段淨值
-    equity_curve[i:] = equity
-
-    # 計算每日淨值與績效指標
+def _compile_backtest_metrics(
+    variant: str,
+    initial_capital: float,
+    equity: float,
+    equity_curve: np.ndarray,
+    timestamps: pd.DatetimeIndex,
+    trades: List[Dict[str, Any]],
+    total_commission: float,
+    total_slippage: float
+) -> Dict[str, Any]:
+    """統一計算每日淨值序列、最大回撤、Sharpe/Sortino/Calmar、蒙地卡羅與年度/月度矩陣"""
     s_eq = pd.Series(equity_curve, index=timestamps)
     daily_eq = s_eq.resample("1D").last().dropna()
     if len(daily_eq) == 0:
@@ -1044,13 +964,19 @@ def run_single_strategy_backtest(
 
     total_ret_pct = round(((equity - initial_capital) / initial_capital) * 100.0, 2)
     n_years = max(0.08, (timestamps[-1] - timestamps[0]).days / 365.25)
-    cagr_pct = round(((max(equity, 1.0) / initial_capital) ** (1.0 / n_years) - 1.0) * 100.0, 2) if n_years >= 0.25 else total_ret_pct
+    cagr_pct = (
+        round(((max(equity, 1.0) / initial_capital) ** (1.0 / n_years) - 1.0) * 100.0, 2)
+        if n_years >= 0.25 else total_ret_pct
+    )
 
     daily_rets = daily_eq.pct_change().dropna()
     if len(daily_rets) > 2 and daily_rets.std() > 1e-8:
         sharpe = round(float(daily_rets.mean() / daily_rets.std() * np.sqrt(252.0)), 2)
         downside = daily_rets[daily_rets < 0]
-        sortino = round(float(daily_rets.mean() / downside.std() * np.sqrt(252.0)), 2) if len(downside) > 1 and downside.std() > 1e-8 else round(sharpe * 1.45, 2)
+        sortino = (
+            round(float(daily_rets.mean() / downside.std() * np.sqrt(252.0)), 2)
+            if len(downside) > 1 and downside.std() > 1e-8 else round(sharpe * 1.45, 2)
+        )
     else:
         sharpe = 0.0
         sortino = 0.0
@@ -1067,12 +993,11 @@ def run_single_strategy_backtest(
     avg_loss = round(-gross_loss / len(losses), 2) if losses else 0.0
     expectancy = round((equity - initial_capital) / len(trades), 2) if trades else 0.0
 
-    # 規則歸因分析 (R1 / R2 / R3)
     rule_stats = {}
     for r_key, r_name in [
         ("R1_WAVE3_TREND", "規則 1：順勢浪 3 回踩"),
-        ("R2_RANGE_BOUNCE", "規則 2：箱體邊界反彈 (鎖1口)"),
-        ("R3_FALSE_BREAKOUT", "規則 3：假突破反轉 (鎖1口)")
+        ("R2_RANGE_BOUNCE", "規則 2：箱體邊界反彈"),
+        ("R3_FALSE_BREAKOUT", "規則 3：假突破反轉")
     ]:
         r_trades = [t for t in trades if t["rule_type"] == r_key]
         r_wins = [t for t in r_trades if t["pnl"] > 0]
@@ -1083,7 +1008,6 @@ def run_single_strategy_backtest(
             "net_pnl": round(sum(t["pnl"] for t in r_trades), 2)
         }
 
-    # 時段表現分析
     session_stats = {}
     for s_name in ["美盤 RTH (09:30-16:00 ET)", "歐盤倫敦 (02:00-09:30 ET)", "亞盤夜盤 (18:00-02:00 ET)"]:
         s_trades = [t for t in trades if t["session"] == s_name]
@@ -1094,11 +1018,13 @@ def run_single_strategy_backtest(
             "net_pnl": round(sum(t["pnl"] for t in s_trades), 2)
         }
 
-    # 年度與月度報酬矩陣
     monthly_returns = {}
     annual_breakdown = []
     if len(daily_eq) > 1:
-        m_eq = daily_eq.resample("ME").last().dropna()
+        try:
+            m_eq = daily_eq.resample("ME").last().dropna()
+        except ValueError:
+            m_eq = daily_eq.resample("M").last().dropna()
         prev_val = initial_capital
         for dt_m, val in m_eq.items():
             yr_str = str(dt_m.year)
@@ -1128,8 +1054,12 @@ def run_single_strategy_backtest(
             })
             prev_yr_eq = end_v
 
-    # 蒙地卡羅 500 次壓力測試
-    mc_stats = {"median_final_equity": equity, "p95_max_dd_pct": max_dd_pct, "p99_max_dd_pct": max_dd_pct, "ruin_prob_pct": 0.0}
+    mc_stats = {
+        "median_final_equity": equity,
+        "p95_max_dd_pct": max_dd_pct,
+        "p99_max_dd_pct": max_dd_pct,
+        "ruin_prob_pct": 0.0
+    }
     if len(trades) >= 5:
         pnl_arr = np.array([t["pnl"] for t in trades], dtype=np.float64)
         mc_rng = np.random.default_rng(123)
@@ -1152,7 +1082,6 @@ def run_single_strategy_backtest(
             "ruin_prob_pct": round((ruin_cnt / n_sims) * 100.0, 2)
         }
 
-    # 抽樣淨值序列供前端高速繪圖 (最多 400 點)
     step_eq = max(1, len(daily_eq) // 400)
     sampled_eq = daily_eq.iloc[::step_eq]
     sampled_dd = dd_series.iloc[::step_eq]
@@ -1199,6 +1128,294 @@ def run_single_strategy_backtest(
     }
 
 
+def run_single_strategy_backtest(
+    df: pd.DataFrame,
+    variant: str,
+    params: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    執行單一策略嚴格回測 (無未來函數、無順向加點作弊、100% 整數口拆單、保守碰撞原則)。
+    """
+    initial_capital = float(params.get("initial_capital", 30000.0))
+    point_mult = float(params.get("point_multiplier", 5.0))
+    commission_per_side = float(params.get("commission_per_side", 0.62))
+    slippage_points = float(params.get("slippage_points", 0.25))
+    margin_per_contract = float(params.get("margin_per_contract", 2400.0))
+    max_contracts_cap = int(params.get("max_contracts_cap", 12))
+    risk_mult = float(params.get("risk_multiplier", 1.0))
+    strict_realistic_mode = bool(params.get("strict_realistic_mode", True))
+
+    if variant == "dual_60_40":
+        risk_mult = risk_mult * 1.15
+
+    df = _add_multi_timeframe_indicators(df, symbol=params.get("symbol", "MES"))
+
+    closes = df["close"].values
+    opens = df["open"].values
+    highs = df["high"].values
+    lows = df["low"].values
+    atrs = df["atr"].values
+    # 優先使用真 1H 收盤對齊後的 adx_1h，若無則回退至 df["adx"]
+    if "adx_1h" in df.columns:
+        adxs = df["adx_1h"].fillna(20.0).values
+    elif "adx" in df.columns:
+        adxs = df["adx"].fillna(20.0).values
+    else:
+        adxs = np.full(len(df), 20.0)
+    ema20 = df["ema20"].values
+    ema50 = df["ema50"].values
+    vwaps = df["vwap"].values
+    box_highs = df["box_high"].values
+    box_lows = df["box_low"].values
+
+    e20_4h = df["ema20_4h"].values if "ema20_4h" in df.columns else ema20
+    e50_4h = df["ema50_4h"].values if "ema50_4h" in df.columns else ema50
+    e200_4h = df["ema200_4h"].values if "ema200_4h" in df.columns else df["ema200"].values
+    c_4h = df["close_4h"].values if "close_4h" in df.columns else closes
+
+    e50_1d = df["ema50_1d"].values if "ema50_1d" in df.columns else ema50
+    c_1d = df["close_1d"].values if "close_1d" in df.columns else closes
+
+    timestamps = df.index
+    n = len(df)
+    equity = initial_capital
+    equity_curve = np.full(n, initial_capital, dtype=np.float64)
+
+    trades: List[Dict[str, Any]] = []
+    total_commission = 0.0
+    total_slippage = 0.0
+
+    cfg = V93_CONFIG if variant == "v9.3" else None
+    if cfg is None:
+        try:
+            from strategies.strategy_factory import STRATEGY_REGISTRY
+            cfg = STRATEGY_REGISTRY.get(variant)
+        except Exception:
+            cfg = None
+
+    if cfg:
+        trend_mode = cfg.get("trend_mode", "4H_LOCK")
+        tp1_r = float(cfg.get("tp1_r", 1.55))
+        tp2_r = float(cfg.get("tp2_r", 3.10))
+        runner_r = float(cfg.get("runner_r", 5.50))
+        sl_atr = float(cfg.get("sl_atr", 0.82))
+        r2_sl_atr = float(cfg.get("r2_sl_atr", 0.85))
+        trailing_runner = bool(cfg.get("trailing_runner", True))
+        risk_mult = risk_mult * float(cfg.get("risk_mult", 1.0))
+        allowed_rules = cfg.get("allowed_rules", ["R1", "R2"])
+        r2_max_adx = float(cfg.get("r2_max_adx_filter", 30.0 if variant == "v9.3" else 999.0))
+        legacy_edge_mult = 0.0 if strict_realistic_mode else float(cfg.get("legacy_edge_mult", cfg.get("edge_mult", 0.0)))
+        use_vwap = (trend_mode == "1H_VWAP")
+    else:
+        trend_mode = "1H_VWAP"
+        use_vwap = variant in ("v5.0", "dual_60_40")
+        tp1_r = 1.25 if variant in ("v5.0", "dual_60_40") else 1.15
+        tp2_r = 2.40 if variant in ("v5.0", "dual_60_40") else 2.25
+        runner_r = tp2_r + 1.15
+        sl_atr = 1.10 if variant in ("v5.0", "dual_60_40") else 0.95
+        r2_sl_atr = 0.85
+        trailing_runner = False
+        allowed_rules = ["R1", "R2", "R3"]
+        r2_max_adx = 999.0
+        legacy_edge_mult = 0.0
+
+    i = 35
+    cooldown = 3
+
+    while i < n - 12:
+        equity_curve[i] = equity
+        if np.isnan(e200_4h[i]) or np.isnan(box_highs[i]):
+            i += 1
+            continue
+
+        atr = max(1.0, float(atrs[i]))
+        adx_val = float(adxs[i])
+        c = float(closes[i])
+        o = float(opens[i])
+        h = float(highs[i])
+        l = float(lows[i])
+        e20 = float(ema20[i])
+        e50 = float(ema50[i])
+        vwap = float(vwaps[i])
+        bh = float(box_highs[i])
+        bl = float(box_lows[i])
+
+        direction = None
+        rule_type = None
+        rule_label = ""
+        sl_dist = atr * sl_atr
+
+        macro_long = True
+        macro_short = True
+        if trend_mode == "4H_LOCK":
+            macro_long = (e20_4h[i] > e50_4h[i]) and (c_4h[i] > e200_4h[i])
+            macro_short = (e20_4h[i] < e50_4h[i]) and (c_4h[i] < e200_4h[i])
+        elif trend_mode == "1D_REGIME":
+            macro_long = (c_1d[i] > e50_1d[i])
+            macro_short = (c_1d[i] < e50_1d[i])
+        elif trend_mode == "HYBRID_4H_1D":
+            macro_long = (e20_4h[i] > e50_4h[i]) and (c_1d[i] > e50_1d[i])
+            macro_short = (e20_4h[i] < e50_4h[i]) and (c_1d[i] < e50_1d[i])
+        elif trend_mode == "1H_VWAP":
+            macro_long = (c >= vwap * 0.999)
+            macro_short = (c <= vwap * 1.001)
+
+        trend_up = (e20 > e50) and macro_long
+        trend_dn = (e20 < e50) and macro_short
+
+        # 規則 1：順勢斐波那契浪 3 回踩進場
+        if ("R1" in allowed_rules) and trend_up and (l <= e20 + 0.25 * atr) and (c > o) and (c > e20):
+            direction = "LONG"
+            rule_type = "R1_WAVE3_TREND"
+            rule_label = "規則1：浪3斐波回踩做多"
+            sl_dist = max(1.0, atr * sl_atr)
+        elif ("R1" in allowed_rules) and trend_dn and (h >= e20 - 0.25 * atr) and (c < o) and (c < e20):
+            direction = "SHORT"
+            rule_type = "R1_WAVE3_TREND"
+            rule_label = "規則1：浪3斐波回踩做空"
+            sl_dist = max(1.0, atr * sl_atr)
+        else:
+            box_height = bh - bl
+            if ("R2" in allowed_rules) and box_height >= 2.8 * atr and adx_val <= r2_max_adx:
+                if l <= bl + 0.35 * atr and c > bl + 0.2 * atr and c > o:
+                    if not use_vwap or c <= vwap:
+                        direction = "LONG"
+                        rule_type = "R2_RANGE_BOUNCE"
+                        sl_dist = max(1.0, atr * r2_sl_atr)
+                elif h >= bh - 0.35 * atr and c < bh - 0.2 * atr and c < o:
+                    if not use_vwap or c >= vwap:
+                        direction = "SHORT"
+                        rule_type = "R2_RANGE_BOUNCE"
+                        sl_dist = max(1.0, atr * r2_sl_atr)
+
+            if direction is None and ("R3" in allowed_rules) and box_height >= 2.5 * atr:
+                if h > bh + 0.15 * atr and c < bh - 0.1 * atr and c < o:
+                    direction = "SHORT"
+                    rule_type = "R3_FALSE_BREAKOUT"
+                    rule_label = "規則3：假突破上沿反轉做空"
+                    sl_dist = max(1.0, atr * 0.75)
+                elif l < bl - 0.15 * atr and c > bl + 0.1 * atr and c > o:
+                    direction = "LONG"
+                    rule_type = "R3_FALSE_BREAKOUT"
+                    rule_label = "規則3：假跌破下沿反轉做多"
+                    sl_dist = max(1.0, atr * 0.75)
+
+        if direction is None:
+            i += 1
+            continue
+
+        entry_ts = timestamps[i]
+        hr = entry_ts.hour
+        if 9 <= hr < 16:
+            session_name = "美盤 RTH (09:30-16:00 ET)"
+        elif 2 <= hr < 9:
+            session_name = "歐盤倫敦 (02:00-09:30 ET)"
+        else:
+            session_name = "亞盤夜盤 (18:00-02:00 ET)"
+
+        qty, split_lots = _determine_integer_lots(
+            equity=equity,
+            variant=variant,
+            rule_type=rule_type,
+            direction=direction,
+            session_name=session_name,
+            margin_per_contract=margin_per_contract,
+            max_contracts_cap=max_contracts_cap,
+            risk_mult=risk_mult
+        )
+        if qty <= 0:
+            i += 1
+            continue
+
+        if rule_type == "R2_RANGE_BOUNCE":
+            side_txt = "下沿支撐反彈" if direction == "LONG" else "上沿阻力反彈"
+            rule_label = f"規則2：箱體{side_txt} (整數{qty}口)"
+
+        entry_price = _round_tick(c)
+        if direction == "LONG":
+            sl_price = _round_tick(entry_price - sl_dist)
+            tp1_price = _round_tick(entry_price + sl_dist * tp1_r)
+            tp2_price = _round_tick(entry_price + sl_dist * tp2_r)
+            runner_target = _round_tick(entry_price + sl_dist * runner_r)
+        else:
+            sl_price = _round_tick(entry_price + sl_dist)
+            tp1_price = _round_tick(entry_price - sl_dist * tp1_r)
+            tp2_price = _round_tick(entry_price - sl_dist * tp2_r)
+            runner_target = _round_tick(entry_price - sl_dist * runner_r)
+
+        legacy_edge_pts = 0.0 if strict_realistic_mode else (
+            atr * legacy_edge_mult * (1.25 if rule_type == "R1_WAVE3_TREND" else 1.0)
+        )
+
+        exit_idx, raw_exit_price, exit_reason, realized_points, slip_applied_lots = _simulate_trade_exit_core(
+            i=i,
+            n=n,
+            direction=direction,
+            entry_price=entry_price,
+            sl_price=sl_price,
+            tp1_price=tp1_price,
+            tp2_price=tp2_price,
+            runner_target=runner_target,
+            total_lots=qty,
+            split_lots=split_lots,
+            highs=highs,
+            lows=lows,
+            closes=closes,
+            slippage_points=slippage_points,
+            trailing_runner=trailing_runner,
+            strict_realistic_mode=strict_realistic_mode,
+            legacy_edge_pts=legacy_edge_pts
+        )
+
+        sign = 1.0 if direction == "LONG" else -1.0
+        weighted_exit_price = _round_tick(entry_price + sign * realized_points)
+
+        gross_pnl = realized_points * qty * point_mult
+        comm_cost = qty * 2.0 * commission_per_side
+        slip_cost = slip_applied_lots * slippage_points * point_mult
+        net_pnl = round(gross_pnl - comm_cost, 2)
+
+        total_commission += comm_cost
+        total_slippage += slip_cost
+        equity = round(max(1000.0, equity + net_pnl), 2)
+
+        next_i = min(n, exit_idx + cooldown)
+        equity_curve[i:next_i] = equity
+        exit_ts = timestamps[exit_idx]
+
+        trades.append({
+            "trade_id": len(trades) + 1,
+            "strategy": variant,
+            "direction": direction,
+            "rule_type": rule_type,
+            "rule_label": rule_label,
+            "session": session_name,
+            "contracts": qty,
+            "entry_time": entry_ts.strftime("%Y-%m-%d %H:%M"),
+            "entry_ts": int(entry_ts.timestamp()),
+            "entry_price": entry_price,
+            "sl_price": sl_price,
+            "tp1_price": tp1_price,
+            "tp2_price": tp2_price,
+            "exit_time": exit_ts.strftime("%Y-%m-%d %H:%M"),
+            "exit_ts": int(exit_ts.timestamp()),
+            "exit_price": weighted_exit_price,
+            "raw_last_exit_price": raw_exit_price,
+            "exit_reason": exit_reason,
+            "points": round(realized_points, 2),
+            "commission": round(comm_cost, 2),
+            "pnl": net_pnl,
+            "equity_after": equity
+        })
+
+        i = next_i
+
+    equity_curve[i:] = equity
+    return _compile_backtest_metrics(
+        variant, initial_capital, equity, equity_curve, timestamps, trades, total_commission, total_slippage
+    )
+
+
 def align_trades_to_candles(trades: List[Dict[str, Any]], candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     將交易的開倉與平倉時間戳對齊到當前選定週期 (1m/5m/15m/1h/4h/1d) 的 K 線時間軸上，
@@ -1217,7 +1434,6 @@ def align_trades_to_candles(trades: List[Dict[str, Any]], candles: List[Dict[str
         if x_ts < min_t or e_ts > max_t:
             continue
 
-        # 找最接近且 <= e_ts 的 K 棒索引
         e_idx = int(np.searchsorted(c_times, e_ts, side="right") - 1)
         e_idx = max(0, min(e_idx, len(candles) - 1))
 
@@ -1253,16 +1469,16 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
     支援最多 3 個策略同時回測、自選時間段 (最長 10 年)、自選 K 線週期 (1m/5m/15m/1h/4h/1d) 與 IBKR 資金參數。
     """
     t0 = time.time()
-    strategies = payload.get("strategies", ["v4.3", "v5.0", "dual_60_40"])
+    strategies = payload.get("strategies", ["v9.3", "v9.1", "v5.0"])
     if not isinstance(strategies, list) or len(strategies) == 0:
-        strategies = ["v4.3"]
-    strategies = strategies[:3]  # 最多同時比較 3 個策略
+        strategies = ["v9.3"]
+    strategies = strategies[:3]
 
-    timeframe = str(payload.get("timeframe", "5m")).lower()
-    start_date = str(payload.get("start_date", "2024-01-01"))
+    timeframe = str(payload.get("timeframe", "1h")).lower()
+    start_date = str(payload.get("start_date", "2016-11-15"))
     end_date = str(payload.get("end_date", "2026-11-14"))
     symbol = str(payload.get("symbol", "MES")).upper()
-    data_source = str(payload.get("data_source", "REAL_YF")).upper()
+    data_source = str(payload.get("data_source", "AUTO")).upper()
 
     params = {
         "symbol": symbol,
@@ -1270,23 +1486,37 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
         "point_multiplier": 20.0 if symbol == "NQ" else (2.0 if symbol == "MNQ" else (50.0 if symbol == "ES" else 5.0)),
         "commission_per_side": float(payload.get("commission_per_side", 0.62)),
         "slippage_points": float(payload.get("slippage_points", 0.25)),
-        "margin_per_contract": float(payload.get("margin_per_contract", 20000.0 if symbol == "NQ" else (2000.0 if symbol == "MNQ" else (24000.0 if symbol == "ES" else 2400.0)))),
+        "margin_per_contract": float(payload.get(
+            "margin_per_contract",
+            20000.0 if symbol == "NQ" else (2000.0 if symbol == "MNQ" else (24000.0 if symbol == "ES" else 2400.0))
+        )),
         "max_contracts_cap": int(payload.get("max_contracts_cap", 12)),
-        "risk_multiplier": float(payload.get("risk_multiplier", 1.0))
+        "risk_multiplier": float(payload.get("risk_multiplier", 1.0)),
+        "strict_realistic_mode": bool(payload.get("strict_realistic_mode", True))
     }
 
     data_source_label = "🟡 高擬真合成數據 (Synthetic CME Globex)"
     data_note = ""
+    loaded_exact_timeframe = False
 
-    # 智能優先模式：若已有本地下載快取則優先使用，若無則切換為 REAL_YF 或 SYNTHETIC
     if data_source in ("AUTO", "IBKR_CSV"):
-        from ibkr_history_downloader import get_cache_path
+        try:
+            from ibkr_history_downloader import get_cache_path, audit_cache_integrity
+        except ImportError:
+            get_cache_path = lambda s, tf: os.path.join(CURRENT_DIR, "data", "ibkr_cache", f"{s}_{tf}.csv")
+            audit_cache_integrity = lambda df_x, tf_x: (True, "")
+
         clean_sym = symbol.replace("CME_", "").upper()
         cache_path = get_cache_path(clean_sym, timeframe)
         loaded_sym = clean_sym
+
         if not os.path.exists(cache_path):
-            # 智慧相容：若為微型合約但本地有同標的大合約數據 (如 MES 使用 ES 10年數據)，自動相容載入
-            fallback_sym = "ES" if clean_sym == "MES" else ("MES" if clean_sym == "ES" else ("NQ" if clean_sym == "MNQ" else ("MNQ" if clean_sym == "NQ" else None)))
+            fallback_sym = (
+                "ES" if clean_sym == "MES" else
+                ("MES" if clean_sym == "ES" else
+                 ("NQ" if clean_sym == "MNQ" else
+                  ("MNQ" if clean_sym == "NQ" else None)))
+            )
             if fallback_sym:
                 alt_path = get_cache_path(fallback_sym, timeframe)
                 if os.path.exists(alt_path):
@@ -1296,6 +1526,10 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         if os.path.exists(cache_path):
             df_c = pd.read_csv(cache_path, parse_dates=["datetime"], index_col="datetime").sort_index()
+            is_valid_ibkr, audit_msg = audit_cache_integrity(df_c, timeframe)
+            if not is_valid_ibkr:
+                data_note = (data_note + " " if data_note else "") + f"⚠️ 快取審計提示：{audit_msg}（已自動執行 0.25 Tick 對齊）。"
+
             s_dt = pd.to_datetime(start_date)
             e_dt = pd.to_datetime(end_date) + timedelta(days=1)
             df_sub = df_c[(df_c.index >= s_dt) & (df_c.index <= e_dt)].copy()
@@ -1303,15 +1537,16 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
                 df_sub = df_c.copy()
                 data_note = (data_note + " " if data_note else "") + f"選定日期區間內僅有較少快取筆數，已改用全部 {len(df_sub):,} 根本地快取 K 棒"
             df_base = _add_indicators(df_sub)
+            loaded_exact_timeframe = True
             data_source_label = f"🔵 智能載入本地 10 年快取 ({loaded_sym} · {timeframe.upper()} · {len(df_base):,} 根真實K棒)"
         elif data_source == "AUTO":
-            # AUTO 模式下若無快取，自動優雅降級至 Yahoo Finance 或合成數據
             try:
                 df_base, data_source_label, data_note = fetch_real_yahoo_data(
                     symbol=symbol, start_date=start_date, end_date=end_date, timeframe=timeframe
                 )
                 if len(df_base) < 35:
                     raise ValueError("真實市場數據筆數不足")
+                loaded_exact_timeframe = True
             except Exception as e:
                 df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
                 data_source_label = "🟡 高擬真合成數據 (自動切換)"
@@ -1319,7 +1554,7 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
         else:
             df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
             data_source_label = "🟡 高擬真合成數據 (尚未下載該週期本地快取)"
-            data_note = f"尚未找到 {symbol}_{timeframe}.csv，請先點擊左側「從本機 IBKR 下載並快取 CSV」按鈕"
+            data_note = f"尚未找到 {symbol}_{timeframe}.csv，請先執行 ibkr_history_downloader.py 下載快取"
     elif data_source == "REAL_YF":
         try:
             df_base, data_source_label, data_note = fetch_real_yahoo_data(
@@ -1327,6 +1562,7 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
             )
             if len(df_base) < 35:
                 raise ValueError("真實市場數據筆數不足")
+            loaded_exact_timeframe = True
         except Exception as e:
             df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
             data_source_label = "🟡 高擬真合成數據 (真實數據連線失敗自動切換)"
@@ -1334,14 +1570,22 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
 
-    # 若為真實數據或 IBKR 本地快取，直接對齊目標週期避免重複降採樣
-    if (data_source == "REAL_YF" and "真實" in data_source_label) or (data_source == "IBKR_CSV" and "IBKR" in data_source_label):
+    if not loaded_exact_timeframe and timeframe in ("15m", "1h", "4h", "1d"):
+        tf_rule = {"15m": "15min", "1h": "1h", "4h": "4h", "1d": "1D"}[timeframe]
+        df_base = df_base.resample(tf_rule, label="right", closed="right").agg({
+            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+        }).dropna()
+        df_base = _add_indicators(df_base)
+        loaded_exact_timeframe = True
+
+    # 修復漏洞 B4：若已載入對應週期之真實數據或本地快取，直接輸出 K 線，禁止重複降採樣
+    if loaded_exact_timeframe:
         candles = []
         df_show = df_base.iloc[-1200:] if len(df_base) > 1200 else df_base
         for ts, row in df_show.iterrows():
             candles.append({
                 "time": int(ts.timestamp()),
-                "datetime": ts.strftime("%Y-%m-%d %H:%M") if ts.hour != 0 or ts.minute != 0 else ts.strftime("%Y-%m-%d"),
+                "datetime": ts.strftime("%Y-%m-%d %H:%M") if (ts.hour != 0 or ts.minute != 0) else ts.strftime("%Y-%m-%d"),
                 "open": round(float(row["open"]), 2),
                 "high": round(float(row["high"]), 2),
                 "low": round(float(row["low"]), 2),
@@ -1354,9 +1598,12 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         candles, _ = resample_ohlcv(df_base, timeframe=timeframe, max_bars=1200)
 
+    # 先行補充一次多週期指標與真 1H ADX，避免多策略對比時重複計算 3 次
+    df_enriched = _add_multi_timeframe_indicators(df_base, symbol=symbol)
+
     results = {}
     for strat_id in strategies:
-        res = run_single_strategy_backtest(df_base, variant=strat_id, params=params)
+        res = run_single_strategy_backtest(df_enriched, variant=strat_id, params=params)
         res["chart_markers"] = align_trades_to_candles(res["trades"], candles)
         results[strat_id] = res
 
@@ -1381,7 +1628,6 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
         "catalog": STRATEGY_CATALOG
     }
 
-    # 儲存最新一次回測結果供匯出或 Google Drive 同步使用
     latest_json = os.path.join(REPORTS_DIR, "latest_backtest_result.json")
     try:
         with open(latest_json, "w", encoding="utf-8") as f:
@@ -1390,6 +1636,24 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
         pass
 
     return report_obj
+
+
+def _get_gdrive_folder_id() -> str:
+    """自環境變數或本機 .env 安全讀取 GDRIVE_FOLDER_ID（不硬編碼於程式碼中）"""
+    folder_id = os.getenv("GDRIVE_FOLDER_ID", "").strip()
+    if folder_id:
+        return folder_id
+    env_path = os.path.join(CURRENT_DIR, ".env")
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    s = line.strip()
+                    if s.startswith("GDRIVE_FOLDER_ID="):
+                        return s.split("=", 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+    return ""
 
 
 def export_backtest_to_gdrive() -> Dict[str, Any]:
@@ -1415,7 +1679,6 @@ def export_backtest_to_gdrive() -> Dict[str, Any]:
     html_path = os.path.join(export_dir, html_filename)
     csv_path = os.path.join(export_dir, csv_filename)
 
-    # 1. 匯出所有選中策略的交易明細 CSV
     all_trades = []
     for s_id, s_data in results.items():
         for t in s_data.get("trades", []):
@@ -1423,7 +1686,6 @@ def export_backtest_to_gdrive() -> Dict[str, Any]:
     if all_trades:
         pd.DataFrame(all_trades).to_csv(csv_path, index=False, encoding="utf-8-sig")
 
-    # 2. 生成可轉為 Google Doc 的專業 HTML 報告 (包含熱力圖、年度拆解、規則歸因)
     rows_html = ""
     details_html = ""
     for s_id, s_data in results.items():
@@ -1452,7 +1714,6 @@ def export_backtest_to_gdrive() -> Dict[str, Any]:
         </tr>
         """
 
-        # 月度報酬熱力圖表格
         hm_rows = ""
         years_sorted = sorted(m_ret.keys())
         for yr in years_sorted:
@@ -1479,7 +1740,6 @@ def export_backtest_to_gdrive() -> Dict[str, Any]:
             row_cells += f"<td style='font-weight:bold; text-align:center; background:#f1f5f9; color:{ytd_color};'>{ytd_str}</td>"
             hm_rows += f"<tr>{row_cells}</tr>"
 
-        # 年度績效拆解矩陣
         ann_rows = ""
         for a in ann_list:
             pnl_col = "#15803d" if a["net_pnl"] >= 0 else "#b91c1c"
@@ -1496,7 +1756,6 @@ def export_backtest_to_gdrive() -> Dict[str, Any]:
             </tr>
             """
 
-        # 規則與時段歸因
         attr_rows = ""
         for r_k, r_obj in r_attr.items():
             pnl_col = "#15803d" if r_obj["net_pnl"] >= 0 else "#b91c1c"
@@ -1594,31 +1853,31 @@ tr:nth-child(even) {{ background: #f8fafc; }}
 <body>
 <h1>📊 IBKR AutoTrade 多策略歷史回測對比報告</h1>
 <div class="meta">
-  <strong>回測標的：</strong>{cfg.get('symbol')} (CME 微型期貨) ｜ 
-  <strong>K 線週期：</strong>{cfg.get('timeframe', '').upper()} ｜ 
-  <strong>回測區間：</strong>{cfg.get('start_date')} 至 {cfg.get('end_date')}<br>
-  <strong>IBKR 資金參數：</strong>初始資金 ${cfg.get('initial_capital', 30000):,.2f} USD ｜ 單邊佣金 ${cfg.get('commission_per_side', 0.62):.2f} ｜ 滑價 {cfg.get('slippage_points', 0.25)} pt ｜ 生成時間：{data.get('generated_at')}
+    <strong>回測標的：</strong>{cfg.get('symbol')} (CME 微型期貨) ｜ 
+    <strong>K 線週期：</strong>{cfg.get('timeframe', '').upper()} ｜ 
+    <strong>回測區間：</strong>{cfg.get('start_date')} 至 {cfg.get('end_date')}<br>
+    <strong>IBKR 資金參數：</strong>初始資金 ${cfg.get('initial_capital', 30000):,.2f} USD ｜ 單邊佣金 ${cfg.get('commission_per_side', 0.62):.2f} ｜ 滑價 {cfg.get('slippage_points', 0.25)} pt ｜ 生成時間：{data.get('generated_at')}
 </div>
 <h2 style="margin-top:10px;">🏆 多策略核心績效指標比較</h2>
 <table>
-  <thead>
-    <tr>
-      <th>策略名稱</th>
-      <th>初始資金</th>
-      <th>最終淨值</th>
-      <th>總淨利 (總報酬率)</th>
-      <th>年化 CAGR</th>
-      <th>最大回撤 (MDD)</th>
-      <th>Sharpe / Sortino</th>
-      <th>Calmar</th>
-      <th>勝率 (總筆數)</th>
-      <th>獲利因子 (PF)</th>
-      <th>蒙地卡羅 95% MDD</th>
-    </tr>
-  </thead>
-  <tbody>
-    {rows_html}
-  </tbody>
+    <thead>
+        <tr>
+            <th>策略名稱</th>
+            <th>初始資金</th>
+            <th>最終淨值</th>
+            <th>總淨利 (總報酬率)</th>
+            <th>年化 CAGR</th>
+            <th>最大回撤 (MDD)</th>
+            <th>Sharpe / Sortino</th>
+            <th>Calmar</th>
+            <th>勝率 (總筆數)</th>
+            <th>獲利因子 (PF)</th>
+            <th>蒙地卡羅 95% MDD</th>
+        </tr>
+    </thead>
+    <tbody>
+        {rows_html}
+    </tbody>
 </table>
 {details_html}
 </body>
@@ -1627,11 +1886,8 @@ tr:nth-child(even) {{ background: #f8fafc; }}
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
-    folder_id = os.getenv("GDRIVE_FOLDER_ID", "1HJvzwWJrGl087cOSgwJYvx0usSE-wazl").strip()
-    if not folder_id:
-        folder_id = "1HJvzwWJrGl087cOSgwJYvx0usSE-wazl"
-    folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
-
+    folder_id = _get_gdrive_folder_id()
+    folder_url = f"https://drive.google.com/drive/folders/{folder_id}" if folder_id else ""
     parent_flag = f'--parent "{folder_id}" ' if folder_id else ''
 
     doc_id = ""
@@ -1639,7 +1895,6 @@ tr:nth-child(even) {{ background: #f8fafc; }}
     sheet_id = ""
     sheet_url = ""
 
-    # 1. 真實上傳 HTML 轉原生 Google Doc
     upload_doc_cmd = f'gdrive mutate upload "{html_path}" {parent_flag}--mime-type "application/vnd.google-apps.document" --json'
     try:
         p_doc = subprocess.run(upload_doc_cmd, shell=True, capture_output=True, text=True)
@@ -1661,7 +1916,6 @@ tr:nth-child(even) {{ background: #f8fafc; }}
     except Exception:
         pass
 
-    # 2. 真實上傳 CSV 轉原生 Google Sheet
     if os.path.exists(csv_path):
         upload_sheet_cmd = f'gdrive mutate upload "{csv_path}" {parent_flag}--mime-type "application/vnd.google-apps.spreadsheet" --json'
         try:
