@@ -277,6 +277,48 @@
     }
     .pos { color: var(--green); font-weight: 700; }
     .neg { color: var(--red); font-weight: 700; }
+    #heatmap-table {
+      table-layout: fixed;
+      width: 100%;
+      min-width: 780px;
+      border-collapse: separate;
+      border-spacing: 4px;
+    }
+    #heatmap-table th {
+      text-align: center;
+      padding: 7px 4px;
+      font-size: 11px;
+      background: #0b1322;
+      border-radius: 4px;
+    }
+    #heatmap-table th:first-child {
+      text-align: left;
+      padding-left: 8px;
+    }
+    #heatmap-table td {
+      text-align: center;
+      padding: 8px 4px;
+      font-size: 11px;
+      font-weight: 700;
+      border-radius: 5px;
+      border-bottom: none;
+      transition: transform 0.1s ease;
+    }
+    #heatmap-table td:hover {
+      transform: scale(1.04);
+      z-index: 2;
+    }
+    #heatmap-table td:first-child {
+      text-align: left;
+      padding-left: 8px;
+      font-weight: 800;
+      color: #f1f5f9;
+      background: rgba(255, 255, 255, 0.04);
+    }
+    #heatmap-table td.ytd-cell {
+      border-left: 2px solid rgba(255, 255, 255, 0.18);
+      font-weight: 800;
+    }
     .grid-2 {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -550,7 +592,7 @@
 
           <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
             <label style="font-size:12px; color:var(--amber); font-weight:700;">🎯 K線圖主要策略：</label>
-            <select id="marker-strat-select" onchange="drawKlineChart()" style="width:auto; min-width:210px;"></select>
+            <select id="marker-strat-select" onchange="syncStrategySelect('marker', this.value)" style="width:auto; min-width:210px;"></select>
             <button onclick="resetKlineZoom()">🔍 重設縮放</button>
           </div>
         </div>
@@ -620,7 +662,7 @@
         <section class="card">
           <div class="card-title">
             <span>🧠 規則 1/2/3 歸因拆解與交易時段分析</span>
-            <select id="attr-strat-select" onchange="renderAttributionAndHeatmap()" style="width:auto;"></select>
+            <select id="attr-strat-select" onchange="syncStrategySelect('attr', this.value)" style="width:auto;"></select>
           </div>
           <div class="table-scroll">
             <table>
@@ -665,14 +707,19 @@
       <section class="card">
         <div class="card-title">
           <span>🗓️ 月度報酬率熱力圖 (Monthly Return Heatmap %)</span>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <label style="font-size:12px; color:var(--muted); font-weight:600;">切換檢視策略：</label>
+            <select id="heatmap-strat-select" onchange="syncStrategySelect('heatmap', this.value)" style="width:auto; min-width:180px;"></select>
+          </div>
         </div>
         <div class="table-scroll">
           <table id="heatmap-table">
             <thead>
               <tr>
-                <th>年份</th>
+                <th style="width:70px; text-align:left;">年份</th>
                 <th>1月</th><th>2月</th><th>3月</th><th>4月</th><th>5月</th><th>6月</th>
                 <th>7月</th><th>8月</th><th>9月</th><th>10月</th><th>11月</th><th>12月</th>
+                <th style="width:95px; text-align:center;">全年 YTD</th>
               </tr>
             </thead>
             <tbody id="heatmap-body"></tbody>
@@ -857,16 +904,45 @@
       const keys = Object.keys(results);
       const markerSel = document.getElementById('marker-strat-select');
       const attrSel = document.getElementById('attr-strat-select');
+      const hmSel = document.getElementById('heatmap-strat-select');
 
-      const prevMarker = markerSel.value;
-      const prevAttr = attrSel.value;
+      const prevMarker = markerSel ? markerSel.value : '';
+      const prevAttr = attrSel ? attrSel.value : '';
+      const prevHm = hmSel ? hmSel.value : '';
 
-      markerSel.innerHTML = keys.map((k, idx) => `<option value="${k}">${idx === 0 ? '★ ' : ''}${results[k].name}</option>`).join('');
-      if (keys.includes(prevMarker)) markerSel.value = prevMarker;
-      else markerSel.value = keys[0] || '';
+      if (markerSel) {
+        markerSel.innerHTML = keys.map((k, idx) => `<option value="${k}">${idx === 0 ? '★ ' : ''}${results[k].name}</option>`).join('');
+        if (keys.includes(prevMarker)) markerSel.value = prevMarker;
+        else markerSel.value = keys[0] || '';
+      }
 
-      attrSel.innerHTML = keys.map(k => `<option value="${k}">${results[k].name}</option>`).join('');
-      if (keys.includes(prevAttr)) attrSel.value = prevAttr;
+      if (attrSel) {
+        attrSel.innerHTML = keys.map(k => `<option value="${k}">${results[k].name}</option>`).join('');
+        if (keys.includes(prevAttr)) attrSel.value = prevAttr;
+        else attrSel.value = keys[0] || '';
+      }
+
+      if (hmSel) {
+        hmSel.innerHTML = keys.map(k => `<option value="${k}">${results[k].name}</option>`).join('');
+        if (keys.includes(prevHm)) hmSel.value = prevHm;
+        else hmSel.value = (attrSel && attrSel.value) || keys[0] || '';
+      }
+    }
+
+    function syncStrategySelect(source, stratId) {
+      const attrSel = document.getElementById('attr-strat-select');
+      const hmSel = document.getElementById('heatmap-strat-select');
+      const markerSel = document.getElementById('marker-strat-select');
+
+      if (attrSel && attrSel.value !== stratId) attrSel.value = stratId;
+      if (hmSel && hmSel.value !== stratId) hmSel.value = stratId;
+      if (source !== 'marker' && markerSel && markerSel.value !== stratId) {
+        markerSel.value = stratId;
+        drawKlineChart();
+      } else if (source === 'marker') {
+        drawKlineChart();
+      }
+      renderAttributionAndHeatmap();
     }
 
     function renderKPITable(data) {
@@ -904,7 +980,14 @@
 
     function renderAttributionAndHeatmap() {
       if (!currentBacktestData) return;
-      const stratId = document.getElementById('attr-strat-select').value;
+      const attrSel = document.getElementById('attr-strat-select');
+      const hmSel = document.getElementById('heatmap-strat-select');
+      const stratId = (attrSel && attrSel.value) ? attrSel.value : ((hmSel && hmSel.value) ? hmSel.value : Object.keys(currentBacktestData.results || {})[0]);
+      if (!stratId) return;
+
+      if (attrSel && attrSel.value !== stratId) attrSel.value = stratId;
+      if (hmSel && hmSel.value !== stratId) hmSel.value = stratId;
+
       const stratData = currentBacktestData.results[stratId];
       if (!stratData) return;
 
@@ -948,6 +1031,11 @@
       `;
 
       const annBody = document.getElementById('annual-table-body');
+      const annuals = (stratData.annual_breakdown || []).reduce((acc, a) => {
+        acc[String(a.year)] = a;
+        return acc;
+      }, {});
+
       annBody.innerHTML = (stratData.annual_breakdown || []).map(a => `
         <tr>
           <td><strong>${a.year}</strong></td>
@@ -964,22 +1052,45 @@
       const hmBody = document.getElementById('heatmap-body');
       const mRet = stratData.monthly_returns || {};
       const years = Object.keys(mRet).sort();
-      hmBody.innerHTML = years.map(yr => {
-        let cells = `<td><strong>${yr}</strong></td>`;
-        for (let m = 1; m <= 12; m++) {
-          const val = mRet[yr][m];
-          if (val === undefined) {
-            cells += `<td style="color:#475569;">--</td>`;
-          } else {
-            const bg = val > 0
-              ? `rgba(16, 185, 129, ${Math.min(0.45, Math.abs(val) / 18)})`
-              : (val < 0 ? `rgba(244, 63, 94, ${Math.min(0.45, Math.abs(val) / 18)})` : 'transparent');
-            const cls = val > 0 ? 'pos' : (val < 0 ? 'neg' : '');
-            cells += `<td class="${cls}" style="background:${bg};">${val > 0 ? '+' : ''}${val}%</td>`;
+
+      if (years.length === 0) {
+        hmBody.innerHTML = `<tr><td colspan="14" style="text-align:center; color:var(--muted); padding:16px;">所選歷史期間尚無月度報酬資料</td></tr>`;
+      } else {
+        hmBody.innerHTML = years.map(yr => {
+          let cells = `<td><strong>${yr}</strong></td>`;
+          for (let m = 1; m <= 12; m++) {
+            const val = mRet[yr] ? (mRet[yr][m] !== undefined ? mRet[yr][m] : mRet[yr][String(m)]) : undefined;
+            if (val === undefined || val === null) {
+              cells += `<td style="color:#475569; background:rgba(255,255,255,0.01);">--</td>`;
+            } else {
+              const num = parseFloat(val);
+              if (num > 0) {
+                const intensity = Math.min(0.85, 0.20 + (num / 10.0) * 0.65);
+                cells += `<td class="pos" style="background:rgba(16, 185, 129, ${intensity.toFixed(2)}); color:#ffffff;">+${num.toFixed(2)}%</td>`;
+              } else if (num < 0) {
+                const intensity = Math.min(0.85, 0.20 + (Math.abs(num) / 10.0) * 0.65);
+                cells += `<td class="neg" style="background:rgba(244, 63, 94, ${intensity.toFixed(2)}); color:#ffffff;">${num.toFixed(2)}%</td>`;
+              } else {
+                cells += `<td style="color:#94a3b8; background:rgba(255,255,255,0.03);">0.00%</td>`;
+              }
+            }
           }
-        }
-        return `<tr>${cells}</tr>`;
-      }).join('');
+
+          // 全年 YTD
+          const aObj = annuals[yr];
+          if (aObj && aObj.return_pct !== undefined && aObj.return_pct !== null) {
+            const ytdNum = parseFloat(aObj.return_pct);
+            const isPos = ytdNum >= 0;
+            const bg = isPos ? 'rgba(16, 185, 129, 0.35)' : 'rgba(244, 63, 94, 0.35)';
+            const cls = isPos ? 'pos' : 'neg';
+            cells += `<td class="ytd-cell ${cls}" style="background:${bg}; color:#ffffff;">${isPos ? '+' : ''}${ytdNum.toFixed(2)}%</td>`;
+          } else {
+            cells += `<td class="ytd-cell" style="color:#475569; background:rgba(255,255,255,0.02);">--</td>`;
+          }
+
+          return `<tr>${cells}</tr>`;
+        }).join('');
+      }
 
       // 4. 交易明細列表
       const trades = stratData.trades || [];

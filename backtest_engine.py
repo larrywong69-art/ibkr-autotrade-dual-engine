@@ -647,8 +647,9 @@ def run_single_strategy_backtest(
         total_slippage += slip_cost
         equity = round(max(1000.0, equity + net_pnl), 2)
 
-        # 填補持倉期間的淨值曲線
-        equity_curve[i:exit_idx + 1] = equity
+        # 填補持倉與冷卻期間的淨值曲線 (確保無縫連續，絕不出現回落至初始本金的空洞)
+        next_i = min(n, exit_idx + cooldown)
+        equity_curve[i:next_i] = equity
 
         exit_ts = timestamps[exit_idx]
         hr = entry_ts.hour
@@ -683,7 +684,7 @@ def run_single_strategy_backtest(
             "equity_after": equity
         })
 
-        i = exit_idx + cooldown
+        i = next_i
 
     # 補齊尾段淨值
     equity_curve[i:] = equity
@@ -938,11 +939,12 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
     # 智能優先模式：若已有本地下載快取則優先使用，若無則切換為 REAL_YF 或 SYNTHETIC
     if data_source in ("AUTO", "IBKR_CSV"):
         from ibkr_history_downloader import get_cache_path
-        cache_path = get_cache_path(symbol, timeframe)
-        loaded_sym = symbol
+        clean_sym = symbol.replace("CME_", "").upper()
+        cache_path = get_cache_path(clean_sym, timeframe)
+        loaded_sym = clean_sym
         if not os.path.exists(cache_path):
             # 智慧相容：若為微型合約但本地有同標的大合約數據 (如 MES 使用 ES 10年數據)，自動相容載入
-            fallback_sym = "ES" if symbol == "MES" else ("MES" if symbol == "ES" else ("NQ" if symbol == "MNQ" else ("MNQ" if symbol == "NQ" else None)))
+            fallback_sym = "ES" if clean_sym == "MES" else ("MES" if clean_sym == "ES" else ("NQ" if clean_sym == "MNQ" else ("MNQ" if clean_sym == "NQ" else None)))
             if fallback_sym:
                 alt_path = get_cache_path(fallback_sym, timeframe)
                 if os.path.exists(alt_path):
@@ -1079,14 +1081,22 @@ def export_backtest_to_gdrive() -> Dict[str, Any]:
     if all_trades:
         pd.DataFrame(all_trades).to_csv(csv_path, index=False, encoding="utf-8-sig")
 
-    # 2. 生成可轉為 Google Doc 的專業 HTML 報告
+    # 2. 生成可轉為 Google Doc 的專業 HTML 報告 (包含熱力圖、年度拆解、規則歸因)
     rows_html = ""
+    details_html = ""
     for s_id, s_data in results.items():
         m = s_data["metrics"]
         mc = s_data.get("monte_carlo", {})
+        s_name = s_data.get("name", s_id)
+        m_ret = s_data.get("monthly_returns", {})
+        ann_list = s_data.get("annual_breakdown", [])
+        ann_map = {str(a["year"]): a for a in ann_list}
+        r_attr = s_data.get("rule_attribution", {})
+        s_attr = s_data.get("session_analysis", {})
+
         rows_html += f"""
         <tr>
-            <td><strong>{s_data['name']}</strong></td>
+            <td><strong>{s_name}</strong></td>
             <td>${m['initial_capital']:,.2f}</td>
             <td><strong>${m['final_equity']:,.2f}</strong></td>
             <td style="color:{'#16a34a' if m['net_profit']>=0 else '#dc2626'};"><strong>${m['net_profit']:+,.2f} ({m['total_return_pct']:+.2f}%)</strong></td>
@@ -1100,18 +1110,142 @@ def export_backtest_to_gdrive() -> Dict[str, Any]:
         </tr>
         """
 
+        # 月度報酬熱力圖表格
+        hm_rows = ""
+        years_sorted = sorted(m_ret.keys())
+        for yr in years_sorted:
+            y_dict = m_ret[yr]
+            row_cells = f"<td style='font-weight:bold; background:#f1f5f9; text-align:center;'>{yr}</td>"
+            for mo in range(1, 13):
+                val = y_dict.get(mo) if mo in y_dict else y_dict.get(str(mo))
+                if val is None:
+                    row_cells += "<td style='color:#94a3b8; text-align:center;'>--</td>"
+                else:
+                    val_f = float(val)
+                    if val_f > 0:
+                        bg = "#dcfce7" if val_f < 3.0 else ("#bbf7d0" if val_f < 6.0 else "#86efac")
+                        row_cells += f"<td style='background:{bg}; color:#15803d; font-weight:bold; text-align:center;'>+{val_f:.2f}%</td>"
+                    elif val_f < 0:
+                        bg = "#fee2e2" if val_f > -3.0 else ("#fecaca" if val_f > -6.0 else "#fca5a5")
+                        row_cells += f"<td style='background:{bg}; color:#b91c1c; font-weight:bold; text-align:center;'>{val_f:.2f}%</td>"
+                    else:
+                        row_cells += "<td style='background:#f8fafc; color:#64748b; text-align:center;'>0.00%</td>"
+
+            a_obj = ann_map.get(yr)
+            ytd_str = f"{a_obj['return_pct']:+.2f}%" if a_obj else "--"
+            ytd_color = "#15803d" if (a_obj and a_obj["return_pct"] >= 0) else "#b91c1c"
+            row_cells += f"<td style='font-weight:bold; text-align:center; background:#f1f5f9; color:{ytd_color};'>{ytd_str}</td>"
+            hm_rows += f"<tr>{row_cells}</tr>"
+
+        # 年度績效拆解矩陣
+        ann_rows = ""
+        for a in ann_list:
+            pnl_col = "#15803d" if a["net_pnl"] >= 0 else "#b91c1c"
+            ret_col = "#15803d" if a["return_pct"] >= 0 else "#b91c1c"
+            ann_rows += f"""
+            <tr>
+                <td style='text-align:center;'><strong>{a['year']}</strong></td>
+                <td>${a['start_equity']:,.2f}</td>
+                <td>${a['end_equity']:,.2f}</td>
+                <td style='color:{pnl_col};'><strong>${a['net_pnl']:+,.2f}</strong></td>
+                <td style='color:{ret_col};'><strong>{a['return_pct']:+.2f}%</strong></td>
+                <td style='color:#b91c1c;'>-{a['max_dd_pct']:.2f}%</td>
+                <td>{a['trades']} 筆 ({a['win_rate']:.1f}%)</td>
+            </tr>
+            """
+
+        # 規則與時段歸因
+        attr_rows = ""
+        for r_k, r_obj in r_attr.items():
+            pnl_col = "#15803d" if r_obj["net_pnl"] >= 0 else "#b91c1c"
+            attr_rows += f"""
+            <tr>
+                <td><strong>{r_obj['name']}</strong></td>
+                <td>{r_obj['count']} 筆</td>
+                <td>{r_obj['win_rate']:.1f}%</td>
+                <td style='color:{pnl_col};'><strong>${r_obj['net_pnl']:+,.2f}</strong></td>
+            </tr>
+            """
+        for s_k, s_obj in s_attr.items():
+            pnl_col = "#15803d" if s_obj["net_pnl"] >= 0 else "#b91c1c"
+            attr_rows += f"""
+            <tr>
+                <td style='color:#475569;'>🕒 {s_k}</td>
+                <td>{s_obj['count']} 筆</td>
+                <td>{s_obj['win_rate']:.1f}%</td>
+                <td style='color:{pnl_col};'><strong>${s_obj['net_pnl']:+,.2f}</strong></td>
+            </tr>
+            """
+
+        details_html += f"""
+        <h2 style='margin-top:36px; color:#0f172a; border-bottom:2px solid #2563eb; padding-bottom:6px;'>📈 策略深度剖析：{s_name}</h2>
+        <h3 style='margin-top:16px; color:#1e293b;'>🗓️ 月度報酬率熱力圖 (Monthly Return Heatmap %)</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th style='width:65px; text-align:center;'>年份</th>
+                    <th style='text-align:center;'>1月</th><th style='text-align:center;'>2月</th><th style='text-align:center;'>3月</th><th style='text-align:center;'>4月</th><th style='text-align:center;'>5月</th><th style='text-align:center;'>6月</th>
+                    <th style='text-align:center;'>7月</th><th style='text-align:center;'>8月</th><th style='text-align:center;'>9月</th><th style='text-align:center;'>10月</th><th style='text-align:center;'>11月</th><th style='text-align:center;'>12月</th>
+                    <th style='width:90px; text-align:center;'>全年 YTD</th>
+                </tr>
+            </thead>
+            <tbody>
+                {hm_rows}
+            </tbody>
+        </table>
+
+        <div style='margin-top:18px;'>
+            <h3 style='color:#1e293b;'>📅 逐年績效拆解矩陣 (Annual Breakdown)</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th style='text-align:center;'>年度</th>
+                        <th>期初淨值</th>
+                        <th>期末淨值</th>
+                        <th>年度淨利</th>
+                        <th>年度報酬率</th>
+                        <th>最大回撤</th>
+                        <th>交易筆數 (勝率)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {ann_rows}
+                </tbody>
+            </table>
+        </div>
+
+        <div style='margin-top:18px;'>
+            <h3 style='color:#1e293b;'>🧠 規則進場歸因與時段表現</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>分析維度</th>
+                        <th>成交筆數</th>
+                        <th>勝率 (Win%)</th>
+                        <th>累計貢獻淨利</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {attr_rows}
+                </tbody>
+            </table>
+        </div>
+        """
+
     html_content = f"""<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
 <meta charset="UTF-8">
 <title>AutoTrade 策略回測對比分析報告</title>
 <style>
-body {{ font-family: -apple-system, BlinkMacSystemFont, "Microsoft JhengHei", sans-serif; color: #1e293b; max-width: 1100px; margin: 24px auto; padding: 20px; }}
-h1 {{ color: #0f172a; border-bottom: 3px solid #2563eb; padding-bottom: 10px; }}
-.meta {{ background: #f8fafc; border-left: 4px solid #2563eb; padding: 12px 16px; margin-bottom: 20px; font-size: 14px; }}
-table {{ width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13px; }}
-th {{ background: #1e293b; color: #fff; padding: 10px; text-align: left; }}
-td {{ padding: 10px; border-bottom: 1px solid #e2e8f0; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Microsoft JhengHei", sans-serif; color: #1e293b; max-width: 1200px; margin: 24px auto; padding: 20px; line-height: 1.5; }}
+h1 {{ color: #0f172a; border-bottom: 3px solid #2563eb; padding-bottom: 10px; font-size: 22px; }}
+h2 {{ color: #0f172a; border-bottom: 2px solid #2563eb; padding-bottom: 6px; margin-top: 36px; font-size: 18px; }}
+h3 {{ color: #1e293b; margin-top: 20px; margin-bottom: 8px; font-size: 15px; }}
+.meta {{ background: #f8fafc; border-left: 4px solid #2563eb; padding: 12px 16px; margin-bottom: 20px; font-size: 13px; line-height: 1.6; }}
+table {{ width: 100%; border-collapse: collapse; margin-top: 10px; margin-bottom: 24px; font-size: 12px; }}
+th {{ background: #1e293b; color: #fff; padding: 8px 6px; text-align: left; }}
+td {{ padding: 8px 6px; border-bottom: 1px solid #e2e8f0; }}
 tr:nth-child(even) {{ background: #f8fafc; }}
 </style>
 </head>
@@ -1123,6 +1257,7 @@ tr:nth-child(even) {{ background: #f8fafc; }}
   <strong>回測區間：</strong>{cfg.get('start_date')} 至 {cfg.get('end_date')}<br>
   <strong>IBKR 資金參數：</strong>初始資金 ${cfg.get('initial_capital', 30000):,.2f} USD ｜ 單邊佣金 ${cfg.get('commission_per_side', 0.62):.2f} ｜ 滑價 {cfg.get('slippage_points', 0.25)} pt ｜ 生成時間：{data.get('generated_at')}
 </div>
+<h2 style="margin-top:10px;">🏆 多策略核心績效指標比較</h2>
 <table>
   <thead>
     <tr>
@@ -1143,6 +1278,7 @@ tr:nth-child(even) {{ background: #f8fafc; }}
     {rows_html}
   </tbody>
 </table>
+{details_html}
 </body>
 </html>"""
 
