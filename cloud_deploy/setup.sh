@@ -57,10 +57,10 @@ fi
 cd "$TARGET_DIR"
 
 # 5. 建立獨立 Python 虛擬環境與安裝依賴套件
-echo "📦 [5/6] 正在配置 Python 交易環境與相依套件 (ib_insync, ib_async, pandas, numpy)..."
+echo "📦 [5/6] 正在配置 Python 交易環境與相依套件 (ib_insync, ib_async, pandas, numpy, google-genai)..."
 python3 -m venv venv
 ./venv/bin/pip install --upgrade pip
-./venv/bin/pip install ib_async ib_insync pandas numpy
+./venv/bin/pip install -r requirements.txt || ./venv/bin/pip install ib_async ib_insync pandas numpy matplotlib google-genai
 
 # 6. 生成 IB Gateway Docker 守護配置
 echo "📦 [6/6] 配置 IB Gateway 雲端守護容器..."

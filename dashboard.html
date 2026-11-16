@@ -119,6 +119,10 @@
             <span>📥</span>
             <span>下載診斷報告</span>
           </a>
+          <button id="btn-run-closed-loop" onclick="runClosedLoopAudit(this)" class="px-3 py-1.5 rounded-xl bg-violet-500/15 hover:bg-violet-500/25 text-violet-400 border border-violet-500/30 text-xs font-bold transition-all flex items-center gap-1.5 active:scale-95 shadow-sm" title="立即執行雙層閉環：收集 24h 成交/錯誤 → 確定性規則體檢 → Drive 歸檔 → Gemini AI 分支分析">
+            <span>🤖</span>
+            <span>雙層閉環巡檢</span>
+          </button>
 
           <!-- 重新整理按鈕 -->
           <button onclick="refreshData()" class="px-3 py-1.5 rounded-xl bg-[var(--accent)] hover:opacity-90 text-[var(--foreground)] text-xs font-medium border border-[var(--border)] transition-all flex items-center gap-1 active:scale-95 shadow-sm">
@@ -1680,6 +1684,76 @@
         if (btn) {
           btn.disabled = false;
           btn.innerHTML = origHtml || '<span>☁️</span><span>匯出成交與錯誤至 Drive</span>';
+        }
+      }
+    }
+
+    async function runClosedLoopAudit(triggerBtn) {
+      const btn = triggerBtn || document.getElementById('btn-run-closed-loop');
+      const origHtml = btn ? btn.innerHTML : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span>⏳</span><span>閉環巡檢分析中...</span>';
+      }
+      try {
+        const res = await fetch('/api/audit/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hours: 24, upload_gdrive: true, enable_ai_fix: true })
+        });
+        const resp = await res.json();
+        if (!res.ok || resp.status !== 'ok') {
+          throw new Error(resp.message || '雙層閉環巡檢失敗');
+        }
+        const det = resp.deterministic_audit || {};
+        const ai = resp.ai_analysis || {};
+        const patch = resp.patch_result || {};
+        const gdrive = resp.gdrive || {};
+
+        const banner = document.getElementById('diag-gdrive-banner');
+        const msgEl = document.getElementById('diag-gdrive-msg');
+        const sheetEl = document.getElementById('diag-gdrive-sheet-link');
+        const docEl = document.getElementById('diag-gdrive-doc-link');
+        const folderEl = document.getElementById('diag-gdrive-folder-link');
+
+        const score = det.health_score ?? 100;
+        const branchNote = patch.status === 'ready_for_review'
+          ? ` | 🧪 已生成並驗證修復分支: ${patch.branch}`
+          : '';
+        if (msgEl) {
+          msgEl.innerText = `🤖 雙層閉環巡檢完成：健康評分 ${score}/100 (偵測異常 ${det.findings_count || 0} 項)${branchNote}`;
+          msgEl.className = score >= 90 ? 'font-semibold text-emerald-400' : 'font-semibold text-amber-400';
+        }
+        if (sheetEl) {
+          if (gdrive.sheet_url) { sheetEl.href = gdrive.sheet_url; sheetEl.classList.remove('hidden'); }
+          else { sheetEl.classList.add('hidden'); }
+        }
+        if (docEl) {
+          if (gdrive.doc_url) { docEl.href = gdrive.doc_url; docEl.classList.remove('hidden'); }
+          else { docEl.classList.add('hidden'); }
+        }
+        if (folderEl) {
+          if (gdrive.folder_url) { folderEl.href = gdrive.folder_url; folderEl.classList.remove('hidden'); }
+          else { folderEl.classList.add('hidden'); }
+        }
+        if (banner) banner.classList.remove('hidden');
+
+        const findingsText = (det.findings || []).map(f => `• [${f.severity}] ${f.title}`).join('\n') || '• 未偵測到異常不變量';
+        alert(
+          `🤖 AutoTrade 雙層閉環巡檢結果 (${resp.run_at || ''})\n\n` +
+          `🛡️ 系統健康評分：${score} / 100\n` +
+          `🔍 確定性規則掃描：\n${findingsText}\n\n` +
+          (ai.summary ? `🧠 Gemini 分析摘要：\n${ai.summary}\n\n` : `🧠 AI 分析：${ai.reason || ai.status}\n\n`) +
+          (patch.status === 'ready_for_review'
+            ? `🧪 隔離分支修復已通過回歸測試：\n分支 ${patch.branch}\n確認指令：git fetch && git merge ${patch.branch} && ./start_cloud.sh`
+            : `🔧 修復分支狀態：${patch.reason || patch.status || 'skipped'}`)
+        );
+      } catch (e) {
+        alert('雙層閉環巡檢執行異常: ' + e.message);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = origHtml || '<span>🤖</span><span>雙層閉環巡檢</span>';
         }
       }
     }

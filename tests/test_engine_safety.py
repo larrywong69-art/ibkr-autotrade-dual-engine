@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""
+Permanent safety regression suite for AutoTrade dual-engine live protection,
+IBKR incident filtering, and the daily closed-loop audit/autofix sandbox.
+"""
+
+import os
+import sys
+import time
+import subprocess
+import tempfile
+import shutil
+import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from live_ibkr_dual_engine import LiveIBKRDualEngine
+from report_and_incident_manager import IncidentManager
+from daily_auto_audit_fixer import DailyAutoAuditFixer
+
+
+def _make_trade(
+    oid, sym, otype, action, qty, price,
+    order_ref="", parent_id=0, oca="", client_id=25, status="Submitted"
+):
+    order = SimpleNamespace(
+        orderId=oid,
+        permId=oid * 10,
+        parentId=parent_id,
+        clientId=client_id,
+        ocaGroup=oca,
+        orderRef=order_ref,
+        orderType=otype,
+        action=action,
+        totalQuantity=qty,
+        lmtPrice=price if otype == "LMT" else 0.0,
+        auxPrice=price if otype != "LMT" else 0.0,
+        tif="GTC",
+    )
+    return SimpleNamespace(
+        contract=SimpleNamespace(symbol=sym),
+        order=order,
+        orderStatus=SimpleNamespace(status=status),
+    )
+
+
+class TestLiveEngineOrderHygiene(unittest.TestCase):
+    def setUp(self):
+        self.eng = object.__new__(LiveIBKRDualEngine)
+        self.eng.contract_mes = SimpleNamespace(symbol="MES")
+        self.eng.contract_mnq = SimpleNamespace(symbol="MNQ")
+        self.eng.engine_v93_mes = MagicMock()
+        self.eng.engine_v93_mnq = MagicMock()
+        self.eng._last_protect_ts = {}
+        self.eng._entry_order_first_seen = {}
+        self.eng._last_hist_fail_ts = {}
+        self.eng._warned_uncancellable_ids = set()
+        self.eng._cancel_attempt_ts = {}
+        self.eng.incident_mgr = MagicMock()
+        self.eng._round_to_tick = lambda p, t=0.25: round(p / t) * t
+
+        self.cancelled_ids = []
+        self.placed_orders = []
+        req_counter = [9000]
+
+        def next_id():
+            req_counter[0] += 1
+            return req_counter[0]
+
+        self.eng.ib = MagicMock()
+        self.eng.ib.isConnected.return_value = True
+        self.eng.ib.client.getReqId.side_effect = next_id
+        self.eng.ib.cancelOrder.side_effect = lambda o: self.cancelled_ids.append(o.orderId)
+        self.eng.ib.placeOrder.side_effect = lambda c, o: self.placed_orders.append((c.symbol, o))
+        self.eng.ib.sleep.return_value = None
+
+    def test_bracket_outside_rth_false_and_distinct_refs(self):
+        orders = self.eng._build_single_bracket("BUY", "SELL", 2, 7560.0, 7555.0, 7570.0, "V93_MES", "TP1")
+        self.assertEqual(len(orders), 3)
+        self.assertTrue(all(o.outsideRth is False for o in orders))
+        self.assertEqual(orders[0].orderRef, "V93_MES_ENTRY_TP1")
+        self.assertEqual(orders[1].orderRef, "V93_MES_SL_TP1")
+        self.assertEqual(orders[2].orderRef, "V93_MES_TP_TP1")
+
+    def test_cancels_wrong_direction_and_flat_orphan_orders(self):
+        mes_pos = {"symbol": "MES", "direction": "SHORT", "contracts": 1, "entry_price": 7566.38, "current_price": 7563.0}
+        self.eng.get_real_positions = lambda: (mes_pos, None)
+        self.eng.ib.openTrades.return_value = [
+            _make_trade(6576, "MES", "LMT", "BUY", 1, 7552.25, "GUARD_MES_TP_TP2", oca="G1"),
+            _make_trade(6575, "MES", "STP", "BUY", 1, 7571.00, "GUARD_MES_SL_TP2", oca="G1"),
+            _make_trade(6570, "MES", "STP", "SELL", 1, 7555.50, "GUARD_MES_SL_TP2", oca="G2"),
+            _make_trade(6571, "MES", "LMT", "SELL", 1, 7573.00, "GUARD_MES_TP_TP2", oca="G2"),
+            _make_trade(6197, "MNQ", "LMT", "BUY", 1, 27708.75, "V50_MNQ_TP1"),
+        ]
+        self.eng.ensure_position_protection()
+        self.assertEqual(set(self.cancelled_ids), {6570, 6571, 6197})
+        self.assertEqual(len(self.placed_orders), 0)
+
+    def test_preserves_fresh_entry_bracket_cancels_after_ttl(self):
+        self.eng.get_real_positions = lambda: (None, None)
+        self.eng.ib.openTrades.return_value = [
+            _make_trade(7001, "MNQ", "LMT", "BUY", 1, 27800.0, "V93_MNQ_ENTRY_TP2", parent_id=0),
+            _make_trade(7002, "MNQ", "STP", "SELL", 1, 27780.0, "V93_MNQ_SL_TP2", parent_id=7001, status="PreSubmitted"),
+            _make_trade(7003, "MNQ", "LMT", "SELL", 1, 27860.0, "V93_MNQ_TP_TP2", parent_id=7001, status="PreSubmitted"),
+        ]
+        self.eng.ensure_position_protection()
+        self.assertEqual(self.cancelled_ids, [])
+
+        self.eng._entry_order_first_seen[7001] = time.time() - 1300.0
+        self.eng.ensure_position_protection()
+        self.assertEqual(self.cancelled_ids, [7001])
+
+    def test_trims_over_hedged_guard_orders(self):
+        mes_pos = {"symbol": "MES", "direction": "LONG", "contracts": 2, "entry_price": 7560.0, "current_price": 7562.0}
+        self.eng.get_real_positions = lambda: (mes_pos, None)
+        self.eng.ib.openTrades.return_value = [
+            _make_trade(429, "MES", "STP", "SELL", 2, 7555.5, "V93_MES_SL_TP2", oca="O1"),
+            _make_trade(6568, "MES", "STP", "SELL", 1, 7555.5, "GUARD_MES_SL_TP1", oca="G1"),
+            _make_trade(6570, "MES", "STP", "SELL", 1, 7555.5, "GUARD_MES_SL_TP2", oca="G2"),
+        ]
+        self.eng.ensure_position_protection()
+        self.assertEqual(set(self.cancelled_ids), {6568, 6570})
+
+
+class TestIncidentManagerClassification(unittest.TestCase):
+    def test_suppresses_2109_downgrades_empty_202_and_catches_margin(self):
+        mgr = IncidentManager()
+        recorded = []
+        mgr.record_incident = lambda **kw: recorded.append(kw) or kw
+
+        mgr.handle_ibkr_error_event(1, 2109, "Order Event Warning:Attribute 'Outside Regular Trading Hours' is ignored. PlaceOrder is now being processed.")
+        self.assertEqual(len(recorded), 0)
+
+        mgr.handle_ibkr_error_event(2, 202, "Order Canceled - reason:")
+        self.assertEqual(recorded[-1]["severity"], "INFO")
+        self.assertEqual(recorded[-1]["category"], "TRADING")
+
+        mgr.handle_ibkr_error_event(3, 201, "Order rejected - reason: insufficient margin funds")
+        self.assertEqual(recorded[-1]["severity"], "CRITICAL")
+        self.assertEqual(recorded[-1]["category"], "MARGIN")
+
+
+class TestDailyAutoAuditFixer(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="audit_unit_")
+        self.fixer = DailyAutoAuditFixer(base_dir=self.tmp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_deterministic_audit_catches_wrong_side_and_orphan(self):
+        snapshot = {
+            "window_hours": 24,
+            "trades": [],
+            "incidents": [{"code": 7001}, {"code": 7001}],
+            "log_lines": [],
+            "status_snapshot": {
+                "ibkr_connected": True,
+                "v43": {
+                    "active_position": {"direction": "SHORT", "contracts": 1},
+                    "open_orders": [
+                        {"order_id": "6575", "action": "買入 BUY", "order_type": "STP", "contracts": 1, "order_ref": "GUARD_MES_SL"},
+                        {"order_id": "6570", "action": "沽出 SELL", "order_type": "STP", "contracts": 1, "order_ref": "GUARD_MES_SL"},
+                    ],
+                },
+                "v50": {
+                    "active_position": None,
+                    "open_orders": [
+                        {"order_id": "6197", "action": "買入 BUY", "order_type": "LMT", "contracts": 1, "order_ref": "V50_MNQ_TP1"},
+                    ],
+                },
+            },
+        }
+        res = self.fixer.run_deterministic_audit(snapshot)
+        rule_ids = {f["rule_id"] for f in res["findings"]}
+        self.assertIn("WRONG_DIRECTION_ORDER", rule_ids)
+        self.assertIn("ORPHAN_EXIT_ORDER", rule_ids)
+        self.assertIn("FREQUENT_NAKED_GUARDIAN", rule_ids)
+        self.assertLess(res["health_score"], 50)
+
+    def test_clean_snapshot_scores_100(self):
+        snapshot = {
+            "window_hours": 24,
+            "trades": [],
+            "incidents": [],
+            "log_lines": [],
+            "status_snapshot": {
+                "ibkr_connected": True,
+                "v43": {
+                    "active_position": {"direction": "LONG", "contracts": 1},
+                    "open_orders": [
+                        {"order_id": "10", "action": "沽出 SELL", "order_type": "STP", "contracts": 1, "order_ref": "V93_MES_SL_TP2"},
+                        {"order_id": "11", "action": "沽出 SELL", "order_type": "LMT", "contracts": 1, "order_ref": "V93_MES_TP_TP2"},
+                    ],
+                },
+                "v50": {"active_position": None, "open_orders": []},
+            },
+        }
+        res = self.fixer.run_deterministic_audit(snapshot)
+        self.assertEqual(res["health_score"], 100)
+        self.assertEqual(res["findings_count"], 0)
+
+    def test_isolated_worktree_accepts_valid_patch_and_rejects_broken_patch(self):
+        repo_dir = tempfile.mkdtemp(prefix="sandbox_git_")
+        try:
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=repo_dir, check=True)
+
+            target = os.path.join(repo_dir, "server.py")
+            with open(target, "w", encoding="utf-8") as f:
+                f.write("def health():\n    return 'BAD'\n")
+
+            os.makedirs(os.path.join(repo_dir, "tests"), exist_ok=True)
+            with open(os.path.join(repo_dir, "tests", "test_smoke.py"), "w", encoding="utf-8") as f:
+                f.write(
+                    "import unittest\nfrom server import health\n"
+                    "class T(unittest.TestCase):\n"
+                    "    def test_h(self): self.assertEqual(health(), 'OK')\n"
+                )
+            subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True)
+
+            fixer = DailyAutoAuditFixer(base_dir=repo_dir)
+
+            # 1. Broken syntax patch must be rejected
+            bad = fixer.apply_patches_in_isolated_worktree(
+                patches=[{
+                    "file_path": "server.py",
+                    "explanation": "broken syntax",
+                    "search_block": "    return 'BAD'",
+                    "replace_block": "    return (",
+                }],
+                branch_name="autofix/test-bad",
+                push_branch=False,
+            )
+            self.assertEqual(bad["status"], "rejected")
+
+            # 2. Valid patch passes unit test and commits on autofix branch without touching main
+            good = fixer.apply_patches_in_isolated_worktree(
+                patches=[{
+                    "file_path": "server.py",
+                    "explanation": "fix health return",
+                    "search_block": "    return 'BAD'",
+                    "replace_block": "    return 'OK'",
+                }],
+                branch_name="autofix/test-good",
+                push_branch=False,
+            )
+            self.assertEqual(good["status"], "ready_for_review")
+            self.assertTrue(good["tests_passed"])
+            with open(target, "r", encoding="utf-8") as f:
+                self.assertIn("'BAD'", f.read(), "Working tree must stay untouched")
+        finally:
+            shutil.rmtree(repo_dir, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    unittest.main()

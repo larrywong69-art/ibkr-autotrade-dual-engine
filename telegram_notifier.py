@@ -22,6 +22,7 @@ AutoTrade Telegram 即時交易、異常報警與定時巡檢推播通知器 (�
 import os
 import sys
 import json
+import html as html_lib
 import logging
 import threading
 import urllib.request
@@ -348,6 +349,53 @@ class TelegramNotifier:
             f"⏰ <b>結算時間</b>: 每日清晨 06:00 (香港時間)"
         )
         self.send_message_async(msg)
+
+    def notify_daily_audit(self, report: Dict[str, Any]):
+        """雙層閉環每日自動稽核、AI 診斷與修復分支通知"""
+        det = report.get("deterministic_audit") or {}
+        ai = report.get("ai_analysis") or {}
+        patch = report.get("patch_result") or {}
+        gdrive = report.get("gdrive") or {}
+
+        date_str = html_lib.escape(str(report.get("date", "")))
+        score = int(det.get("health_score", 100))
+        findings_cnt = int(det.get("findings_count", 0))
+        stats = det.get("stats") or {}
+
+        icon = "🟢" if score >= 90 else ("🟡" if score >= 70 else "🔴")
+        lines = [
+            f"{icon} <b>【AutoTrade 雙層閉環巡檢 ({date_str})】</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            f"🛡️ <b>系統健康評分</b>: <code>{score}/100</code>（異常：{findings_cnt} 項）",
+            f"📊 <b>24h 統計</b>: {stats.get('trades_24h', 0)} 筆成交 / {stats.get('incidents_24h', 0)} 筆稽核 | 已實現 <code>${float(stats.get('realized_pnl_24h', 0.0)):+,.2f}</code>",
+        ]
+
+        findings = det.get("findings") or []
+        if findings:
+            lines.append("\n🔍 <b>主要發現</b>:")
+            for item in findings[:4]:
+                lines.append(f"  • [{html_lib.escape(str(item.get('severity', '')))}] {html_lib.escape(str(item.get('title', '')))}")
+
+        if ai.get("summary"):
+            lines.append(f"\n🤖 <b>AI 診斷摘要</b>:\n<i>{html_lib.escape(str(ai['summary'])[:320])}</i>")
+
+        if patch.get("status") == "ready_for_review":
+            br = html_lib.escape(str(patch.get("branch", "")))
+            files_str = html_lib.escape(", ".join(patch.get("applied_files") or []))
+            lines.append(
+                f"\n🧪 <b>隔離分支修復已通過回歸測試</b>:\n"
+                f"  • 分支: <code>{br}</code>\n"
+                f"  • 檔案: <code>{files_str}</code>\n"
+                f"  • 確認套用指令: <code>git fetch && git merge {br} && ./start_cloud.sh</code>"
+            )
+        elif patch.get("status") == "rejected":
+            lines.append(f"\n🛑 <b>AI 補丁未通過回歸測試</b>: 已自動攔截丟棄（不影響實盤運行）。")
+
+        if gdrive.get("folder_url") or gdrive.get("doc_url"):
+            url = gdrive.get("doc_url") or gdrive.get("folder_url")
+            lines.append(f"\n☁️ <b>雲端診斷報告</b>: <a href=\"{html_lib.escape(str(url))}\">開啟 Google Drive</a>")
+
+        self.send_message_async("\n".join(lines))
 
 
 # 全域單例

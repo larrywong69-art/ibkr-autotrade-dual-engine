@@ -944,6 +944,7 @@ class ReportScheduler:
         self.is_running = False
         self.thread: Optional[threading.Thread] = None
         self.last_reported_date: Optional[str] = None
+        self.last_audit_date: Optional[str] = None
 
     def start(self):
         """啟動定時排程背景線程"""
@@ -952,13 +953,37 @@ class ReportScheduler:
         self.is_running = True
         self.thread = threading.Thread(target=self._scheduler_loop, daemon=True, name="DailyReportScheduler")
         self.thread.start()
-        logger.info("⏰ [定時排程器已啟動] 守護線程啟動，將於每日 06:00 AM 自動生成前一日交易報告。")
+        logger.info("⏰ [定時排程器已啟動] 守護線程啟動，將於每日 06:00 AM 自動生成結算報告，06:05 AM 執行雙層閉環巡檢。")
+
+    def _run_daily_closed_loop_async(self, today_str: str):
+        """背景執行雙層閉環審計與沙盒修復，不阻塞結算排程線程"""
+        try:
+            from daily_auto_audit_fixer import DailyAutoAuditFixer
+            res = DailyAutoAuditFixer().run_daily_closed_loop(hours=24, upload_gdrive=True, enable_ai_fix=True)
+            det = res.get("deterministic_audit") or {}
+            IncidentManager().record_incident(
+                severity="INFO",
+                category="SYSTEM",
+                code=0,
+                message=f"每日雙層閉環巡檢完成 ({today_str}): 健康評分 {det.get('health_score', 100)}/100, 問題數={det.get('findings_count', 0)}",
+                source="DAILY_AUDIT_LOOP",
+                details={"patch_status": (res.get("patch_result") or {}).get("status", "skipped")}
+            )
+        except Exception as ae:
+            logger.error(f"每日雙層閉環巡檢異常: {ae}")
+            IncidentManager().record_incident(
+                severity="ERROR",
+                category="SYSTEM",
+                code=998,
+                message=f"每日雙層閉環巡檢異常: {ae}",
+                source="DAILY_AUDIT_LOOP"
+            )
 
     def _scheduler_loop(self):
         while self.is_running:
             try:
                 now = datetime.now()
-                # 判定是否為 06:00:00 ~ 06:05:00 區間且今日尚未生成
+                # 1. 判定是否為 06:00:00 ~ 06:05:00 區間且今日尚未生成每日結算報告
                 today_str = now.strftime("%Y-%m-%d")
                 if now.hour == 6 and now.minute < 5 and self.last_reported_date != today_str:
                     yesterday = (now.date() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -983,6 +1008,17 @@ class ReportScheduler:
                             message=f"每日 06:00 定時報告生成異常: {e}",
                             source="REPORT_SCHEDULER"
                         )
+
+                # 2. 判定是否為 06:05:00 ~ 06:15:00 區間觸發雙層閉環巡檢
+                if now.hour == 6 and 5 <= now.minute < 15 and self.last_audit_date != today_str:
+                    self.last_audit_date = today_str
+                    logger.info(f"🤖 [雙層閉環觸發] 開始執行每日交易與錯誤自我審計 ({today_str})...")
+                    threading.Thread(
+                        target=self._run_daily_closed_loop_async,
+                        args=(today_str,),
+                        daemon=True,
+                        name="DailyClosedLoopWorker"
+                    ).start()
             except Exception as e:
                 logger.error(f"排程守護循環異常: {e}")
 

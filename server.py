@@ -375,6 +375,25 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
             return
 
+        if parsed.path == "/api/audit/latest":
+            try:
+                from daily_auto_audit_fixer import DailyAutoAuditFixer
+                rep = DailyAutoAuditFixer().get_latest_audit()
+                if rep:
+                    self.send_response(200)
+                    resp = rep
+                else:
+                    self.send_response(404)
+                    resp = {"status": "error", "message": "尚未有雙層閉環巡檢紀錄"}
+            except Exception as e:
+                self.send_response(500)
+                resp = {"status": "error", "message": str(e)}
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+            return
+
         if parsed.path in ("/backtest", "/backtest/"):
             self.send_response(302)
             self.send_header("Location", "/backtest_lab.html")
@@ -540,6 +559,34 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                 }
 
             self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+            return
+
+        if parsed.path == "/api/audit/run":
+            content_length = int(self.headers.get("Content-Length", 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                payload = json.loads(post_data.decode("utf-8"))
+            except Exception:
+                payload = {}
+
+            try:
+                from daily_auto_audit_fixer import DailyAutoAuditFixer
+                resp = DailyAutoAuditFixer().run_daily_closed_loop(
+                    hours=int(payload.get("hours", 24)),
+                    upload_gdrive=bool(payload.get("upload_gdrive", True)),
+                    enable_ai_fix=bool(payload.get("enable_ai_fix", True)),
+                    force_ai=bool(payload.get("force_ai", False)),
+                    push_branch=bool(payload.get("push_branch", True)),
+                    notify_telegram=bool(payload.get("notify_telegram", True)),
+                )
+                self.send_response(200)
+            except Exception as e:
+                resp = {"status": "error", "message": f"雙層閉環巡檢失敗: {str(e)}"}
+                self.send_response(500)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
