@@ -130,6 +130,46 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
         self.send_header("Expires", "0")
         super().end_headers()
 
+    def _collect_recent_trades(self, limit: int = 50, symbol_filter: str = None):
+        """整合 data/trades.jsonl 與 trade_status.json 最新成交紀錄"""
+        trades = []
+        seen_ids = set()
+        status_snapshot = {}
+
+        trades_file = os.path.join(CURRENT_DIR, "data", "trades.jsonl")
+        if os.path.exists(trades_file):
+            try:
+                with open(trades_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            item = json.loads(line)
+                            eid = item.get("exec_id") or item.get("position_id")
+                            if eid:
+                                seen_ids.add(eid)
+                            trades.append(item)
+            except Exception:
+                pass
+
+        status_file = os.path.join(CURRENT_DIR, "trade_status.json")
+        if os.path.exists(status_file):
+            try:
+                with open(status_file, "r", encoding="utf-8") as sf:
+                    status_snapshot = json.load(sf)
+                    for r in status_snapshot.get("recent_trades", []):
+                        eid = r.get("exec_id") or r.get("position_id")
+                        if eid and eid not in seen_ids:
+                            seen_ids.add(eid)
+                            trades.append(r)
+            except Exception:
+                pass
+
+        if symbol_filter:
+            trades = [t for t in trades if symbol_filter.upper() in (t.get("symbol") or "").upper()]
+
+        trades = sorted(trades, key=lambda x: x.get("timestamp", ""), reverse=True)[:limit]
+        return trades, status_snapshot
+
     def do_GET(self):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
@@ -236,46 +276,7 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
             except ValueError:
                 limit = 50
             symbol_filter = query.get("symbol", [None])[0]
-
-            trades = []
-            seen_ids = set()
-
-            # 1. 優先從 data/trades.jsonl 讀取持久化官方成交流水
-            trades_file = os.path.join(CURRENT_DIR, "data", "trades.jsonl")
-            if os.path.exists(trades_file):
-                try:
-                    with open(trades_file, "r", encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if line:
-                                item = json.loads(line)
-                                eid = item.get("exec_id") or item.get("position_id")
-                                if eid:
-                                    seen_ids.add(eid)
-                                trades.append(item)
-                except Exception:
-                    pass
-
-            # 2. 補充 trade_status.json 內的即時成交
-            status_file = os.path.join(CURRENT_DIR, "trade_status.json")
-            if os.path.exists(status_file):
-                try:
-                    with open(status_file, "r", encoding="utf-8") as sf:
-                        st_data = json.load(sf)
-                        recent = st_data.get("recent_trades", [])
-                        for r in recent:
-                            eid = r.get("exec_id") or r.get("position_id")
-                            if eid and eid not in seen_ids:
-                                seen_ids.add(eid)
-                                trades.append(r)
-                except Exception:
-                    pass
-
-            if symbol_filter:
-                trades = [t for t in trades if symbol_filter.upper() in (t.get("symbol") or "").upper()]
-
-            # 最新成交排最前
-            trades = list(reversed(trades))[:limit]
+            trades, _ = self._collect_recent_trades(limit=limit, symbol_filter=symbol_filter)
 
             resp = {
                 "status": "ok",
@@ -431,6 +432,50 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                 resp = {
                     "status": "error",
                     "message": f"Google Drive 推播失敗: {str(e)}"
+                }
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+            return
+
+        if parsed.path == "/api/diagnostics/export_gdrive":
+            content_length = int(self.headers.get("Content-Length", 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            limit_trades = 100
+            limit_incidents = 100
+            log_line_count = 200
+            try:
+                payload = json.loads(post_data.decode("utf-8"))
+                limit_trades = int(payload.get("limit_trades", 100))
+                limit_incidents = int(payload.get("limit_incidents", 100))
+                log_line_count = int(payload.get("log_lines", 200))
+            except Exception:
+                pass
+
+            try:
+                trades, status_snapshot = self._collect_recent_trades(limit=limit_trades)
+                incidents = IncidentManager().get_recent_incidents(limit=limit_incidents)
+                log_lines = []
+                log_path = os.path.join(CURRENT_DIR, "mes_dual_engine_live.log")
+                if os.path.exists(log_path):
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as lf:
+                        log_lines = [line.rstrip("\n") for line in lf.readlines()[-log_line_count:]]
+
+                from gdrive_report_manager import GoogleDriveReportManager
+                gdrive_mgr = GoogleDriveReportManager()
+                resp = gdrive_mgr.export_diagnostics_to_gdrive(
+                    trades=trades,
+                    incidents=incidents,
+                    status_snapshot=status_snapshot,
+                    log_lines=log_lines
+                )
+            except Exception as e:
+                resp = {
+                    "status": "error",
+                    "message": f"匯出診斷報告至 Google Drive 失敗: {str(e)}"
                 }
 
             self.send_response(200)

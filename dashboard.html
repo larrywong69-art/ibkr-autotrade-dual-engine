@@ -110,10 +110,27 @@
             <span id="incident-count-badge" class="px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-500 text-[10px] font-bold">0</span>
           </button>
 
+          <!-- 一鍵匯出最新成交與錯誤紀錄至 Google Drive -->
+          <button id="btn-export-diag-gdrive" onclick="exportDiagnosticsToGDrive(this)" class="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-400 border border-amber-500/30 text-xs font-bold transition-all flex items-center gap-1.5 active:scale-95 shadow-sm">
+            <span>☁️</span>
+            <span>匯出成交與錯誤至 Drive</span>
+          </button>
+
           <!-- 重新整理按鈕 -->
           <button onclick="refreshData()" class="px-3 py-1.5 rounded-xl bg-[var(--accent)] hover:opacity-90 text-[var(--foreground)] text-xs font-medium border border-[var(--border)] transition-all flex items-center gap-1 active:scale-95 shadow-sm">
             🔄 重新整理
           </button>
+        </div>
+      </div>
+
+      <!-- Google Drive 診斷報告匯出結果橫幅 -->
+      <div id="diag-gdrive-banner" class="hidden mt-3 pt-3 border-t border-[var(--border)] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+        <div id="diag-gdrive-msg" class="font-semibold text-emerald-400"></div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <a id="diag-gdrive-sheet-link" href="#" target="_blank" rel="noopener noreferrer" class="hidden px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 font-bold">📊 開啟 Google Sheets 明細</a>
+          <a id="diag-gdrive-doc-link" href="#" target="_blank" rel="noopener noreferrer" class="hidden px-2.5 py-1 rounded-lg bg-blue-500/15 hover:bg-blue-500/25 text-blue-400 border border-blue-500/30 font-bold">📄 開啟 Google Docs 診斷報告</a>
+          <a id="diag-gdrive-folder-link" href="#" target="_blank" rel="noopener noreferrer" class="hidden px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-400 border border-indigo-500/30 font-bold">📁 開啟 Drive 資料夾</a>
+          <button onclick="document.getElementById('diag-gdrive-banner').classList.add('hidden')" class="px-2 py-1 rounded-lg bg-[var(--accent)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]">✕</button>
         </div>
       </div>
     </div>
@@ -1589,6 +1606,65 @@
       }
     }
 
+    async function exportDiagnosticsToGDrive(triggerBtn) {
+      const btn = triggerBtn || document.getElementById('btn-export-diag-gdrive');
+      const origHtml = btn ? btn.innerHTML : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span>⏳</span><span>匯出上傳中...</span>';
+      }
+      try {
+        const res = await fetch('/api/diagnostics/export_gdrive', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ limit_trades: 100, limit_incidents: 100, log_lines: 200 })
+        });
+        const resp = await res.json();
+        if (!res.ok || resp.status !== 'ok') {
+          throw new Error(resp.message || resp.error || '匯出至 Google Drive 失敗');
+        }
+
+        const banner = document.getElementById('diag-gdrive-banner');
+        const msgEl = document.getElementById('diag-gdrive-msg');
+        const sheetEl = document.getElementById('diag-gdrive-sheet-link');
+        const docEl = document.getElementById('diag-gdrive-doc-link');
+        const folderEl = document.getElementById('diag-gdrive-folder-link');
+
+        if (msgEl) {
+          msgEl.innerText = `☁️ ${resp.message} (${resp.exported_at || ''})`;
+          msgEl.className = 'font-semibold text-emerald-400';
+        }
+        if (sheetEl) {
+          if (resp.sheet_url) { sheetEl.href = resp.sheet_url; sheetEl.classList.remove('hidden'); }
+          else { sheetEl.classList.add('hidden'); }
+        }
+        if (docEl) {
+          if (resp.doc_url) { docEl.href = resp.doc_url; docEl.classList.remove('hidden'); }
+          else { docEl.classList.add('hidden'); }
+        }
+        if (folderEl) {
+          if (resp.folder_url) { folderEl.href = resp.folder_url; folderEl.classList.remove('hidden'); }
+          else { folderEl.classList.add('hidden'); }
+        }
+        if (banner) banner.classList.remove('hidden');
+
+        alert(
+          '☁️ 已成功匯出最新成交與錯誤診斷紀錄至 Google Drive！\n\n' +
+          `• 成交紀錄：${resp.trades_count || 0} 筆\n` +
+          `• 異常/錯誤紀錄：${resp.incidents_count || 0} 筆\n` +
+          (resp.sheet_url ? `\n📊 Google Sheet:\n${resp.sheet_url}\n` : '') +
+          (resp.doc_url ? `\n📄 Google Doc:\n${resp.doc_url}\n` : '')
+        );
+      } catch (e) {
+        alert('匯出成交與錯誤紀錄至 Google Drive 失敗: ' + e.message);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = origHtml || '<span>☁️</span><span>匯出成交與錯誤至 Drive</span>';
+        }
+      }
+    }
+
     // 2. 異常稽核 (Incident Log) Modal
     function openIncidentsModal() {
       const modal = document.getElementById('incidents-modal');
@@ -1767,6 +1843,9 @@
         </div>
 
         <div class="flex items-center gap-2">
+          <button onclick="exportDiagnosticsToGDrive(this)" class="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-400 border border-amber-500/30 text-xs font-bold transition-all">
+            ☁️ 匯出成交與錯誤至 Drive
+          </button>
           <button onclick="loadIncidents()" class="px-3 py-1.5 rounded-xl bg-[var(--accent)] hover:opacity-90 text-xs font-medium border border-[var(--border)]">
             🔄 重新整理
           </button>

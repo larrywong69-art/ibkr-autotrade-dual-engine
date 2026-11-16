@@ -16,11 +16,13 @@ import os
 import sys
 import json
 import csv
+import html as html_lib
+import re
 import logging
 import subprocess
 import shutil
 from datetime import datetime
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 logger = logging.getLogger("GoogleDriveReportManager")
 
@@ -36,7 +38,7 @@ os.makedirs(REPORTS_DIR, exist_ok=True)
 os.makedirs(GDRIVE_TEMP_DIR, exist_ok=True)
 
 # Google Drive 專屬資料夾 ID (可透過環境變數 GDRIVE_FOLDER_ID 設定)
-DEFAULT_GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID", "").strip()
+DEFAULT_GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID", "1HJvzwWJrGl087cOSgwJYvx0usSE-wazl").strip()
 DEFAULT_GDRIVE_FOLDER_URL = f"https://drive.google.com/drive/folders/{DEFAULT_GDRIVE_FOLDER_ID}" if DEFAULT_GDRIVE_FOLDER_ID else ""
 
 
@@ -579,6 +581,60 @@ table.data-table tr:nth-child(even) {{
 
         return MASTER_TRACKER_CSV
 
+    @staticmethod
+    def _extract_gdrive_file_id(out: str) -> str:
+        """從 gdrive CLI 的 JSON 或文字輸出中解析檔案 ID"""
+        if not out:
+            return ""
+        try:
+            parsed = json.loads(out)
+            if isinstance(parsed, dict):
+                if parsed.get("id"):
+                    return str(parsed["id"]).strip()
+                if isinstance(parsed.get("file"), dict) and parsed["file"].get("id"):
+                    return str(parsed["file"]["id"]).strip()
+        except Exception:
+            pass
+
+        for line in out.splitlines():
+            if "ID:" in line:
+                return line.split("ID:")[1].strip().rstrip(")")
+            if '"id"' in line:
+                try:
+                    obj = json.loads(line.strip().rstrip(","))
+                    if isinstance(obj, dict) and obj.get("id"):
+                        return str(obj["id"]).strip()
+                except Exception:
+                    pass
+
+        m = re.search(r"ID:\s*([a-zA-Z0-9_-]+)", out)
+        return m.group(1) if m else ""
+
+    @staticmethod
+    def _build_drive_url(file_id: str, mime_type: str = "") -> str:
+        if not file_id:
+            return ""
+        if mime_type == "application/vnd.google-apps.document":
+            return f"https://docs.google.com/document/d/{file_id}/edit"
+        if mime_type == "application/vnd.google-apps.spreadsheet":
+            return f"https://docs.google.com/spreadsheets/d/{file_id}/edit"
+        return f"https://drive.google.com/file/d/{file_id}/view"
+
+    def _upload_to_gdrive(self, file_path: str, mime_type: str = "", update_file_id: str = "") -> Tuple[str, str, str]:
+        """統一執行 gdrive mutate upload / update 並回傳 (file_id, url, error_msg)"""
+        mime_flag = f'--mime-type "{mime_type}" ' if mime_type else ""
+        if update_file_id:
+            cmd = f'gdrive mutate update {update_file_id} "{file_path}" {mime_flag}--json'
+        else:
+            parent_flag = f'--parent "{self.folder_id}" ' if self.folder_id else ""
+            cmd = f'gdrive mutate upload "{file_path}" {parent_flag}{mime_flag}--json'
+
+        code, out, err = self._run_gdrive_cmd(cmd)
+        if code != 0:
+            return "", "", (err or out or f"exit={code}")
+        file_id = self._extract_gdrive_file_id(out) or update_file_id
+        return file_id, self._build_drive_url(file_id, mime_type), ""
+
     # --------------------------------------------------------------------------
     # 4. 核心上傳與推播動作 (Push Daily Report)
     # --------------------------------------------------------------------------
@@ -631,40 +687,22 @@ table.data-table tr:nth-child(even) {{
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(html_content)
 
-        parent_flag = f'--parent "{self.folder_id}" ' if self.folder_id else ''
-        upload_doc_cmd = f'gdrive mutate upload "{html_path}" {parent_flag}--mime-type "application/vnd.google-apps.document" --json'
-        code, out, err = self._run_gdrive_cmd(upload_doc_cmd)
-        doc_id = ""
-        doc_url = ""
-        if code == 0:
-            for line in out.splitlines():
-                if "ID:" in line:
-                    doc_id = line.split("ID:")[1].strip().rstrip(")")
-            if doc_id:
-                doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
-                logger.info(f"[Google Doc 上傳成功] ID={doc_id} URL={doc_url}")
+        doc_id, doc_url, err_doc = self._upload_to_gdrive(html_path, "application/vnd.google-apps.document")
+        if doc_id:
+            logger.info(f"[Google Doc 上傳成功] ID={doc_id} URL={doc_url}")
         else:
-            logger.error(f"[Google Doc 上傳失敗] Code={code}, Error={err}")
+            logger.error(f"[Google Doc 上傳失敗] Error={err_doc}")
 
         # 2. 產生並上傳 Google Sheet (當日明細)
         csv_filename = f"AutoTrade_當日成交明細_{date_str}.csv"
         csv_path = os.path.join(GDRIVE_TEMP_DIR, csv_filename)
         self.generate_executions_csv(report_data, csv_path)
 
-        parent_flag = f'--parent "{self.folder_id}" ' if self.folder_id else ''
-        upload_sheet_cmd = f'gdrive mutate upload "{csv_path}" {parent_flag}--mime-type "application/vnd.google-apps.spreadsheet" --json'
-        code_s, out_s, err_s = self._run_gdrive_cmd(upload_sheet_cmd)
-        sheet_id = ""
-        sheet_url = ""
-        if code_s == 0:
-            for line in out_s.splitlines():
-                if "ID:" in line:
-                    sheet_id = line.split("ID:")[1].strip().rstrip(")")
-            if sheet_id:
-                sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
-                logger.info(f"[Google Sheet 上傳成功] ID={sheet_id} URL={sheet_url}")
+        sheet_id, sheet_url, err_sheet = self._upload_to_gdrive(csv_path, "application/vnd.google-apps.spreadsheet")
+        if sheet_id:
+            logger.info(f"[Google Sheet 上傳成功] ID={sheet_id} URL={sheet_url}")
         else:
-            logger.error(f"[Google Sheet 上傳失敗] Code={code_s}, Error={err_s}")
+            logger.error(f"[Google Sheet 上傳失敗] Error={err_sheet}")
 
         # 3. 更新並同步累計總表 (Master Tracking Sheet)
         master_csv_path = self.update_master_tracker_csv(report_data, doc_url=doc_url, sheet_url=sheet_url)
@@ -678,22 +716,16 @@ table.data-table tr:nth-child(even) {{
         master_sheet_url = self.sync_index.get("master_sheet_url", "")
 
         if not master_sheet_id:
-            # 建立新的 Master Google Sheet
-            parent_flag = f'--parent "{self.folder_id}" ' if self.folder_id else ''
-            master_upload_cmd = f'gdrive mutate upload "{master_upload_csv}" {parent_flag}--mime-type "application/vnd.google-apps.spreadsheet" --json'
-            code_m, out_m, _ = self._run_gdrive_cmd(master_upload_cmd)
-            if code_m == 0:
-                for line in out_m.splitlines():
-                    if "ID:" in line:
-                        master_sheet_id = line.split("ID:")[1].strip().rstrip(")")
-                if master_sheet_id:
-                    master_sheet_url = f"https://docs.google.com/spreadsheets/d/{master_sheet_id}/edit"
-                    self.sync_index["master_sheet_id"] = master_sheet_id
-                    self.sync_index["master_sheet_url"] = master_sheet_url
+            master_sheet_id, master_sheet_url, _ = self._upload_to_gdrive(
+                master_upload_csv, "application/vnd.google-apps.spreadsheet"
+            )
+            if master_sheet_id:
+                self.sync_index["master_sheet_id"] = master_sheet_id
+                self.sync_index["master_sheet_url"] = master_sheet_url
         else:
-            # 在原地更新 Master Sheet (保留相同的永久 URL)
-            master_update_cmd = f'gdrive mutate update {master_sheet_id} "{master_upload_csv}" --mime-type "application/vnd.google-apps.spreadsheet"'
-            self._run_gdrive_cmd(master_update_cmd)
+            self._upload_to_gdrive(
+                master_upload_csv, "application/vnd.google-apps.spreadsheet", update_file_id=master_sheet_id
+            )
 
         # 4. 更新同步索引
         self.sync_index.setdefault("dates", {})[date_str] = {
@@ -716,6 +748,213 @@ table.data-table tr:nth-child(even) {{
             "master_sheet_url": master_sheet_url,
             "folder_url": self.folder_url,
             "message": f"成功將 {date_str} 報告以文件與試算表格式推送到 Google Drive！"
+        }
+
+    # --------------------------------------------------------------------------
+    # 5. 即時匯出最新成交紀錄與錯誤稽核報告至 Google Drive
+    # --------------------------------------------------------------------------
+    def export_diagnostics_to_gdrive(
+        self,
+        trades: List[Dict[str, Any]],
+        incidents: List[Dict[str, Any]],
+        status_snapshot: Optional[Dict[str, Any]] = None,
+        log_lines: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        匯出最新成交明細、持倉/掛單狀態、錯誤異常稽核與引擎尾部日誌，
+        產出原生 Google Sheet 與 Google Doc 上傳至 Google Drive。
+        """
+        now_dt = datetime.now()
+        ts_tag = now_dt.strftime("%Y%m%d_%H%M%S")
+        ts_human = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        status_snapshot = status_snapshot or {}
+        log_lines = log_lines or []
+
+        # 1. 生成整合 CSV (供匯入 Google Sheet)
+        csv_filename = f"AutoTrade_最新成交與異常診斷_{ts_tag}.csv"
+        csv_path = os.path.join(GDRIVE_TEMP_DIR, csv_filename)
+        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["=== 1. 系統與持倉掛單快照 ==="])
+            writer.writerow(["匯出時間", ts_human])
+            writer.writerow(["IBKR 連線狀態", "已連線" if status_snapshot.get("ibkr_connected") else "未連線"])
+            writer.writerow(["帳戶總淨值", status_snapshot.get("equity", 0.0), status_snapshot.get("currency", "")])
+            writer.writerow(["已實現損益", status_snapshot.get("realized_pnl", 0.0)])
+            writer.writerow(["雙盤浮動損益 (USD)", status_snapshot.get("unrealized_pnl_usd", status_snapshot.get("unrealized_pnl", 0.0))])
+            for label, sub_key in (("MES", "v43"), ("MNQ", "v50")):
+                sub = status_snapshot.get(sub_key) or {}
+                pos = sub.get("active_position") or {}
+                orders = sub.get("open_orders") or []
+                writer.writerow([
+                    f"{label} 持倉",
+                    pos.get("direction", "空倉"),
+                    pos.get("contracts", 0),
+                    pos.get("entry_price", ""),
+                    pos.get("unrealized_pnl", 0.0),
+                    f"掛單數: {len(orders)}"
+                ])
+                for o in orders:
+                    writer.writerow([
+                        f"{label} 掛單",
+                        o.get("order_id", ""),
+                        o.get("order_type", ""),
+                        o.get("action", ""),
+                        o.get("contracts", 0),
+                        o.get("price", 0.0),
+                        o.get("status", ""),
+                        o.get("order_ref", "")
+                    ])
+
+            writer.writerow([])
+            writer.writerow([f"=== 2. 最新成交紀錄 (共 {len(trades)} 筆) ==="])
+            writer.writerow(["成交時間", "標的", "買賣/方向", "口數", "成交價", "已實現損益(USD)", "佣金(USD)", "淨損益(USD)"])
+            for t in trades:
+                price_val = t.get("price") or t.get("exit_price") or t.get("entry_price") or 0.0
+                net_val = t.get("net_pnl")
+                if net_val is None:
+                    net_val = t.get("pnl") if t.get("pnl") is not None else t.get("realized_pnl", 0.0)
+                writer.writerow([
+                    t.get("timestamp", ""),
+                    t.get("symbol", ""),
+                    t.get("direction") or t.get("side", ""),
+                    t.get("contracts") or t.get("shares") or 1,
+                    price_val,
+                    t.get("realized_pnl", 0.0),
+                    t.get("commission", 0.0),
+                    net_val
+                ])
+
+            writer.writerow([])
+            writer.writerow([f"=== 3. 最新錯誤與異常稽核紀錄 (共 {len(incidents)} 筆) ==="])
+            writer.writerow(["發生時間", "嚴重程度", "分類", "代碼", "來源", "訊息", "詳細資料"])
+            for inc in incidents:
+                writer.writerow([
+                    inc.get("timestamp", ""),
+                    inc.get("severity", ""),
+                    inc.get("category", ""),
+                    inc.get("code", ""),
+                    inc.get("source", ""),
+                    inc.get("message", ""),
+                    json.dumps(inc.get("details", {}), ensure_ascii=False)
+                ])
+
+        # 2. 生成診斷報告 HTML (供轉為 Google Doc，含實盤尾部 Log)
+        doc_filename = f"AutoTrade_最新成交與錯誤診斷報告_{ts_tag}.html"
+        html_path = os.path.join(GDRIVE_TEMP_DIR, doc_filename)
+
+        trade_rows_html = ""
+        for t in trades:
+            price_val = float(t.get("price") or t.get("exit_price") or t.get("entry_price") or 0.0)
+            net_val = t.get("net_pnl")
+            if net_val is None:
+                net_val = t.get("pnl") if t.get("pnl") is not None else t.get("realized_pnl", 0.0)
+            net_f = float(net_val or 0.0)
+            net_color = "#10b981" if net_f > 0 else ("#ef4444" if net_f < 0 else "#64748b")
+            trade_rows_html += (
+                f"<tr><td>{html_lib.escape(str(t.get('timestamp', '')))}</td>"
+                f"<td><b>{html_lib.escape(str(t.get('symbol', '')))}</b></td>"
+                f"<td>{html_lib.escape(str(t.get('direction') or t.get('side', '')))}</td>"
+                f"<td>{html_lib.escape(str(t.get('contracts') or t.get('shares') or 1))}</td>"
+                f"<td>{price_val:.2f}</td>"
+                f"<td style='color:{net_color};font-weight:bold;'>${net_f:.2f}</td></tr>"
+            )
+        if not trade_rows_html:
+            trade_rows_html = "<tr><td colspan='6'>目前尚無成交紀錄</td></tr>"
+
+        inc_rows_html = ""
+        for inc in incidents:
+            sev = str(inc.get("severity", "INFO"))
+            sev_color = "#ef4444" if sev in ("ERROR", "CRITICAL") else ("#f59e0b" if sev == "WARNING" else "#3b82f6")
+            inc_rows_html += (
+                f"<tr><td>{html_lib.escape(str(inc.get('timestamp', '')))}</td>"
+                f"<td style='color:{sev_color};font-weight:bold;'>{html_lib.escape(sev)}</td>"
+                f"<td>{html_lib.escape(str(inc.get('category', '')))} / {html_lib.escape(str(inc.get('code', '')))}</td>"
+                f"<td>{html_lib.escape(str(inc.get('message', '')))}</td></tr>"
+            )
+        if not inc_rows_html:
+            inc_rows_html = "<tr><td colspan='4'>目前無錯誤或異常稽核紀錄</td></tr>"
+
+        log_tail_escaped = html_lib.escape("\n".join(log_lines[-200:])) if log_lines else "(無近期日誌檔案)"
+
+        html_doc = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>AutoTrade 最新成交與錯誤診斷報告 ({ts_human})</title>
+<style>
+body {{ font-family: Arial, sans-serif; color: #1e293b; margin: 28px; line-height: 1.5; }}
+h1 {{ color: #0f172a; border-bottom: 2px solid #2563eb; padding-bottom: 6px; font-size: 20px; }}
+h2 {{ color: #1e40af; margin-top: 22px; font-size: 15px; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; }}
+table {{ width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }}
+th, td {{ border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; }}
+th {{ background-color: #f1f5f9; }}
+pre {{ background: #0f172a; color: #e2e8f0; padding: 12px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }}
+</style>
+</head>
+<body>
+<h1>AutoTrade 最新成交與錯誤診斷報告</h1>
+<p><b>匯出時間：</b>{html_lib.escape(ts_human)} ｜ <b>IBKR 連線：</b>{'已連線' if status_snapshot.get('ibkr_connected') else '未連線'} ｜ <b>成交筆數：</b>{len(trades)} ｜ <b>異常紀錄：</b>{len(incidents)}</p>
+
+<h2>一、最新成交紀錄 (最近 {len(trades)} 筆)</h2>
+<table>
+<thead><tr><th>成交時間</th><th>標的</th><th>方向</th><th>口數</th><th>成交價</th><th>淨損益 (USD)</th></tr></thead>
+<tbody>{trade_rows_html}</tbody>
+</table>
+
+<h2>二、錯誤與異常稽核紀錄 (最近 {len(incidents)} 筆)</h2>
+<table>
+<thead><tr><th>發生時間</th><th>等級</th><th>分類 / 代碼</th><th>事件說明</th></tr></thead>
+<tbody>{inc_rows_html}</tbody>
+</table>
+
+<h2>三、實盤守護引擎尾部運行日誌 (最近 {len(log_lines)} 行)</h2>
+<pre>{log_tail_escaped}</pre>
+</body>
+</html>"""
+
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html_doc)
+
+        if not self.check_cli_available():
+            return {
+                "status": "error",
+                "message": "檔案已匯出至本機，但 Google Drive CLI (gdrive) 未安裝或未登入授權",
+                "local_csv_path": csv_path,
+                "local_html_path": html_path,
+                "trades_count": len(trades),
+                "incidents_count": len(incidents)
+            }
+
+        sheet_id, sheet_url, err_s = self._upload_to_gdrive(csv_path, "application/vnd.google-apps.spreadsheet")
+        doc_id, doc_url, err_d = self._upload_to_gdrive(html_path, "application/vnd.google-apps.document")
+
+        if not sheet_id and not doc_id:
+            return {
+                "status": "error",
+                "message": f"Google Drive 上傳失敗：{err_s or err_d}",
+                "local_csv_path": csv_path,
+                "local_html_path": html_path,
+                "trades_count": len(trades),
+                "incidents_count": len(incidents)
+            }
+
+        diag_info = {
+            "exported_at": ts_human,
+            "sheet_id": sheet_id,
+            "sheet_url": sheet_url,
+            "doc_id": doc_id,
+            "doc_url": doc_url,
+            "folder_url": self.folder_url,
+            "trades_count": len(trades),
+            "incidents_count": len(incidents)
+        }
+        self.sync_index["latest_diagnostics"] = diag_info
+        self._save_sync_index()
+
+        return {
+            "status": "ok",
+            "message": f"已成功匯出 {len(trades)} 筆成交與 {len(incidents)} 筆異常診斷紀錄至 Google Drive！",
+            **diag_info
         }
 
     def get_date_sync_info(self, date_str: str) -> Optional[Dict[str, Any]]:
