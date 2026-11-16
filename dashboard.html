@@ -931,6 +931,14 @@
       pollTradeStatus();
     }
 
+    function formatSignedUsd(val) {
+      const n = Number(val) || 0;
+      const absStr = Math.abs(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+      if (n > 0) return `+$${absStr}`;
+      if (n < 0) return `-$${absStr}`;
+      return '$0.00';
+    }
+
     async function pollTradeStatus() {
       try {
         const res = await fetch('trade_status.json?_t=' + Date.now());
@@ -1096,9 +1104,9 @@
             if (slEl) slEl.innerText = p43.current_sl ? p43.current_sl.toFixed(2) : '-';
             if (trailEl) trailEl.innerText = p43.is_trailing_active ? '⚡ Trailing 生效中' : '等待 1.9R 啟動';
             if (pnlEl) {
-              const u = p43.unrealized_pnl || 0;
-              pnlEl.innerText = (u >= 0 ? '+' : '') + '$' + u.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-              pnlEl.className = u >= 0 ? 'text-sm font-bold text-emerald-500 mt-1 font-mono' : 'text-sm font-bold text-rose-500 mt-1 font-mono';
+              const u = Number(p43.unrealized_pnl) || 0;
+              pnlEl.innerText = formatSignedUsd(u);
+              pnlEl.className = u > 0 ? 'text-sm font-bold text-emerald-500 mt-1 font-mono' : (u < 0 ? 'text-sm font-bold text-rose-500 mt-1 font-mono' : 'text-sm font-bold text-[var(--muted-foreground)] mt-1 font-mono');
             }
             if (sumEl) sumEl.innerText = `TP1: ${p43.tp1_price ? p43.tp1_price.toFixed(2) : '-'} ｜ TP2: ${p43.tp2_price ? p43.tp2_price.toFixed(2) : '-'}`;
           } else {
@@ -1151,9 +1159,9 @@
             if (entryEl) entryEl.innerText = p50.entry_price ? p50.entry_price.toFixed(2) : '-';
             if (slEl) slEl.innerText = p50.current_sl ? p50.current_sl.toFixed(2) : '-';
             if (pnlEl) {
-              const u = p50.unrealized_pnl || 0;
-              pnlEl.innerText = (u >= 0 ? '+' : '') + '$' + u.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-              pnlEl.className = u >= 0 ? 'text-sm font-bold text-emerald-500 mt-1 font-mono' : 'text-sm font-bold text-rose-500 mt-1 font-mono';
+              const u = Number(p50.unrealized_pnl) || 0;
+              pnlEl.innerText = formatSignedUsd(u);
+              pnlEl.className = u > 0 ? 'text-sm font-bold text-emerald-500 mt-1 font-mono' : (u < 0 ? 'text-sm font-bold text-rose-500 mt-1 font-mono' : 'text-sm font-bold text-[var(--muted-foreground)] mt-1 font-mono');
             }
             if (sumEl) sumEl.innerText = `TP1: ${p50.tp1_price ? p50.tp1_price.toFixed(2) : '-'} (60%) ｜ TP2: ${p50.tp2_price ? p50.tp2_price.toFixed(2) : '-'} (25%)`;
           } else {
@@ -1169,9 +1177,23 @@
           renderOrders('v50-orders-list', 'v50-orders-count', v50.open_orders || []);
         }
 
-        // 6. 整合持倉狀態摘要更新
+        // 6. 整合持倉狀態摘要與雙盤浮動損益更新
         const p43Cnt = (v43 && v43.active_position) ? v43.active_position.contracts : 0;
         const p50Cnt = (v50 && v50.active_position) ? v50.active_position.contracts : 0;
+        const p43U = (v43 && v43.active_position) ? (Number(v43.active_position.unrealized_pnl) || 0) : 0;
+        const p50U = (v50 && v50.active_position) ? (Number(v50.active_position.unrealized_pnl) || 0) : 0;
+        const totalUnrealizedUsd = (p43Cnt > 0 || p50Cnt > 0)
+          ? (p43U + p50U)
+          : (data.unrealized_pnl_usd !== undefined ? (Number(data.unrealized_pnl_usd) || 0) : 0);
+        const unrealEl = document.getElementById('unrealized-pnl');
+        if (unrealEl) {
+          unrealEl.innerText = formatSignedUsd(totalUnrealizedUsd);
+          unrealEl.className = totalUnrealizedUsd > 0
+            ? 'text-2xl font-black text-emerald-500 tracking-tight font-mono'
+            : (totalUnrealizedUsd < 0
+              ? 'text-2xl font-black text-rose-500 tracking-tight font-mono'
+              : 'text-2xl font-black text-[var(--muted-foreground)] tracking-tight font-mono');
+        }
         const posSumEl = document.getElementById('active-positions-summary');
         const posBadge = document.getElementById('pos-status-badge');
         if (posSumEl) posSumEl.innerText = `MES: ${p43Cnt}口 ｜ MNQ: ${p50Cnt}口`;
