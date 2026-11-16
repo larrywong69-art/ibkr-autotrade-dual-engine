@@ -8,8 +8,10 @@ server.py
 import os
 import sys
 import json
+import math
 import socket
 import logging
+import threading
 from http.server import HTTPServer, ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, quote
 from datetime import datetime, date, timedelta
@@ -19,6 +21,102 @@ from report_and_incident_manager import IncidentManager, DailyReportGenerator
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONTROL_FILE = os.path.join(CURRENT_DIR, "trade_control.json")
 TUNNEL_INFO_FILE = os.path.join(CURRENT_DIR, "data", "tunnel_info.json")
+
+_AUDIT_JOB_LOCK = threading.Lock()
+_AUDIT_JOB_STATE = {
+    "status": "idle",
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "error": None,
+    "result": None,
+}
+
+
+def sanitize_json_value(value):
+    """將 NaN / Infinity 轉為 None，避免瀏覽器 JSON.parse 拋出格式錯誤。"""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(k): sanitize_json_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [sanitize_json_value(v) for v in value]
+    return value
+
+
+def start_audit_job(params):
+    """啟動背景雙層閉環巡檢任務，避免 Cloudflare Tunnel 長連線逾時返回 HTML。"""
+    with _AUDIT_JOB_LOCK:
+        if _AUDIT_JOB_STATE["running"]:
+            return {
+                "status": "running",
+                "running": True,
+                "already_running": True,
+                "started_at": _AUDIT_JOB_STATE["started_at"],
+                "message": "雙層閉環巡檢正在背景分析中，請稍候...",
+            }
+        started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _AUDIT_JOB_STATE.update({
+            "status": "running",
+            "running": True,
+            "started_at": started_at,
+            "finished_at": None,
+            "error": None,
+            "result": None,
+        })
+
+    def _worker():
+        try:
+            from daily_auto_audit_fixer import DailyAutoAuditFixer
+            res = DailyAutoAuditFixer().run_daily_closed_loop(
+                hours=int(params.get("hours", 24)),
+                upload_gdrive=bool(params.get("upload_gdrive", True)),
+                enable_ai_fix=bool(params.get("enable_ai_fix", True)),
+                force_ai=bool(params.get("force_ai", False)),
+                push_branch=bool(params.get("push_branch", True)),
+                notify_telegram=bool(params.get("notify_telegram", True)),
+            )
+            with _AUDIT_JOB_LOCK:
+                _AUDIT_JOB_STATE.update({
+                    "status": res.get("status", "ok"),
+                    "running": False,
+                    "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "error": None,
+                    "result": res,
+                })
+        except Exception as exc:
+            with _AUDIT_JOB_LOCK:
+                _AUDIT_JOB_STATE.update({
+                    "status": "error",
+                    "running": False,
+                    "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "error": str(exc),
+                    "result": None,
+                })
+
+    threading.Thread(target=_worker, name="ClosedLoopAuditWorker", daemon=True).start()
+    return {
+        "status": "running",
+        "running": True,
+        "already_running": False,
+        "started_at": started_at,
+        "message": "已啟動雙層閉環巡檢背景分析",
+    }
+
+
+def get_audit_job_status():
+    """取得背景雙層閉環巡檢目前狀態或最近結果。"""
+    with _AUDIT_JOB_LOCK:
+        snapshot = dict(_AUDIT_JOB_STATE)
+    if snapshot["status"] == "idle" and snapshot["result"] is None:
+        try:
+            from daily_auto_audit_fixer import DailyAutoAuditFixer
+            latest = DailyAutoAuditFixer().get_latest_audit()
+            if latest:
+                snapshot["latest"] = latest
+        except Exception:
+            pass
+    return snapshot
 
 def get_access_pin():
     """取得設定的安全 PIN 碼 (公網遠端防護，支援 .env 即時熱載入)"""
@@ -129,6 +227,16 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
         super().end_headers()
+
+    def _send_json(self, status_code: int, payload: dict):
+        """安全輸出標準 JSON（自動淨化 NaN/Infinity 並設定正確 Content-Type）。"""
+        safe_payload = sanitize_json_value(payload)
+        body = json.dumps(safe_payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _collect_recent_trades(self, limit: int = 50, symbol_filter: str = None):
         """整合 data/trades.jsonl 與 trade_status.json 最新成交紀錄"""
@@ -380,18 +488,18 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                 from daily_auto_audit_fixer import DailyAutoAuditFixer
                 rep = DailyAutoAuditFixer().get_latest_audit()
                 if rep:
-                    self.send_response(200)
-                    resp = rep
+                    self._send_json(200, rep)
                 else:
-                    self.send_response(404)
-                    resp = {"status": "error", "message": "尚未有雙層閉環巡檢紀錄"}
+                    self._send_json(404, {"status": "error", "message": "尚未有雙層閉環巡檢紀錄"})
             except Exception as e:
-                self.send_response(500)
-                resp = {"status": "error", "message": str(e)}
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+                self._send_json(500, {"status": "error", "message": str(e)})
+            return
+
+        if parsed.path == "/api/audit/status":
+            try:
+                self._send_json(200, get_audit_job_status())
+            except Exception as e:
+                self._send_json(500, {"status": "error", "running": False, "message": str(e)})
             return
 
         if parsed.path in ("/backtest", "/backtest/"):
@@ -558,11 +666,7 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                     "message": f"匯出診斷報告至 Google Drive 失敗: {str(e)}"
                 }
 
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+            self._send_json(200, resp)
             return
 
         if parsed.path == "/api/audit/run":
@@ -573,24 +677,27 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
             except Exception:
                 payload = {}
 
+            if bool(payload.get("sync", False)):
+                try:
+                    from daily_auto_audit_fixer import DailyAutoAuditFixer
+                    resp = DailyAutoAuditFixer().run_daily_closed_loop(
+                        hours=int(payload.get("hours", 24)),
+                        upload_gdrive=bool(payload.get("upload_gdrive", True)),
+                        enable_ai_fix=bool(payload.get("enable_ai_fix", True)),
+                        force_ai=bool(payload.get("force_ai", False)),
+                        push_branch=bool(payload.get("push_branch", True)),
+                        notify_telegram=bool(payload.get("notify_telegram", True)),
+                    )
+                    self._send_json(200, resp)
+                except Exception as e:
+                    self._send_json(500, {"status": "error", "message": f"雙層閉環巡檢失敗: {str(e)}"})
+                return
+
             try:
-                from daily_auto_audit_fixer import DailyAutoAuditFixer
-                resp = DailyAutoAuditFixer().run_daily_closed_loop(
-                    hours=int(payload.get("hours", 24)),
-                    upload_gdrive=bool(payload.get("upload_gdrive", True)),
-                    enable_ai_fix=bool(payload.get("enable_ai_fix", True)),
-                    force_ai=bool(payload.get("force_ai", False)),
-                    push_branch=bool(payload.get("push_branch", True)),
-                    notify_telegram=bool(payload.get("notify_telegram", True)),
-                )
-                self.send_response(200)
+                resp = start_audit_job(payload)
+                self._send_json(202, resp)
             except Exception as e:
-                resp = {"status": "error", "message": f"雙層閉環巡檢失敗: {str(e)}"}
-                self.send_response(500)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+                self._send_json(500, {"status": "error", "message": f"無法啟動雙層閉環巡檢: {str(e)}"})
             return
 
         if parsed.path == "/api/auth/verify":

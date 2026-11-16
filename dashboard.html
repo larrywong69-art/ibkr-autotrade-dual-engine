@@ -1616,6 +1616,25 @@
       }
     }
 
+    async function parseJsonResponse(res) {
+      const rawText = await res.text();
+      if (!rawText || !rawText.trim()) {
+        throw new Error(`伺服器無回應內容 (HTTP ${res.status})`);
+      }
+      try {
+        return JSON.parse(rawText);
+      } catch (_) {
+        const preview = rawText.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+        if (res.status === 404) {
+          throw new Error(`後端尚未載入此 API (HTTP 404)，請在 VM 重新執行 ./start_cloud.sh 重啟 server.py`);
+        }
+        if (res.status === 502 || res.status === 504 || res.status === 524) {
+          throw new Error(`閘道連線逾時或暫時無回應 (HTTP ${res.status})，系統可能仍在背景處理中`);
+        }
+        throw new Error(`伺服器回應非 JSON 格式 (HTTP ${res.status}): ${preview || '未知回應'}`);
+      }
+    }
+
     async function exportDiagnosticsToGDrive(triggerBtn) {
       const btn = triggerBtn || document.getElementById('btn-export-diag-gdrive');
       const origHtml = btn ? btn.innerHTML : '';
@@ -1629,7 +1648,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ limit_trades: 100, limit_incidents: 100, log_lines: 200 })
         });
-        const resp = await res.json();
+        const resp = await parseJsonResponse(res);
         if (!res.ok || resp.status !== 'ok') {
           throw new Error(resp.message || resp.error || '匯出至 Google Drive 失敗');
         }
@@ -1701,8 +1720,40 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ hours: 24, upload_gdrive: true, enable_ai_fix: true })
         });
-        const resp = await res.json();
-        if (!res.ok || resp.status !== 'ok') {
+        const initialResp = await parseJsonResponse(res);
+        if (!res.ok && initialResp.status !== 'running') {
+          throw new Error(initialResp.message || `雙層閉環巡檢失敗 (HTTP ${res.status})`);
+        }
+
+        let resp = initialResp;
+        if (initialResp.status === 'running') {
+          const pollStart = Date.now();
+          const maxWaitMs = 180000;
+          while (true) {
+            const elapsedSec = Math.floor((Date.now() - pollStart) / 1000);
+            if (btn) {
+              btn.innerHTML = `<span>⏳</span><span>閉環巡檢分析中 (${elapsedSec}s)...</span>`;
+            }
+            if (Date.now() - pollStart > maxWaitMs) {
+              throw new Error('巡檢分析逾時 (超過 180 秒)，請稍後檢查 Telegram 通知或重新查看最新結果');
+            }
+            await new Promise(r => setTimeout(r, 2000));
+            const statusRes = await fetch('/api/audit/status', { cache: 'no-store' });
+            const statusData = await parseJsonResponse(statusRes);
+            if (!statusData.running) {
+              if (statusData.error) {
+                throw new Error(statusData.error);
+              }
+              if (statusData.result) {
+                resp = statusData.result;
+                break;
+              }
+              throw new Error(statusData.message || '雙層閉環巡檢未返回結果');
+            }
+          }
+        }
+
+        if (resp.status !== 'ok') {
           throw new Error(resp.message || '雙層閉環巡檢失敗');
         }
         const det = resp.deterministic_audit || {};

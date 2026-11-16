@@ -297,6 +297,74 @@ class TestDailyAutoAuditFixer(unittest.TestCase):
         self.assertIn("autofix/2026-11-16", msg)
         self.assertIn("Google Drive", msg)
 
+    def test_server_audit_async_job_and_nan_sanitization(self):
+        import json
+        import math
+        import threading
+        import time
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+        from unittest.mock import patch
+        import server
+
+        cleaned = server.sanitize_json_value({"a": float("nan"), "b": [math.inf, 1.5]})
+        self.assertIsNone(cleaned["a"])
+        self.assertIsNone(cleaned["b"][0])
+        self.assertEqual(cleaned["b"][1], 1.5)
+        json.dumps(cleaned, allow_nan=False)
+
+        with server._AUDIT_JOB_LOCK:
+            server._AUDIT_JOB_STATE.update({
+                "status": "idle",
+                "running": False,
+                "started_at": None,
+                "finished_at": None,
+                "error": None,
+                "result": None,
+            })
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.ControlDashboardHandler)
+        port = httpd.server_address[1]
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            fake_report = {
+                "status": "ok",
+                "run_at": "2026-11-16 13:35:00",
+                "deterministic_audit": {"health_score": 100, "findings_count": 0, "findings": []},
+                "ai_analysis": {"status": "skipped", "reason": "ok"},
+                "patch_result": {"status": "skipped"},
+                "gdrive": {"status": "skipped"},
+                "bad_float": float("nan"),
+            }
+            with patch("daily_auto_audit_fixer.DailyAutoAuditFixer.run_daily_closed_loop", return_value=fake_report):
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/audit/run",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    self.assertEqual(resp.status, 202)
+                    start_data = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(start_data["status"], "running")
+
+                final_status = None
+                for _ in range(30):
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/audit/status", timeout=5) as sresp:
+                        status_data = json.loads(sresp.read().decode("utf-8"))
+                        if not status_data.get("running"):
+                            final_status = status_data
+                            break
+                    time.sleep(0.05)
+
+                self.assertIsNotNone(final_status)
+                self.assertEqual(final_status["status"], "ok")
+                self.assertIsNone(final_status["result"]["bad_float"])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()
