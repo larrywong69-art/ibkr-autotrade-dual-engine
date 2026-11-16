@@ -26,7 +26,7 @@ fi
 # 2. 安裝 Linux 系統基礎依賴
 echo "📦 [2/6] 正在更新系統並安裝必備工具 (Python, Docker, Tmux, Htop)..."
 sudo apt-get update -y
-sudo apt-get install -y python3-pip python3-venv git curl wget htop tmux net-tools jq docker.io docker-compose novnc websockify
+sudo apt-get install -y python3-pip python3-venv git curl wget htop tmux net-tools jq rclone docker.io docker-compose novnc websockify
 
 # 授權當前用戶使用 Docker
 sudo usermod -aG docker $USER || true

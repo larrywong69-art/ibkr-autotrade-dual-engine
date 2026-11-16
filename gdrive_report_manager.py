@@ -79,10 +79,50 @@ class GoogleDriveReportManager:
         p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         return p.returncode, p.stdout.strip(), p.stderr.strip()
 
+    def _run_cmd_args(self, args: List[str]) -> Tuple[int, str, str]:
+        """以參數陣列執行外部 CLI 指令 (避免 Shell 跳脫問題)"""
+        p = subprocess.run(args, shell=False, capture_output=True, text=True)
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+
+    def _detect_upload_backend(self) -> Tuple[str, str]:
+        """
+        自動偵測可用的 Google Drive 上傳後端，回傳 (backend, detail_or_error):
+        1. gdrive CLI (若已安裝且 gdrive auth status 授權有效) -> ("gdrive", "gdrive")
+        2. rclone (若已安裝且已設定 Google Drive remote) -> ("rclone", "<remote_name>:")
+        3. 否則回傳 ("", 診斷說明訊息)
+        """
+        if shutil.which("gdrive"):
+            code, _, _ = self._run_gdrive_cmd("gdrive auth status")
+            if code == 0:
+                return "gdrive", "gdrive"
+
+        if shutil.which("rclone"):
+            code, out, err = self._run_cmd_args(["rclone", "listremotes", "--long"])
+            if code == 0 and out:
+                preferred = os.getenv("RCLONE_GDRIVE_REMOTE", "gdrive").strip().rstrip(":").lower()
+                drive_remotes: List[str] = []
+                for line in out.splitlines():
+                    parts = line.rsplit(None, 1)
+                    if len(parts) == 2 and parts[1].strip().lower() == "drive":
+                        rname = parts[0].strip().rstrip(":")
+                        if rname:
+                            drive_remotes.append(rname)
+                if drive_remotes:
+                    for r in drive_remotes:
+                        if r.lower() == preferred:
+                            return "rclone", f"{r}:"
+                    return "rclone", f"{drive_remotes[0]}:"
+            return "", (
+                "rclone 已安裝但尚未設定 Google Drive 遠端；"
+                "請先在本機電腦執行 rclone authorize \"drive\"，再到 VM 執行 rclone config 新增名為 gdrive 的 Google Drive 遠端"
+            )
+
+        return "", "Google Drive CLI (gdrive / rclone) 未安裝或未登入授權"
+
     def check_cli_available(self) -> bool:
-        """檢查 gdrive 命令列是否可用且已登入"""
-        code, out, _ = self._run_gdrive_cmd("gdrive --version")
-        return code == 0
+        """檢查 gdrive 或 rclone 命令列是否可用且已授權 Google Drive"""
+        backend, _ = self._detect_upload_backend()
+        return bool(backend)
 
     # --------------------------------------------------------------------------
     # 1. 樣式化 HTML 生成 (供轉 Google Doc)
@@ -620,10 +660,46 @@ table.data-table tr:nth-child(even) {{
             return f"https://docs.google.com/spreadsheets/d/{file_id}/edit"
         return f"https://drive.google.com/file/d/{file_id}/view"
 
+    def _upload_via_rclone(self, remote: str, file_path: str) -> Tuple[str, str, str]:
+        """使用 rclone copyto 上傳檔案至指定 Google Drive 資料夾，並嘗試解析 Drive File ID"""
+        filename = os.path.basename(file_path)
+        remote_target = f"{remote}{filename}"
+        cmd_copy = ["rclone", "copyto", file_path, remote_target]
+        if self.folder_id:
+            cmd_copy.extend(["--drive-root-folder-id", self.folder_id])
+
+        code, out, err = self._run_cmd_args(cmd_copy)
+        if code != 0:
+            return "", "", (err or out or f"rclone exit={code}")
+
+        file_id = ""
+        cmd_ls = ["rclone", "lsjson", remote_target]
+        if self.folder_id:
+            cmd_ls.extend(["--drive-root-folder-id", self.folder_id])
+        ls_code, ls_out, _ = self._run_cmd_args(cmd_ls)
+        if ls_code == 0 and ls_out:
+            try:
+                items = json.loads(ls_out)
+                if isinstance(items, list) and items:
+                    file_id = str(items[0].get("ID") or "").strip()
+            except Exception:
+                pass
+
+        if file_id:
+            return file_id, f"https://drive.google.com/file/d/{file_id}/view", ""
+        return f"rclone:{filename}", self.folder_url, ""
+
     def _upload_to_gdrive(self, file_path: str, mime_type: str = "", update_file_id: str = "") -> Tuple[str, str, str]:
-        """統一執行 gdrive mutate upload / update 並回傳 (file_id, url, error_msg)"""
+        """統一執行 gdrive 或 rclone 上傳並回傳 (file_id, url, error_msg)"""
+        backend, detail = self._detect_upload_backend()
+        if not backend:
+            return "", "", detail
+
+        if backend == "rclone":
+            return self._upload_via_rclone(detail, file_path)
+
         mime_flag = f'--mime-type "{mime_type}" ' if mime_type else ""
-        if update_file_id:
+        if update_file_id and not str(update_file_id).startswith("rclone:"):
             cmd = f'gdrive mutate update {update_file_id} "{file_path}" {mime_flag}--json'
         else:
             parent_flag = f'--parent "{self.folder_id}" ' if self.folder_id else ""
@@ -641,9 +717,9 @@ table.data-table tr:nth-child(even) {{
     def push_daily_report(self, report_data: Dict[str, Any], force_reupload: bool = False) -> Dict[str, Any]:
         """
         執行 Google Drive 推播：
-        1. 匯出 HTML 並上傳為 Google Doc
-        2. 匯出 CSV 並上傳為 Google Sheet
-        3. 更新並同步累計追蹤總表 Google Sheet
+        1. 匯出 HTML 並上傳為 Google Doc / HTML 檢視檔
+        2. 匯出 CSV 並上傳為 Google Sheet / CSV 明細檔
+        3. 更新並同步累計追蹤總表
         """
         date_str = report_data.get("report_date", datetime.now().strftime("%Y-%m-%d"))
 
@@ -665,18 +741,18 @@ table.data-table tr:nth-child(even) {{
                 "message": f"[{date_str}] 報告已在 Google Drive 雲端就緒"
             }
 
-        if not self.check_cli_available():
-            err_msg = "Google Drive CLI (gdrive) 不可用或未授權登入"
-            logger.error(err_msg)
-            return {"status": "error", "message": err_msg}
+        backend, backend_detail = self._detect_upload_backend()
+        if not backend:
+            logger.error(backend_detail)
+            return {"status": "error", "message": backend_detail}
 
-        # 若強制重新上傳，先將舊有檔案移入回收桶避免重複
-        if existing_info and force_reupload:
+        # 若強制重新上傳且使用 gdrive CLI，先將舊有檔案移入回收桶避免重複 (rclone 同檔名會直接覆寫)
+        if existing_info and force_reupload and backend == "gdrive":
             old_doc = existing_info.get("doc_id")
             old_sheet = existing_info.get("sheet_id")
-            if old_doc:
+            if old_doc and not str(old_doc).startswith("rclone:"):
                 self._run_gdrive_cmd(f'gdrive mutate trash {old_doc}')
-            if old_sheet:
+            if old_sheet and not str(old_sheet).startswith("rclone:"):
                 self._run_gdrive_cmd(f'gdrive mutate trash {old_sheet}')
             logger.info(f"[{date_str}] 已自動清理舊有 Google Drive 檔案 (Doc: {old_doc}, Sheet: {old_sheet})")
 
@@ -751,26 +827,22 @@ table.data-table tr:nth-child(even) {{
         }
 
     # --------------------------------------------------------------------------
-    # 5. 即時匯出最新成交紀錄與錯誤稽核報告至 Google Drive
+    # 5. 即時匯出最新成交紀錄與錯誤稽核報告 (本機下載 + Google Drive 上傳)
     # --------------------------------------------------------------------------
-    def export_diagnostics_to_gdrive(
+    def generate_diagnostics_files(
         self,
         trades: List[Dict[str, Any]],
         incidents: List[Dict[str, Any]],
         status_snapshot: Optional[Dict[str, Any]] = None,
         log_lines: Optional[List[str]] = None
     ) -> Dict[str, Any]:
-        """
-        匯出最新成交明細、持倉/掛單狀態、錯誤異常稽核與引擎尾部日誌，
-        產出原生 Google Sheet 與 Google Doc 上傳至 Google Drive。
-        """
+        """生成最新成交明細 CSV 與診斷報告 HTML (同時供網頁直接下載與上傳 Drive)"""
         now_dt = datetime.now()
         ts_tag = now_dt.strftime("%Y%m%d_%H%M%S")
         ts_human = now_dt.strftime("%Y-%m-%d %H:%M:%S")
         status_snapshot = status_snapshot or {}
         log_lines = log_lines or []
 
-        # 1. 生成整合 CSV (供匯入 Google Sheet)
         csv_filename = f"AutoTrade_最新成交與異常診斷_{ts_tag}.csv"
         csv_path = os.path.join(GDRIVE_TEMP_DIR, csv_filename)
         with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
@@ -838,7 +910,6 @@ table.data-table tr:nth-child(even) {{
                     json.dumps(inc.get("details", {}), ensure_ascii=False)
                 ])
 
-        # 2. 生成診斷報告 HTML (供轉為 Google Doc，含實盤尾部 Log)
         doc_filename = f"AutoTrade_最新成交與錯誤診斷報告_{ts_tag}.html"
         html_path = os.path.join(GDRIVE_TEMP_DIR, doc_filename)
 
@@ -915,12 +986,44 @@ pre {{ background: #0f172a; color: #e2e8f0; padding: 12px; font-size: 11px; whit
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(html_doc)
 
-        if not self.check_cli_available():
+        return {
+            "csv_path": csv_path,
+            "html_path": html_path,
+            "exported_at": ts_human,
+            "ts_tag": ts_tag,
+            "trades_count": len(trades),
+            "incidents_count": len(incidents)
+        }
+
+    def export_diagnostics_to_gdrive(
+        self,
+        trades: List[Dict[str, Any]],
+        incidents: List[Dict[str, Any]],
+        status_snapshot: Optional[Dict[str, Any]] = None,
+        log_lines: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        匯出最新成交明細、持倉/掛單狀態、錯誤異常稽核與引擎尾部日誌，
+        並透過 gdrive CLI 或 rclone 上傳至 Google Drive。
+        """
+        gen_info = self.generate_diagnostics_files(
+            trades=trades,
+            incidents=incidents,
+            status_snapshot=status_snapshot,
+            log_lines=log_lines
+        )
+        csv_path = gen_info["csv_path"]
+        html_path = gen_info["html_path"]
+        ts_human = gen_info["exported_at"]
+
+        backend, backend_detail = self._detect_upload_backend()
+        if not backend:
             return {
                 "status": "error",
-                "message": "檔案已匯出至本機，但 Google Drive CLI (gdrive) 未安裝或未登入授權",
+                "message": f"檔案已生成於本機（可先直接點選網頁下載），但尚無法上傳雲端：{backend_detail}",
                 "local_csv_path": csv_path,
                 "local_html_path": html_path,
+                "folder_url": self.folder_url,
                 "trades_count": len(trades),
                 "incidents_count": len(incidents)
             }
@@ -931,15 +1034,18 @@ pre {{ background: #0f172a; color: #e2e8f0; padding: 12px; font-size: 11px; whit
         if not sheet_id and not doc_id:
             return {
                 "status": "error",
+                "backend": backend,
                 "message": f"Google Drive 上傳失敗：{err_s or err_d}",
                 "local_csv_path": csv_path,
                 "local_html_path": html_path,
+                "folder_url": self.folder_url,
                 "trades_count": len(trades),
                 "incidents_count": len(incidents)
             }
 
         diag_info = {
             "exported_at": ts_human,
+            "backend": backend,
             "sheet_id": sheet_id,
             "sheet_url": sheet_url,
             "doc_id": doc_id,
@@ -953,7 +1059,7 @@ pre {{ background: #0f172a; color: #e2e8f0; padding: 12px; font-size: 11px; whit
 
         return {
             "status": "ok",
-            "message": f"已成功匯出 {len(trades)} 筆成交與 {len(incidents)} 筆異常診斷紀錄至 Google Drive！",
+            "message": f"已透過 {backend} 成功匯出 {len(trades)} 筆成交與 {len(incidents)} 筆異常診斷紀錄至 Google Drive！",
             **diag_info
         }
 

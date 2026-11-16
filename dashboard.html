@@ -110,11 +110,15 @@
             <span id="incident-count-badge" class="px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-500 text-[10px] font-bold">0</span>
           </button>
 
-          <!-- 一鍵匯出最新成交與錯誤紀錄至 Google Drive -->
+          <!-- 一鍵匯出最新成交與錯誤紀錄至 Google Drive / 本機下載 -->
           <button id="btn-export-diag-gdrive" onclick="exportDiagnosticsToGDrive(this)" class="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-400 border border-amber-500/30 text-xs font-bold transition-all flex items-center gap-1.5 active:scale-95 shadow-sm">
             <span>☁️</span>
             <span>匯出成交與錯誤至 Drive</span>
           </button>
+          <a id="btn-download-diag" href="/api/diagnostics/download?format=html" class="px-3 py-1.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 border border-cyan-500/30 text-xs font-bold transition-all flex items-center gap-1.5 active:scale-95 shadow-sm" title="直接下載最新成交、掛單、異常與 Log 診斷報告">
+            <span>📥</span>
+            <span>下載診斷報告</span>
+          </a>
 
           <!-- 重新整理按鈕 -->
           <button onclick="refreshData()" class="px-3 py-1.5 rounded-xl bg-[var(--accent)] hover:opacity-90 text-[var(--foreground)] text-xs font-medium border border-[var(--border)] transition-all flex items-center gap-1 active:scale-95 shadow-sm">
@@ -127,9 +131,11 @@
       <div id="diag-gdrive-banner" class="hidden mt-3 pt-3 border-t border-[var(--border)] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
         <div id="diag-gdrive-msg" class="font-semibold text-emerald-400"></div>
         <div class="flex items-center gap-2 flex-wrap">
-          <a id="diag-gdrive-sheet-link" href="#" target="_blank" rel="noopener noreferrer" class="hidden px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 font-bold">📊 開啟 Google Sheets 明細</a>
-          <a id="diag-gdrive-doc-link" href="#" target="_blank" rel="noopener noreferrer" class="hidden px-2.5 py-1 rounded-lg bg-blue-500/15 hover:bg-blue-500/25 text-blue-400 border border-blue-500/30 font-bold">📄 開啟 Google Docs 診斷報告</a>
+          <a id="diag-gdrive-sheet-link" href="#" target="_blank" rel="noopener noreferrer" class="hidden px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 font-bold">📊 開啟成交與錯誤明細</a>
+          <a id="diag-gdrive-doc-link" href="#" target="_blank" rel="noopener noreferrer" class="hidden px-2.5 py-1 rounded-lg bg-blue-500/15 hover:bg-blue-500/25 text-blue-400 border border-blue-500/30 font-bold">📄 開啟雲端診斷報告</a>
           <a id="diag-gdrive-folder-link" href="#" target="_blank" rel="noopener noreferrer" class="hidden px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-400 border border-indigo-500/30 font-bold">📁 開啟 Drive 資料夾</a>
+          <a href="/api/diagnostics/download?format=csv" class="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 border border-cyan-500/30 font-bold">📥 下載 CSV</a>
+          <a href="/api/diagnostics/download?format=html" class="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 border border-cyan-500/30 font-bold">📥 下載 HTML</a>
           <button onclick="document.getElementById('diag-gdrive-banner').classList.add('hidden')" class="px-2 py-1 rounded-lg bg-[var(--accent)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]">✕</button>
         </div>
       </div>
@@ -1656,6 +1662,19 @@
           (resp.doc_url ? `\n📄 Google Doc:\n${resp.doc_url}\n` : '')
         );
       } catch (e) {
+        const banner = document.getElementById('diag-gdrive-banner');
+        const msgEl = document.getElementById('diag-gdrive-msg');
+        const sheetEl = document.getElementById('diag-gdrive-sheet-link');
+        const docEl = document.getElementById('diag-gdrive-doc-link');
+        const folderEl = document.getElementById('diag-gdrive-folder-link');
+        if (sheetEl) sheetEl.classList.add('hidden');
+        if (docEl) docEl.classList.add('hidden');
+        if (folderEl) folderEl.classList.add('hidden');
+        if (msgEl) {
+          msgEl.innerText = `⚠️ ${e.message}（可直接點選右側「下載 CSV / HTML」取得報告）`;
+          msgEl.className = 'font-semibold text-amber-400';
+        }
+        if (banner) banner.classList.remove('hidden');
         alert('匯出成交與錯誤紀錄至 Google Drive 失敗: ' + e.message);
       } finally {
         if (btn) {
@@ -1846,6 +1865,9 @@
           <button onclick="exportDiagnosticsToGDrive(this)" class="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-400 border border-amber-500/30 text-xs font-bold transition-all">
             ☁️ 匯出成交與錯誤至 Drive
           </button>
+          <a href="/api/diagnostics/download?format=html" class="px-3 py-1.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 border border-cyan-500/30 text-xs font-bold transition-all">
+            📥 下載診斷報告
+          </a>
           <button onclick="loadIncidents()" class="px-3 py-1.5 rounded-xl bg-[var(--accent)] hover:opacity-90 text-xs font-medium border border-[var(--border)]">
             🔄 重新整理
           </button>

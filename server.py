@@ -11,7 +11,7 @@ import json
 import socket
 import logging
 from http.server import HTTPServer, ThreadingHTTPServer, SimpleHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 from datetime import datetime, date, timedelta
 
 from report_and_incident_manager import IncidentManager, DailyReportGenerator
@@ -170,6 +170,17 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
         trades = sorted(trades, key=lambda x: x.get("timestamp", ""), reverse=True)[:limit]
         return trades, status_snapshot
 
+    def _collect_diagnostics_inputs(self, limit_trades: int = 100, limit_incidents: int = 100, log_line_count: int = 200):
+        """彙整最新成交、持倉快照、異常稽核與守護引擎尾部日誌"""
+        trades, status_snapshot = self._collect_recent_trades(limit=limit_trades)
+        incidents = IncidentManager().get_recent_incidents(limit=limit_incidents)
+        log_lines = []
+        log_path = os.path.join(CURRENT_DIR, "mes_dual_engine_live.log")
+        if os.path.exists(log_path):
+            with open(log_path, "r", encoding="utf-8", errors="replace") as lf:
+                log_lines = [line.rstrip("\n") for line in lf.readlines()[-log_line_count:]]
+        return trades, incidents, status_snapshot, log_lines
+
     def do_GET(self):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
@@ -310,6 +321,58 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", "/mobile.html")
             self.end_headers()
+            return
+
+        if parsed.path == "/api/diagnostics/download":
+            fmt = str(query.get("format", ["html"])[0]).lower().strip()
+            try:
+                limit_trades = int(query.get("limit_trades", [100])[0])
+            except ValueError:
+                limit_trades = 100
+            try:
+                limit_incidents = int(query.get("limit_incidents", [100])[0])
+            except ValueError:
+                limit_incidents = 100
+            try:
+                log_line_count = int(query.get("log_lines", [200])[0])
+            except ValueError:
+                log_line_count = 200
+
+            try:
+                trades, incidents, status_snapshot, log_lines = self._collect_diagnostics_inputs(
+                    limit_trades=limit_trades,
+                    limit_incidents=limit_incidents,
+                    log_line_count=log_line_count
+                )
+                from gdrive_report_manager import GoogleDriveReportManager
+                gdrive_mgr = GoogleDriveReportManager()
+                gen_info = gdrive_mgr.generate_diagnostics_files(
+                    trades=trades,
+                    incidents=incidents,
+                    status_snapshot=status_snapshot,
+                    log_lines=log_lines
+                )
+                target_path = gen_info["csv_path"] if fmt == "csv" else gen_info["html_path"]
+                content_type = "text/csv; charset=utf-8" if fmt == "csv" else "text/html; charset=utf-8"
+                ext = "csv" if fmt == "csv" else "html"
+                ascii_name = f"AutoTrade_diagnostics_{gen_info['ts_tag']}.{ext}"
+                utf8_name = quote(os.path.basename(target_path))
+
+                with open(target_path, "rb") as df:
+                    file_bytes = df.read()
+
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Disposition", f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{utf8_name}")
+                self.send_header("Content-Length", str(len(file_bytes)))
+                self.end_headers()
+                self.wfile.write(file_bytes)
+            except Exception as e:
+                resp = {"status": "error", "message": f"下載診斷報告失敗: {str(e)}"}
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
             return
 
         if parsed.path in ("/backtest", "/backtest/"):
@@ -456,13 +519,11 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                 pass
 
             try:
-                trades, status_snapshot = self._collect_recent_trades(limit=limit_trades)
-                incidents = IncidentManager().get_recent_incidents(limit=limit_incidents)
-                log_lines = []
-                log_path = os.path.join(CURRENT_DIR, "mes_dual_engine_live.log")
-                if os.path.exists(log_path):
-                    with open(log_path, "r", encoding="utf-8", errors="replace") as lf:
-                        log_lines = [line.rstrip("\n") for line in lf.readlines()[-log_line_count:]]
+                trades, incidents, status_snapshot, log_lines = self._collect_diagnostics_inputs(
+                    limit_trades=limit_trades,
+                    limit_incidents=limit_incidents,
+                    log_line_count=log_line_count
+                )
 
                 from gdrive_report_manager import GoogleDriveReportManager
                 gdrive_mgr = GoogleDriveReportManager()
