@@ -126,8 +126,8 @@ class IncidentManager:
             except Exception as e:
                 logger.error(f"寫入 incidents.log 失敗: {e}")
 
-        # 方案 C：自動透過 Telegram Bot 推播警告或錯誤 (非阻塞，略過 162 等低風險無害代碼)
-        ignored_codes = {162, 326, 2103, 2104, 2105, 2106, 2107, 2108, 2119, 2158, 2219, 10167, 10168}
+        # 方案 C：自動透過 Telegram Bot 推播警告或錯誤 (非阻塞，略過 162/2109 等低風險無害代碼)
+        ignored_codes = {162, 326, 2103, 2104, 2105, 2106, 2107, 2108, 2109, 2119, 2158, 2219, 10167, 10168}
         if severity.upper() in ("WARNING", "ERROR", "CRITICAL") and code not in ignored_codes:
             try:
                 from telegram_notifier import notifier
@@ -172,6 +172,10 @@ class IncidentManager:
         if error_code in (2104, 2106, 2158):
             return
 
+        # 2109: CME 期貨忽略 outsideRth 屬性的正常提示 (PlaceOrder is now being processed)
+        if error_code == 2109 and "now being processed" in error_string.lower():
+            return
+
         # 延遲行情提示 (10167)
         if error_code == 10167:
             # 延遲行情為一般提示，無需報錯
@@ -181,8 +185,13 @@ class IncidentManager:
         severity = "WARNING"
         category = "SYSTEM"
 
+        # 保證金不足 (優先判斷，避免被下方通用 201/202 分支遮蔽)
+        if error_code in (201, 202) and ("margin" in error_string.lower() or "funds" in error_string.lower()):
+            category = "MARGIN"
+            severity = "CRITICAL"
+
         # 低風險或無害常規代碼 (162: HMDS查詢取消/臨時IP佔用衝突, 2103/2105/2107/2108/2119/2219: 數據農場波動)
-        if error_code in (162, 2103, 2105, 2107, 2108, 2119, 2219):
+        elif error_code in (162, 2103, 2105, 2107, 2108, 2119, 2219):
             category = "DATA"
             severity = "INFO"
 
@@ -196,15 +205,14 @@ class IncidentManager:
             elif error_code in (1101, 1102):
                 severity = "INFO"  # 連線已恢復
 
-        # 訂單與交易異常
+        # 訂單與交易異常 (routine OCA/Bracket 自動撤單 202 無附帶拒絕原因時降為 INFO)
         elif error_code in (201, 202, 103, 110, 135, 136, 161, 200, 399):
             category = "TRADING"
-            severity = "ERROR" if error_code in (201, 103, 110, 135, 136, 161, 200) else "WARNING"
-
-        # 保證金不足
-        elif error_code in (201, 202) and ("margin" in error_string.lower() or "funds" in error_string.lower()):
-            category = "MARGIN"
-            severity = "CRITICAL"
+            if error_code == 202:
+                cancel_reason = error_string.replace("Order Canceled - reason:", "").strip()
+                severity = "INFO" if not cancel_reason else "WARNING"
+            else:
+                severity = "ERROR" if error_code in (201, 103, 110, 135, 136, 161, 200) else "WARNING"
 
         # 系統訂閱限制 (如 322)
         elif error_code == 322:

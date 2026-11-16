@@ -169,6 +169,10 @@ class LiveIBKRDualEngine:
         self.last_bar_eval_v50: Optional[datetime] = None
         self._last_eval_bar_ts: Dict[str, str] = {}
         self._last_protect_ts: Dict[str, float] = {}
+        self._entry_order_first_seen: Dict[int, float] = {}
+        self._last_hist_fail_ts: Dict[str, float] = {}
+        self._warned_uncancellable_ids: set = set()
+        self._cancel_attempt_ts: Dict[int, float] = {}
         self.status_message = "正在初始化雙引擎交易調度器..."
 
         # 自動重連與斷線守護狀態
@@ -408,9 +412,14 @@ class LiveIBKRDualEngine:
                         source="DUAL_ENGINE"
                     )
 
-                    # 訂閱官方即時每日損益 (PnL)
+                    # 訂閱官方即時每日損益 (PnL) 與全帳戶跨 ClientId 掛單同步
                     try:
                         self.ib.reqPnL(self.account_id, "")
+                    except Exception:
+                        pass
+                    try:
+                        self.ib.reqAllOpenOrders()
+                        self.ib.sleep(0.5)
                     except Exception:
                         pass
                     # 同步鎖定雙主力合約：MES 與 MNQ
@@ -684,6 +693,9 @@ class LiveIBKRDualEngine:
                 sym = t.contract.symbol
                 if sym not in ("MES", "MNQ"):
                     continue
+                status_str = getattr(t.orderStatus, "status", "") or ""
+                if status_str in ("Cancelled", "ApiCancelled", "Filled", "Inactive"):
+                    continue
 
                 act_zh = "買入 BUY" if t.order.action == "BUY" else "沽出 SELL"
                 price_val = t.order.lmtPrice if t.order.orderType in ("LMT", "STP LMT") else t.order.auxPrice
@@ -695,6 +707,10 @@ class LiveIBKRDualEngine:
 
                 item = {
                     "order_id": str(t.order.orderId),
+                    "perm_id": int(getattr(t.order, "permId", 0) or 0),
+                    "parent_id": int(getattr(t.order, "parentId", 0) or 0),
+                    "client_id": int(getattr(t.order, "clientId", 0) or 0),
+                    "oca_group": getattr(t.order, "ocaGroup", "") or "",
                     "order_ref": getattr(t.order, "orderRef", ""),
                     "symbol": sym,
                     "order_type": t.order.orderType,
@@ -703,7 +719,7 @@ class LiveIBKRDualEngine:
                     "contracts": int(t.order.totalQuantity),
                     "price": float(price_val) if price_val else 0.0,
                     "tif": t.order.tif,
-                    "status": t.orderStatus.status
+                    "status": status_str
                 }
 
                 if sym == "MES":
@@ -855,10 +871,10 @@ class LiveIBKRDualEngine:
             totalQuantity=qty,
             lmtPrice=entry_p,
             tif="GTC",
-            outsideRth=True
+            outsideRth=False
         )
         parent.orderId = self.ib.client.getReqId()
-        parent.orderRef = f"{order_ref_prefix}_{tp_tag}"
+        parent.orderRef = f"{order_ref_prefix}_ENTRY_{tp_tag}"
         parent.transmit = False
 
         sl_order = StopOrder(
@@ -866,7 +882,7 @@ class LiveIBKRDualEngine:
             totalQuantity=qty,
             stopPrice=sl_p,
             tif="GTC",
-            outsideRth=True
+            outsideRth=False
         )
         sl_order.orderId = self.ib.client.getReqId()
         sl_order.parentId = parent.orderId
@@ -878,11 +894,11 @@ class LiveIBKRDualEngine:
             totalQuantity=qty,
             lmtPrice=tp_p,
             tif="GTC",
-            outsideRth=True
+            outsideRth=False
         )
         tp_order.orderId = self.ib.client.getReqId()
         tp_order.parentId = parent.orderId
-        tp_order.orderRef = f"{order_ref_prefix}_{tp_tag}"
+        tp_order.orderRef = f"{order_ref_prefix}_TP_{tp_tag}"
         tp_order.transmit = True
 
         return [parent, sl_order, tp_order]
@@ -1020,35 +1036,200 @@ class LiveIBKRDualEngine:
             pass
         return fallback_atr
 
+    def _get_symbol_open_trades(self, symbol: str) -> List[Any]:
+        """取得指定標的仍在掛單中的 IBKR Trade 物件 (過濾已終結狀態)"""
+        if not self.ib or not self.ib.isConnected():
+            return []
+        active = []
+        for t in self.ib.openTrades():
+            if getattr(t.contract, "symbol", "") != symbol:
+                continue
+            status_str = getattr(getattr(t, "orderStatus", None), "status", "") or ""
+            if status_str in ("Cancelled", "ApiCancelled", "Filled", "Inactive"):
+                continue
+            active.append(t)
+        return active
+
+    def _cancel_trade_safely(self, trade: Any, symbol: str, code: int, reason_msg: str) -> bool:
+        """安全撤銷異常/殘留掛單並記錄稽核事件 (同一掛單 30 秒內不重複洗版)"""
+        oid = int(getattr(trade.order, "orderId", 0) or 0)
+        perm_id = int(getattr(trade.order, "permId", 0) or 0)
+        cid = int(getattr(trade.order, "clientId", 0) or 0)
+        cancel_key = oid if oid > 0 else perm_id
+        now_ts = time.time()
+        if cancel_key > 0 and (now_ts - self._cancel_attempt_ts.get(cancel_key, 0.0) < 30.0):
+            return False
+        if cancel_key > 0:
+            self._cancel_attempt_ts[cancel_key] = now_ts
+
+        try:
+            self.ib.cancelOrder(trade.order)
+            logger.warning(f"🧹 [{symbol} 掛單清理] {reason_msg} (OrderId={oid}, PermId={perm_id}, ClientId={cid})")
+            self.incident_mgr.record_incident(
+                severity="WARNING",
+                category="TRADING",
+                code=code,
+                message=f"[{symbol} 掛單清理] {reason_msg} (OrderId={oid})",
+                source="POSITION_GUARDIAN",
+                details={"symbol": symbol, "order_id": oid, "perm_id": perm_id, "client_id": cid, "order_ref": getattr(trade.order, "orderRef", "")}
+            )
+            return True
+        except Exception as ce:
+            if cancel_key not in self._warned_uncancellable_ids:
+                self._warned_uncancellable_ids.add(cancel_key)
+                logger.warning(f"⚠️ 無法自動撤銷 {symbol} OrderId={oid} (ClientId={cid}): {ce}")
+            return False
+
+    @staticmethod
+    def _is_orphan_exit_when_flat(trade: Any, all_symbol_trades: List[Any]) -> bool:
+        """當持倉為 0 時，分辨該掛單屬於無主殘留出場單，還是等待進場的 Bracket Parent"""
+        o = trade.order
+        oid = int(getattr(o, "orderId", 0) or 0)
+        parent_id = int(getattr(o, "parentId", 0) or 0)
+        order_ref = str(getattr(o, "orderRef", "") or "")
+        order_type = str(getattr(o, "orderType", "") or "")
+
+        # 有 _ENTRY_ 標籤且為主單者，屬待成交開倉 Bracket
+        if "_ENTRY_" in order_ref and parent_id == 0:
+            return False
+
+        # 若為主單 (parentId == 0) 且存在依附於它的子單，屬待成交開倉 Bracket (相容舊標籤)
+        if parent_id == 0 and any(int(getattr(c.order, "parentId", 0) or 0) == oid for c in all_symbol_trades):
+            return False
+
+        # 若為子單 (parentId > 0)，檢查其母開倉單是否仍在掛單中
+        if parent_id > 0:
+            parent_alive = any(
+                int(getattr(p.order, "orderId", 0) or 0) == parent_id
+                for p in all_symbol_trades
+            )
+            if parent_alive:
+                return False
+            return True
+
+        # 其餘所有空倉下的獨立 STP / GUARD_ / *_TP* / *_SL* / *_RUNNER* 均為殘留出場單
+        if order_type in ("STP", "STP PRT", "TRAIL"):
+            return True
+        if order_ref.startswith("GUARD_") or any(tag in order_ref for tag in ("_TP", "_SL", "_RUNNER")):
+            return True
+        return True
+
     def ensure_position_protection(self):
-        """裸倉保護守護：若偵測到有持倉卻缺少止損 (STP) 或止盈 (LMT) 掛單，自動補掛 OCA 保護單"""
+        """倉位與掛單全域守護：清理空倉殘留單、撤銷反向衝突單、修正超額掛單，並為裸倉補掛 OCA 止損止盈"""
         if not self.ib or not self.ib.isConnected():
             return
 
         now_ts = time.time()
         pos_v43, pos_v50 = self.get_real_positions()
-        orders_v43, orders_v50 = self.get_real_open_orders()
 
         targets = [
-            ("MES", self.contract_mes, pos_v43, orders_v43, self.engine_v93_mes, 4.5),
-            ("MNQ", self.contract_mnq, pos_v50, orders_v50, self.engine_v93_mnq, 15.0),
+            ("MES", self.contract_mes, pos_v43, self.engine_v93_mes, 4.5),
+            ("MNQ", self.contract_mnq, pos_v50, self.engine_v93_mnq, 15.0),
         ]
 
-        for symbol, contract, pos, orders, engine_inst, fallback_atr in targets:
-            if not pos or not contract:
+        for symbol, contract, pos, engine_inst, fallback_atr in targets:
+            if not contract:
                 continue
-            qty = int(pos.get("contracts", 0))
+
+            sym_trades = self._get_symbol_open_trades(symbol)
+            qty = int(pos.get("contracts", 0)) if pos else 0
+
+            # -----------------------------------------------------------------
+            # A. 空倉檢查：清理無主殘留出場單 & 超時未成交進場單 (> 20 分鐘)
+            # -----------------------------------------------------------------
             if qty <= 0:
+                cancelled_any = False
+                for t in sym_trades:
+                    oid = int(getattr(t.order, "orderId", 0) or 0)
+                    if self._is_orphan_exit_when_flat(t, sym_trades):
+                        act = getattr(t.order, "action", "")
+                        otype = getattr(t.order, "orderType", "")
+                        oref = getattr(t.order, "orderRef", "")
+                        if self._cancel_trade_safely(
+                            t, symbol, 7003,
+                            f"空倉下發現殘留出場單 ({otype} {act} {t.order.totalQuantity}口, ref={oref})，強制撤銷"
+                        ):
+                            cancelled_any = True
+                    elif int(getattr(t.order, "parentId", 0) or 0) == 0:
+                        first_seen = self._entry_order_first_seen.setdefault(oid, now_ts)
+                        if now_ts - first_seen > 1200.0:
+                            if self._cancel_trade_safely(
+                                t, symbol, 7004,
+                                f"進場限價單超過 20 分鐘未成交，撤銷避免阻擋後續訊號"
+                            ):
+                                self._entry_order_first_seen.pop(oid, None)
+                                cancelled_any = True
+                if cancelled_any:
+                    self.ib.sleep(0.3)
                 continue
+
+            # 有持倉時重置進場計時器
+            for t in sym_trades:
+                self._entry_order_first_seen.pop(int(getattr(t.order, "orderId", 0) or 0), None)
 
             direction = pos.get("direction", "LONG")
             exit_action = "SELL" if direction == "LONG" else "BUY"
-            exit_orders = [
-                o for o in orders
-                if (exit_action in o.get("action", ""))
-            ]
-            sl_qty = sum(int(o.get("contracts", 0)) for o in exit_orders if o.get("order_type") in ("STP", "STP PRT", "TRAIL"))
-            tp_qty = sum(int(o.get("contracts", 0)) for o in exit_orders if o.get("order_type") == "LMT")
+
+            # -----------------------------------------------------------------
+            # B. 有持倉檢查：撤銷所有錯誤方向掛單 (例如持有 SHORT 卻仍有 SELL 止損/止盈單)
+            # -----------------------------------------------------------------
+            wrong_dir_trades = [t for t in sym_trades if getattr(t.order, "action", "") != exit_action]
+            cancelled_dirty = False
+            for t in wrong_dir_trades:
+                act = getattr(t.order, "action", "")
+                otype = getattr(t.order, "orderType", "")
+                oref = getattr(t.order, "orderRef", "")
+                if self._cancel_trade_safely(
+                    t, symbol, 7002,
+                    f"持倉為 {direction} (應平倉方向={exit_action})，撤銷反向衝突掛單 ({otype} {act} {t.order.totalQuantity}口, ref={oref})"
+                ):
+                    cancelled_dirty = True
+            if cancelled_dirty:
+                self.ib.sleep(0.3)
+                sym_trades = self._get_symbol_open_trades(symbol)
+
+            # -----------------------------------------------------------------
+            # C. 檢查同方向平倉掛單是否超額 (避免雙重停利或反手多賣變反向開倉)
+            # -----------------------------------------------------------------
+            exit_trades = [t for t in sym_trades if getattr(t.order, "action", "") == exit_action]
+            sl_trades = [t for t in exit_trades if getattr(t.order, "orderType", "") in ("STP", "STP PRT", "TRAIL")]
+            tp_trades = [t for t in exit_trades if getattr(t.order, "orderType", "") == "LMT"]
+
+            sl_qty = sum(int(t.order.totalQuantity) for t in sl_trades)
+            tp_qty = sum(int(t.order.totalQuantity) for t in tp_trades)
+
+            def _trim_excess(trade_list: List[Any], current_sum: int, kind_label: str) -> bool:
+                if current_sum <= qty:
+                    return False
+                # 優先撤銷 GUARD_ 補掛單，其次撤銷最新/同口數多餘掛單，保留原始策略單
+                ordered = sorted(
+                    trade_list,
+                    key=lambda x: (0 if str(getattr(x.order, "orderRef", "")).startswith("GUARD_") else 1, -int(getattr(x.order, "orderId", 0) or 0))
+                )
+                did_cancel = False
+                rem = current_sum
+                for tr in ordered:
+                    if rem <= qty:
+                        break
+                    t_q = int(tr.order.totalQuantity)
+                    if self._cancel_trade_safely(
+                        tr, symbol, 7005,
+                        f"{kind_label} 掛單總口數 ({current_sum}) 超出持倉 ({qty})，撤銷多餘掛單 {t_q} 口以防反手錯單"
+                    ):
+                        rem -= t_q
+                        did_cancel = True
+                return did_cancel
+
+            trimmed_sl = _trim_excess(sl_trades, sl_qty, "止損 STP")
+            trimmed_tp = _trim_excess(tp_trades, tp_qty, "止盈 LMT")
+            if trimmed_sl or trimmed_tp:
+                self.ib.sleep(0.3)
+                sym_trades = self._get_symbol_open_trades(symbol)
+                exit_trades = [t for t in sym_trades if getattr(t.order, "action", "") == exit_action]
+                sl_trades = [t for t in exit_trades if getattr(t.order, "orderType", "") in ("STP", "STP PRT", "TRAIL")]
+                tp_trades = [t for t in exit_trades if getattr(t.order, "orderType", "") == "LMT"]
+                sl_qty = sum(int(t.order.totalQuantity) for t in sl_trades)
+                tp_qty = sum(int(t.order.totalQuantity) for t in tp_trades)
 
             if sl_qty >= qty:
                 continue
@@ -1085,6 +1266,16 @@ class LiveIBKRDualEngine:
             tp2_p = self._round_to_tick(raw_tp2, 0.25)
             runner_p = self._round_to_tick(raw_run, 0.25)
 
+            # 若舊有 TP 沒有綁定 OCA (例如遺留裸 TP 單)，趁現在同步補掛完整 OCA 並清理未綁定 TP
+            unlinked_tps = [t for t in tp_trades if not getattr(t.order, "ocaGroup", "")]
+            if sl_qty == 0 and tp_qty > 0 and len(unlinked_tps) == len(tp_trades):
+                for t in unlinked_tps:
+                    self._cancel_trade_safely(
+                        t, symbol, 7006,
+                        f"清理未綁定 OCA 之獨立止盈單 (ref={getattr(t.order, 'orderRef', '')})，改為完整 SL+TP OCA 保護組"
+                    )
+                tp_qty = 0
+
             need_tp = (tp_qty == 0)
             if need_tp:
                 cnt_a, cnt_b, cnt_c = engine_inst.calculate_tranches(missing_qty)
@@ -1110,7 +1301,7 @@ class LiveIBKRDualEngine:
                     totalQuantity=t_qty,
                     stopPrice=sl_p,
                     tif="GTC",
-                    outsideRth=True
+                    outsideRth=False
                 )
                 sl_o.orderId = self.ib.client.getReqId()
                 sl_o.orderRef = f"GUARD_{symbol}_SL_{t_tag}"
@@ -1126,10 +1317,10 @@ class LiveIBKRDualEngine:
                         totalQuantity=t_qty,
                         lmtPrice=t_tp,
                         tif="GTC",
-                        outsideRth=True
+                        outsideRth=False
                     )
                     tp_o.orderId = self.ib.client.getReqId()
-                    tp_o.orderRef = f"GUARD_{symbol}_{t_tag}"
+                    tp_o.orderRef = f"GUARD_{symbol}_TP_{t_tag}"
                     tp_o.ocaGroup = oca_name
                     tp_o.ocaType = 1
                     self.ib.placeOrder(contract, tp_o)
@@ -1162,19 +1353,22 @@ class LiveIBKRDualEngine:
         """共用 K 棒策略評估器：強制僅評估已收盤 5m K 棒 (len-2)，且每根 K 棒僅觸發一次"""
         if pos is not None or len(orders) > 0:
             return
+        if time.time() - self._last_hist_fail_ts.get(symbol, 0.0) < 60.0:
+            return
 
         try:
             bars = self.ib.reqHistoricalData(
                 contract,
                 endDateTime='',
-                durationStr='3 D',
+                durationStr='2 D',
                 barSizeSetting='5 mins',
                 whatToShow='TRADES',
                 useRTH=False,
                 formatDate=1,
-                timeout=10
+                timeout=15
             )
             if not bars or len(bars) < 30:
+                self._last_hist_fail_ts[symbol] = time.time()
                 return
 
             df = util.df(bars)
