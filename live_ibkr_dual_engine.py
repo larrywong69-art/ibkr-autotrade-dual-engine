@@ -234,13 +234,25 @@ class LiveIBKRDualEngine:
             self.status_message = "⚠️ 偵測到另一裝置 (如手機 IBKR Mobile 或網頁) 正在登入該帳戶，搶奪了連線權限！請退出手機 App 並重啟 Gateway。"
             logger.warning(f"⚠️ [IP 衝突攔截] 收到 IBKR 代碼 162: {error_string}。偵測到另一裝置正在連線同一帳號，導致本機 Session IP 衝突。")
 
+    @staticmethod
+    def _safe_float(val: Any, default: float = 0.0, decimals: int = 2) -> float:
+        """安全解析 IBKR 數值，過濾 None、NaN 與 UNSET_DOUBLE 等異常佔位值"""
+        try:
+            v = float(val)
+            if math.isnan(v) or math.isinf(v) or abs(v) > 1e100:
+                return default
+            return round(v, decimals)
+        except (TypeError, ValueError):
+            return default
+
     def on_exec_details(self, trade: Any, fill: Any):
         """官方即時成交流水回呼鉤子"""
         try:
             sym = getattr(fill.contract, "symbol", "")
             strat = "v9.1" if sym in ("MES", "MNQ") else "UNKNOWN"
-            comm = getattr(fill.commissionReport, "commission", 0.0) if hasattr(fill, "commissionReport") and fill.commissionReport else 0.0
-            pnl = getattr(fill.commissionReport, "realizedPNL", 0.0) if hasattr(fill, "commissionReport") and fill.commissionReport else 0.0
+            report = getattr(fill, "commissionReport", None)
+            comm = self._safe_float(getattr(report, "commission", 0.0)) if report else 0.0
+            pnl = self._safe_float(getattr(report, "realizedPNL", 0.0)) if report else 0.0
             self.ledger_mgr.record_execution(
                 exec_id=fill.execution.execId,
                 time_val=fill.execution.time,
@@ -282,8 +294,8 @@ class LiveIBKRDualEngine:
         try:
             self.ledger_mgr.update_commission_pnl(
                 exec_id=report.execId,
-                commission=report.commission,
-                realized_pnl=report.realizedPNL
+                commission=self._safe_float(getattr(report, "commission", 0.0)),
+                realized_pnl=self._safe_float(getattr(report, "realizedPNL", 0.0))
             )
         except Exception as e:
             logger.error(f"處理佣金報告異常: {e}")
@@ -297,8 +309,9 @@ class LiveIBKRDualEngine:
             for f in fills:
                 sym = getattr(f.contract, "symbol", "")
                 strat = "v9.1" if sym in ("MES", "MNQ") else "UNKNOWN"
-                comm = getattr(f.commissionReport, "commission", 0.0) if hasattr(f, "commissionReport") and f.commissionReport else 0.0
-                pnl = getattr(f.commissionReport, "realizedPNL", 0.0) if hasattr(f, "commissionReport") and f.commissionReport else 0.0
+                report = getattr(f, "commissionReport", None)
+                comm = self._safe_float(getattr(report, "commission", 0.0)) if report else 0.0
+                pnl = self._safe_float(getattr(report, "realizedPNL", 0.0)) if report else 0.0
                 self.ledger_mgr.record_execution(
                     exec_id=f.execution.execId,
                     time_val=f.execution.time,
@@ -716,14 +729,28 @@ class LiveIBKRDualEngine:
                     continue
 
                 direction = "LONG" if f.execution.side == "BOT" else "SHORT"
+                fill_price = self._safe_float(
+                    getattr(f.execution, "price", 0.0) or getattr(f.execution, "avgPrice", 0.0),
+                    decimals=4
+                )
+                report = getattr(f, "commissionReport", None)
+                comm = self._safe_float(getattr(report, "commission", 0.0)) if report else 0.0
+                realized = self._safe_float(getattr(report, "realizedPNL", 0.0)) if report else 0.0
+                net_pnl = round(realized - comm, 2)
+
                 item = {
+                    "exec_id": f.execution.execId,
                     "position_id": f"FILL_{f.execution.execId}",
                     "symbol": sym,
                     "timestamp": f.execution.time.strftime("%Y-%m-%d %H:%M:%S") if isinstance(f.execution.time, datetime) else str(f.execution.time),
+                    "side": f.execution.side,
                     "direction": direction,
-                    "contracts": int(f.execution.shares),
-                    "price": float(f.execution.price),
-                    "reason": f"實盤成交 ({f.execution.side} @ {f.execution.price})",
+                    "contracts": int(float(f.execution.shares)),
+                    "price": fill_price,
+                    "realized_pnl": realized,
+                    "commission": comm,
+                    "net_pnl": net_pnl,
+                    "pnl": net_pnl,
                     "is_live": True
                 }
 
@@ -1334,7 +1361,11 @@ class LiveIBKRDualEngine:
             "trading_enabled": self.trading_enabled_global,
             "active_position": pos_v43 or pos_v50,
             "open_orders": orders_v43 + orders_v50,
-            "recent_trades": trades_v43 + trades_v50
+            "recent_trades": sorted(
+                trades_v43 + trades_v50,
+                key=lambda x: x.get("timestamp", ""),
+                reverse=True
+            )
         }
 
         # 注入 Cloudflare 戶外隧道網址 (若在線)

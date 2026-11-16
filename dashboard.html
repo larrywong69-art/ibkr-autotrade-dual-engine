@@ -508,18 +508,16 @@
               <th class="py-2.5 px-3">#</th>
               <th class="py-2.5 px-3">成交時間</th>
               <th class="py-2.5 px-3">標的/策略</th>
-              <th class="py-2.5 px-3">成交編號 (ExecId)</th>
               <th class="py-2.5 px-3">方向</th>
               <th class="py-2.5 px-3">類別/梯次</th>
               <th class="py-2.5 px-3">合約張數</th>
               <th class="py-2.5 px-3">成交價</th>
-              <th class="py-2.5 px-3">損益 ($)</th>
-              <th class="py-2.5 px-3">成交說明</th>
+              <th class="py-2.5 px-3 text-right">損益 ($)</th>
             </tr>
           </thead>
           <tbody id="trades-tbody" class="divide-y divide-[var(--border)]">
             <tr>
-              <td colspan="10" class="py-12 text-center">
+              <td colspan="8" class="py-12 text-center">
                 <div class="max-w-md mx-auto space-y-2">
                   <div class="text-2xl">🏛️</div>
                   <div class="text-sm font-bold text-[var(--foreground)]">雙策略守護引擎連線待命中</div>
@@ -806,7 +804,7 @@
       if (filtered.length === 0) {
         const trEmpty = document.createElement('tr');
         trEmpty.innerHTML = `
-          <td colspan="10" class="py-12 text-center">
+          <td colspan="8" class="py-12 text-center">
             <div class="max-w-md mx-auto space-y-2">
               <div class="text-2xl">🏛️</div>
               <div class="text-sm font-bold text-[var(--foreground)]">雙策略守護引擎連線待命中</div>
@@ -824,8 +822,18 @@
         const tr = document.createElement('tr');
         tr.className = "hover:bg-[var(--accent)]/40 transition-colors";
 
-        const isWin = (t.pnl || 0) > 0;
-        const pnlColor = isWin ? "text-emerald-500 font-bold" : ((t.pnl || 0) < 0 ? "text-rose-500 font-bold" : "text-[var(--muted-foreground)]");
+        const rawPrice = [t.price, t.exit_price, t.entry_price, t.avg_price, t.fill_price].find(
+          v => v !== undefined && v !== null && v !== '' && !Number.isNaN(Number(v)) && Number(v) > 0
+        );
+        const priceStr = rawPrice !== undefined ? Number(rawPrice).toFixed(2) : '-';
+
+        const rawPnl = [t.net_pnl, t.pnl, t.realized_pnl, t.pnl_usd].find(
+          v => v !== undefined && v !== null && v !== '' && !Number.isNaN(Number(v))
+        );
+        const pnlVal = rawPnl !== undefined ? Number(rawPnl) : null;
+        const isWin = pnlVal !== null && pnlVal > 0;
+        const isLoss = pnlVal !== null && pnlVal < 0;
+        const pnlColor = isWin ? "text-emerald-500 font-bold" : (isLoss ? "text-rose-500 font-bold" : "text-[var(--muted-foreground)]");
         const dirBadge = t.direction === 'LONG' 
           ? '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">好倉 LONG</span>'
           : '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-rose-500/10 text-rose-500 border border-rose-500/20">淡倉 SHORT</span>';
@@ -835,19 +843,23 @@
           ? '<span class="px-2 py-0.5 rounded text-[11px] font-bold bg-indigo-500/15 text-indigo-400 border border-indigo-500/30">⚡ V9.3 MNQ</span>'
           : '<span class="px-2 py-0.5 rounded text-[11px] font-bold bg-rose-500/15 text-rose-400 border border-rose-500/30">🔥 V9.3 MES</span>';
 
-        const pnlStr = t.pnl !== undefined ? `${t.pnl >= 0 ? '+' : ''}$${t.pnl.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}` : '-';
+        const pnlStr = pnlVal === null
+          ? '-'
+          : (isWin
+            ? `+$${pnlVal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
+            : (isLoss
+              ? `-$${Math.abs(pnlVal).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
+              : '$0.00'));
 
         tr.innerHTML = `
           <td class="py-2.5 px-3 text-[var(--muted-foreground)] font-mono">${idx + 1}</td>
           <td class="py-2.5 px-3 font-mono text-[var(--foreground)]">${t.timestamp || '-'}</td>
           <td class="py-2.5 px-3">${symBadge}</td>
-          <td class="py-2.5 px-3 font-mono text-[var(--muted-foreground)]">${t.position_id || t.exec_id || '-'}</td>
           <td class="py-2.5 px-3">${dirBadge}</td>
           <td class="py-2.5 px-3 font-bold font-mono text-center">${t.tranche || 'IBKR實單'}</td>
-          <td class="py-2.5 px-3 font-mono font-bold">${t.contracts || 1} 口</td>
-          <td class="py-2.5 px-3 font-mono">${t.entry_price ? t.entry_price.toFixed(2) : (t.exit_price ? t.exit_price.toFixed(2) : '-')}</td>
+          <td class="py-2.5 px-3 font-mono font-bold">${t.contracts || t.shares || 1} 口</td>
+          <td class="py-2.5 px-3 font-mono">${priceStr}</td>
           <td class="py-2.5 px-3 text-right font-mono ${pnlColor}">${pnlStr}</td>
-          <td class="py-2.5 px-3"><span class="px-2 py-0.5 rounded-md text-xs font-medium bg-emerald-500/10 text-emerald-500">${t.reason || '正常撮合'}</span></td>
         `;
         tbody.appendChild(tr);
       });
@@ -1191,9 +1203,17 @@
 
     function exportCSV() {
       let dataToExport = LIVE_TRADES_DATA;
-      let csv = "timestamp,symbol,position_id,direction,tranche,contracts,entry_price,exit_price,pnl,reason\n";
+      let csv = "timestamp,symbol,direction,tranche,contracts,price,pnl\n";
       dataToExport.forEach(t => {
-        csv += `${t.timestamp || ''},${t.symbol || ''},${t.position_id || ''},${t.direction || ''},${t.tranche || ''},${t.contracts || 1},${t.entry_price || ''},${t.exit_price || ''},${t.pnl || 0},"${t.reason || ''}"\n`;
+        const rawPrice = [t.price, t.exit_price, t.entry_price, t.avg_price, t.fill_price].find(
+          v => v !== undefined && v !== null && v !== '' && !Number.isNaN(Number(v)) && Number(v) > 0
+        );
+        const rawPnl = [t.net_pnl, t.pnl, t.realized_pnl, t.pnl_usd].find(
+          v => v !== undefined && v !== null && v !== '' && !Number.isNaN(Number(v))
+        );
+        const priceOut = rawPrice !== undefined ? Number(rawPrice).toFixed(2) : '';
+        const pnlOut = rawPnl !== undefined ? Number(rawPnl).toFixed(2) : '0.00';
+        csv += `${t.timestamp || ''},${t.symbol || ''},${t.direction || ''},${t.tranche || 'IBKR實單'},${t.contracts || t.shares || 1},${priceOut},${pnlOut}\n`;
       });
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);

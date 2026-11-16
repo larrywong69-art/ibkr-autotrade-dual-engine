@@ -264,7 +264,7 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                         st_data = json.load(sf)
                         recent = st_data.get("recent_trades", [])
                         for r in recent:
-                            eid = r.get("position_id") or r.get("exec_id")
+                            eid = r.get("exec_id") or r.get("position_id")
                             if eid and eid not in seen_ids:
                                 seen_ids.add(eid)
                                 trades.append(r)
