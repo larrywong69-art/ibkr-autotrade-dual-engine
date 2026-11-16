@@ -350,8 +350,8 @@ class TelegramNotifier:
         )
         self.send_message_async(msg)
 
-    def notify_daily_audit(self, report: Dict[str, Any]):
-        """雙層閉環每日自動稽核、AI 診斷與修復分支通知"""
+    def notify_daily_audit(self, report: Dict[str, Any], sync: bool = False) -> bool:
+        """雙層閉環每日自動稽核、問題發現、解決方案與修復分支通知"""
         det = report.get("deterministic_audit") or {}
         ai = report.get("ai_analysis") or {}
         patch = report.get("patch_result") or {}
@@ -372,12 +372,29 @@ class TelegramNotifier:
 
         findings = det.get("findings") or []
         if findings:
-            lines.append("\n🔍 <b>主要發現</b>:")
-            for item in findings[:4]:
-                lines.append(f"  • [{html_lib.escape(str(item.get('severity', '')))}] {html_lib.escape(str(item.get('title', '')))}")
+            lines.append("\n🔍 <b>發現問題 (規則體檢)</b>:")
+            for item in findings[:5]:
+                lines.append(
+                    f"  • [{html_lib.escape(str(item.get('severity', '')))}] "
+                    f"{html_lib.escape(str(item.get('title', '')))}"
+                )
+
+        root_causes = ai.get("root_causes") or []
+        if root_causes:
+            lines.append("\n🧠 <b>AI 根因判讀</b>:")
+            for rc in root_causes[:4]:
+                lines.append(f"  • {html_lib.escape(str(rc)[:180])}")
 
         if ai.get("summary"):
-            lines.append(f"\n🤖 <b>AI 診斷摘要</b>:\n<i>{html_lib.escape(str(ai['summary'])[:320])}</i>")
+            lines.append(f"\n📝 <b>分析摘要</b>:\n<i>{html_lib.escape(str(ai['summary'])[:360])}</i>")
+
+        rec_patches = ai.get("recommended_patches") or []
+        if rec_patches:
+            lines.append("\n💡 <b>解決方案與修復建議</b>:")
+            for rp in rec_patches[:4]:
+                fp = html_lib.escape(str(rp.get("file_path", "")))
+                exp = html_lib.escape(str(rp.get("explanation", ""))[:200])
+                lines.append(f"  • <code>{fp}</code>：{exp}")
 
         if patch.get("status") == "ready_for_review":
             br = html_lib.escape(str(patch.get("branch", "")))
@@ -389,13 +406,22 @@ class TelegramNotifier:
                 f"  • 確認套用指令: <code>git fetch && git merge {br} && ./start_cloud.sh</code>"
             )
         elif patch.get("status") == "rejected":
-            lines.append(f"\n🛑 <b>AI 補丁未通過回歸測試</b>: 已自動攔截丟棄（不影響實盤運行）。")
+            lines.append(f"\n🛑 <b>AI 補丁未通過回歸測試</b>: 已自動攔截丟棄（{html_lib.escape(str(patch.get('reason', ''))[:160])}）。")
+        elif patch.get("status") == "skipped" and rec_patches:
+            lines.append(f"\nℹ️ <b>補丁套用狀態</b>: {html_lib.escape(str(patch.get('reason', '未建立分支'))[:160])}")
 
         if gdrive.get("folder_url") or gdrive.get("doc_url"):
             url = gdrive.get("doc_url") or gdrive.get("folder_url")
             lines.append(f"\n☁️ <b>雲端診斷報告</b>: <a href=\"{html_lib.escape(str(url))}\">開啟 Google Drive</a>")
 
-        self.send_message_async("\n".join(lines))
+        text = "\n".join(lines)
+        if len(text) > 3950:
+            text = text[:3900] + "\n...(內容過長已截斷，詳情請見 Google Drive / 本機審計報告)"
+
+        if sync:
+            return self.send_message_sync(text)
+        self.send_message_async(text)
+        return True
 
 
 # 全域單例

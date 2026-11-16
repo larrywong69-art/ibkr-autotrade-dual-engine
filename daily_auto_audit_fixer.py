@@ -727,6 +727,7 @@ class DailyAutoAuditFixer:
         force_ai: bool = False,
         push_branch: bool = True,
         notify_telegram: bool = True,
+        sync_telegram: bool = False,
     ) -> Dict[str, Any]:
         """執行完整雙層閉環巡檢：收集 -> 確定性體檢 -> Drive 歸檔 -> Gemini AI 分析 -> 隔離分支驗證 -> Telegram 通知"""
         now_dt = datetime.now()
@@ -802,7 +803,7 @@ class DailyAutoAuditFixer:
             try:
                 from telegram_notifier import notifier
                 if hasattr(notifier, "notify_daily_audit"):
-                    notifier.notify_daily_audit(report)
+                    notifier.notify_daily_audit(report, sync=sync_telegram)
             except Exception as te:
                 logger.warning(f"Telegram 雙層閉環推播失敗: {te}")
 
@@ -828,5 +829,6 @@ if __name__ == "__main__":
         force_ai=args.force_ai,
         push_branch=not args.no_push,
         notify_telegram=not args.no_tg,
+        sync_telegram=True,
     )
     print(json.dumps(res, ensure_ascii=False, indent=2))

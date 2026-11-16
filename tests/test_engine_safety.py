@@ -258,6 +258,45 @@ class TestDailyAutoAuditFixer(unittest.TestCase):
         finally:
             shutil.rmtree(repo_dir, ignore_errors=True)
 
+    def test_telegram_audit_notification_includes_problems_and_solutions(self):
+        from telegram_notifier import TelegramNotifier
+        n = object.__new__(TelegramNotifier)
+        sent_messages = []
+        n.send_message_sync = lambda text, **kw: sent_messages.append(text) or True
+        n.send_message_async = lambda text, **kw: sent_messages.append(text)
+
+        sample_report = {
+            "date": "2026-11-16",
+            "deterministic_audit": {
+                "health_score": 65,
+                "findings_count": 1,
+                "findings": [{"severity": "CRITICAL", "title": "MES 持倉方向與掛單方向衝突"}],
+                "stats": {"trades_24h": 5, "incidents_24h": 12, "realized_pnl_24h": 42.5},
+            },
+            "ai_analysis": {
+                "summary": "跨 ClientId 重連遺漏掛單導致重複補單。",
+                "root_causes": ["try_connect 未呼叫 reqAllOpenOrders()"],
+                "recommended_patches": [{
+                    "file_path": "live_ibkr_dual_engine.py",
+                    "explanation": "連線後主動同步全帳戶掛單並撤銷錯向單",
+                }],
+            },
+            "patch_result": {
+                "status": "ready_for_review",
+                "branch": "autofix/2026-11-16",
+                "applied_files": ["live_ibkr_dual_engine.py"],
+            },
+            "gdrive": {"folder_url": "https://drive.google.com/drive/folders/TEST"},
+        }
+        ok = n.notify_daily_audit(sample_report, sync=True)
+        self.assertTrue(ok)
+        self.assertEqual(len(sent_messages), 1)
+        msg = sent_messages[0]
+        self.assertIn("發現問題", msg)
+        self.assertIn("解決方案與修復建議", msg)
+        self.assertIn("autofix/2026-11-16", msg)
+        self.assertIn("Google Drive", msg)
+
 
 if __name__ == "__main__":
     unittest.main()
