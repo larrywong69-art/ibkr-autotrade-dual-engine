@@ -42,8 +42,9 @@ else
     echo "ℹ️ [3/6] cloudflared 已安裝，略過。"
 fi
 
-# 4. 解壓並建立專案目錄
+# 4. 建立或同步專案目錄（確保保留 Git 追蹤以便日後一鍵 ./update.sh 更新）
 TARGET_DIR="$HOME/ibkr_paper_trading"
+REPO_URL="${AUTOTRADE_REPO_URL:-https://github.com/larrywong69-art/ibkr-autotrade-dual-engine.git}"
 mkdir -p "$TARGET_DIR"
 
 if [ -f "$HOME/autotrade_cloud.tar.gz" ]; then
@@ -52,9 +53,21 @@ if [ -f "$HOME/autotrade_cloud.tar.gz" ]; then
 elif [ -f "./autotrade_cloud.tar.gz" ]; then
     echo "📦 [4/6] 正在解壓 AutoTrade 專案檔案到 $TARGET_DIR..."
     tar -xzf "./autotrade_cloud.tar.gz" -C "$TARGET_DIR"
+elif [ -f "./larryautotrade_cloud.tar.gz" ]; then
+    echo "📦 [4/6] 正在解壓 AutoTrade 專案檔案到 $TARGET_DIR..."
+    tar -xzf "./larryautotrade_cloud.tar.gz" -C "$TARGET_DIR"
+elif [ ! -d "$TARGET_DIR/.git" ] && [ ! -f "$TARGET_DIR/server.py" ]; then
+    echo "📥 [4/6] 正從 GitHub 下載最新 AutoTrade 專案到 $TARGET_DIR..."
+    git clone "$REPO_URL" "$TARGET_DIR"
 fi
 
 cd "$TARGET_DIR"
+if [ ! -d ".git" ]; then
+    git init -b main >/dev/null 2>&1 || { git init; git checkout -b main; }
+    git remote add origin "$REPO_URL" 2>/dev/null || git remote set-url origin "$REPO_URL"
+    git fetch origin main --tags >/dev/null 2>&1 && git reset --mixed origin/main >/dev/null 2>&1 || true
+fi
+chmod +x *.sh 2>/dev/null || true
 
 # 5. 建立獨立 Python 虛擬環境與安裝依賴套件
 echo "📦 [5/6] 正在配置 Python 交易環境與相依套件 (ib_insync, ib_async, pandas, numpy, google-genai)..."

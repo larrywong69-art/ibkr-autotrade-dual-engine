@@ -51,6 +51,9 @@
             <h1 class="text-lg sm:text-xl font-bold text-[var(--foreground)] tracking-tight">
               AutoTrade 旗艦守護引擎 (V9.3 Master Hybrid Live)
             </h1>
+            <button id="app-version-badge" type="button" onclick="checkAppUpdates(true)" title="點擊檢查 GitHub 最新版本" class="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-[var(--accent)] hover:bg-blue-500/15 text-[var(--foreground)] border border-[var(--border)] transition-all cursor-pointer">
+              v9.3.3
+            </button>
             <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-500/15 text-blue-500 border border-blue-500/25">
               🔥 V9.3 實盤整數自適應 (MES 60%)
             </span>
@@ -2467,6 +2470,43 @@
 
     setInterval(pollIncidentStatus, 5000);
     pollIncidentStatus();
+
+    async function checkAppUpdates(manual = false) {
+      const badge = document.getElementById('app-version-badge');
+      if (manual && badge) badge.innerText = '檢查更新中...';
+      try {
+        const res = await fetch(`/api/version?check=${manual ? 1 : 0}&_t=` + Date.now());
+        if (!res.ok) return;
+        const info = await res.json();
+        const verLabel = info.tag || `v${info.version || '9.3.3'}`;
+        const commitSuffix = info.commit ? ` (${info.commit})` : '';
+        if (badge) {
+          if (info.update_available && info.latest_tag) {
+            badge.innerText = `${verLabel} → ${info.latest_tag} 有新版本`;
+            badge.className = 'px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-amber-500/20 text-amber-400 border border-amber-500/40 animate-pulse cursor-pointer';
+          } else {
+            badge.innerText = `${verLabel}${commitSuffix}`;
+            badge.className = 'px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-[var(--accent)] hover:bg-blue-500/15 text-[var(--foreground)] border border-[var(--border)] transition-all cursor-pointer';
+          }
+        }
+        if (manual) {
+          if (info.update_available && info.latest_tag) {
+            alert(
+              `🆕 偵測到新版本：${info.latest_tag}（目前為 ${verLabel}）\n\n` +
+              `在主機專案目錄執行一鍵同步更新：\n${info.update_command || './update.sh --restart'}\n\n` +
+              `若為無 .git 的舊版環境，請執行：\n${info.curl_update_command || ''}`
+            );
+          } else if (info.remote_error) {
+            alert(`目前版本：${verLabel}${commitSuffix}\n無法連線檢查 GitHub 遠端版本：${info.remote_error}`);
+          } else {
+            alert(`✅ 目前已是最新版本：${verLabel}${commitSuffix}`);
+          }
+        }
+      } catch (e) {
+        if (manual && badge) badge.innerText = 'v9.3.3';
+      }
+    }
+    checkAppUpdates(false);
   </script>
 
   <!-- ======================================================================= -->

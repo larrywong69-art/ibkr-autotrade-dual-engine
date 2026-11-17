@@ -1,0 +1,27 @@
+# AutoTrade 版本更新日誌 (Changelog)
+
+所有重要變更、功能升級與安全修復皆會記錄於此檔案。  
+其他使用者與雲端主機可透過 `./update.sh` 一鍵同步最新穩定版本（詳見 [README.md](README.md)）。
+
+## [v9.3.3] - 2026-11-17
+
+### 新增與優化 (Added & Changed)
+- **一鍵版本發布與訂閱同步工作流 (`release.sh` / `update.sh` / `VERSION`)**
+  - 新增 `VERSION` 版本號與 `release.sh`，自動化執行安全檢查、單元測試、乾淨版雲端壓縮包重建、`git tag` 推送與 GitHub Release 發布。
+  - 新增 `update.sh` 供其他使用者與雲端 VM 一鍵檢查與同步更新；即使原本是透過壓縮檔部署、缺少 `.git` 目錄的環境，亦可自動轉換為 Git 追蹤並安全保留 `.env`、`data/`、`logs/` 與 `reports/`。
+  - 更新 `cloud_deploy/setup.sh`，雲端新裝改以 Git 追蹤與安裝 `update.sh` 為主，避免後續更新遇到 `fatal: not a git repository`。
+  - 後端新增 `GET /api/version`（支援 `?check=1` 檢查 GitHub 最新版本），儀表板頂部新增版本號與「檢查更新」按鈕。
+- **日曆式每日盈虧記錄與統一 HKD 計價 (`dashboard.html`, `server.py`)**
+  - 將「6:4 動態資金調度中樞」改為互動式 **📅 每日盈虧記錄 (HKD)**，支援月份切換、當月勝率/淨盈虧彙總與點擊單日展開 MES/MNQ 分策略及成交流水明細。
+  - 雙盤浮動損益、已實現損益與成交流水簿統一以 HKD 計價並以 FIFO 合併開倉/平倉父子階層（淨損益已包含手續費）。
+- **異常稽核通知數已讀歸零 (`report_and_incident_manager.py`, `server.py`, `dashboard.html`)**
+  - 新增 `POST /api/incidents/ack` 與 `data/incidents_ack.json` 水位線，點開「連線與交易異常稽核日誌」後頂部通知數立即變回 `0`，直到出現新異常時再次累加提示。
+- **雙層閉環巡檢非阻塞升級 (`server.py`, `dashboard.html`)**
+  - `POST /api/audit/run` 改為背景執行並搭配 `GET /api/audit/status` 輪詢，修正透過 Cloudflare Tunnel / Safari 執行時發生逾時或 `JSON.parse` 模式錯誤。
+
+## [v9.3.2] - 2026-11-16
+
+### 新增與修復 (Added & Fixed)
+- 新增每日雙層閉環 AI 自我稽核系統（`daily_auto_audit_fixer.py`）與 `git worktree` 隔離分支安全回歸驗證。
+- 強化實盤五層掛單自癒（`7001`–`7006`）與跨 `ClientId` `reqAllOpenOrders()` 同步，修正 `2109`/`202`/`MARGIN` 稽核分類。
+- 新增 Telegram 問題＋解決方案＋合併指令推播與 Google Drive (`rclone`) 診斷報告匯出。

@@ -7,11 +7,14 @@ server.py
 
 import os
 import sys
+import time
 import json
 import math
 import socket
 import logging
+import subprocess
 import threading
+import urllib.request
 from http.server import HTTPServer, ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, quote
 from datetime import datetime, date, timedelta
@@ -31,6 +34,117 @@ _AUDIT_JOB_STATE = {
     "error": None,
     "result": None,
 }
+
+_VERSION_CACHE_LOCK = threading.Lock()
+_VERSION_REMOTE_CACHE = {
+    "fetched_at": 0.0,
+    "latest_version": None,
+    "latest_tag": None,
+    "release_url": "https://github.com/larrywong69-art/ibkr-autotrade-dual-engine/releases",
+    "error": None,
+}
+
+
+def _parse_semver(ver_str: str):
+    cleaned = (ver_str or "").strip().lstrip("vV")
+    parts = []
+    for p in cleaned.split(".")[:3]:
+        digits = "".join(ch for ch in p if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
+
+
+def get_version_info(base_dir=CURRENT_DIR, check_remote: bool = False, remote_fetcher=None):
+    """回傳目前本機版本、Git 提交與可選的遠端最新版本檢查結果。"""
+    version_file = os.path.join(base_dir, "VERSION")
+    current_version = "9.3.3"
+    if os.path.exists(version_file):
+        try:
+            with open(version_file, "r", encoding="utf-8") as vf:
+                raw = vf.read().strip().lstrip("vV")
+                if raw:
+                    current_version = raw
+        except Exception:
+            pass
+
+    commit = ""
+    if os.path.isdir(os.path.join(base_dir, ".git")):
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=base_dir,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if proc.returncode == 0:
+                commit = proc.stdout.strip()
+        except Exception:
+            pass
+
+    repo_url = "https://github.com/larrywong69-art/ibkr-autotrade-dual-engine"
+    latest_version = None
+    latest_tag = None
+    release_url = f"{repo_url}/releases"
+    remote_error = None
+
+    if check_remote:
+        now = time.time()
+        with _VERSION_CACHE_LOCK:
+            cached_fresh = (now - _VERSION_REMOTE_CACHE["fetched_at"] < 300) and _VERSION_REMOTE_CACHE["latest_version"]
+            if cached_fresh and remote_fetcher is None:
+                latest_version = _VERSION_REMOTE_CACHE["latest_version"]
+                latest_tag = _VERSION_REMOTE_CACHE["latest_tag"]
+                release_url = _VERSION_REMOTE_CACHE["release_url"]
+                remote_error = _VERSION_REMOTE_CACHE["error"]
+
+        if latest_version is None:
+            try:
+                if remote_fetcher is not None:
+                    remote_raw = str(remote_fetcher()).strip().lstrip("vV")
+                    latest_version = remote_raw or None
+                    latest_tag = f"v{latest_version}" if latest_version else None
+                else:
+                    ver_url = "https://raw.githubusercontent.com/larrywong69-art/ibkr-autotrade-dual-engine/main/VERSION"
+                    req = urllib.request.Request(ver_url, headers={"User-Agent": "AutoTrade-VersionCheck"})
+                    with urllib.request.urlopen(req, timeout=4) as resp:
+                        remote_raw = resp.read().decode("utf-8").strip().lstrip("vV")
+                        if remote_raw:
+                            latest_version = remote_raw
+                            latest_tag = f"v{remote_raw}"
+                            release_url = f"{repo_url}/releases/tag/{latest_tag}"
+                if remote_fetcher is None:
+                    with _VERSION_CACHE_LOCK:
+                        _VERSION_REMOTE_CACHE.update({
+                            "fetched_at": now,
+                            "latest_version": latest_version,
+                            "latest_tag": latest_tag,
+                            "release_url": release_url,
+                            "error": None,
+                        })
+            except Exception as exc:
+                remote_error = str(exc)
+
+    update_available = bool(
+        latest_version and _parse_semver(latest_version) > _parse_semver(current_version)
+    )
+
+    return {
+        "status": "ok",
+        "version": current_version,
+        "tag": f"v{current_version}",
+        "commit": commit,
+        "latest_version": latest_version,
+        "latest_tag": latest_tag,
+        "update_available": update_available,
+        "repo_url": repo_url,
+        "release_url": release_url,
+        "update_command": "./update.sh --restart",
+        "curl_update_command": "curl -fsSL https://raw.githubusercontent.com/larrywong69-art/ibkr-autotrade-dual-engine/main/update.sh | bash -s -- --restart",
+        "remote_error": remote_error,
+    }
 
 
 def sanitize_json_value(value):
@@ -582,6 +696,15 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                 self._send_json(200, resp)
             except Exception as e:
                 self._send_json(500, {"status": "error", "message": f"讀取每日盈虧日曆失敗: {str(e)}"})
+            return
+
+        if parsed.path == "/api/version":
+            check_flag = str(query.get("check", ["0"])[0]).strip().lower() in ("1", "true", "yes")
+            try:
+                resp = get_version_info(base_dir=CURRENT_DIR, check_remote=check_flag)
+                self._send_json(200, resp)
+            except Exception as e:
+                self._send_json(500, {"status": "error", "message": f"讀取版本資訊失敗: {str(e)}"})
             return
 
         if parsed.path == "/api/lan_info":

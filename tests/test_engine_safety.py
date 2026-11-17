@@ -606,6 +606,43 @@ class TestDailyAutoAuditFixer(unittest.TestCase):
                 rim.INCIDENTS_ACK_FILE = orig_ack
                 rim.INCIDENTS_LOG = orig_log
 
+    def test_get_version_info_and_endpoint(self):
+        import json
+        import os
+        import tempfile
+        import threading
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+        import server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "VERSION"), "w", encoding="utf-8") as vf:
+                vf.write("9.3.3\n")
+
+            same = server.get_version_info(base_dir=tmp, check_remote=True, remote_fetcher=lambda: "9.3.3\n")
+            self.assertEqual(same["version"], "9.3.3")
+            self.assertEqual(same["tag"], "v9.3.3")
+            self.assertFalse(same["update_available"])
+
+            newer = server.get_version_info(base_dir=tmp, check_remote=True, remote_fetcher=lambda: "9.3.4\n")
+            self.assertEqual(newer["latest_tag"], "v9.3.4")
+            self.assertTrue(newer["update_available"])
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.ControlDashboardHandler)
+        port = httpd.server_address[1]
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/version", timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                payload = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(payload["status"], "ok")
+                self.assertTrue(payload["version"])
+                self.assertIn("./update.sh", payload["update_command"])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

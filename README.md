@@ -87,15 +87,31 @@ cp .env.example .env
 - `RCLONE_GDRIVE_REMOTE` / `GDRIVE_FOLDER_ID`：設定 `rclone` 遠端名稱（預設 `gdrive`）與 Google Drive 目標資料夾 ID
 - `IB_ACCOUNT_ID` / `ENABLE_MARKET_SCHEDULE`：自訂帳戶標籤與 CME 自動開休市排程（預設 `true`）
 
-### 本機與雲端啟動 / 更新
+### 本機與雲端啟動 / 版本同步更新
 
 ```bash
 # 本機啟動雙引擎與監控儀表板
 chmod +x start_paper_trading.sh
 ./start_paper_trading.sh
 
-# 雲端 VM 拉取最新 main 分支並重啟服務
-cd ~/ibkr_paper_trading && git fetch && git reset --hard origin/main && ./start_cloud.sh
+# 一鍵檢查或同步最新版本（自動保留 .env、data/、logs/、reports/）
+./update.sh --check          # 先檢查有無新版本
+./update.sh --restart        # 同步至最新 main 並自動重啟服務
+./update.sh --tag v9.3.3     # 或指定同步至某個穩定 Release 版本
+
+# 若原本使用壓縮檔部署、目錄內尚未建立 .git（免重新設定 .env）
+curl -fsSL https://raw.githubusercontent.com/larrywong69-art/ibkr-autotrade-dual-engine/main/update.sh | bash -s -- --restart
+```
+
+### 作者發布新版本（推送至 GitHub & Releases）
+
+```bash
+# 自動執行單元測試 → 打包乾淨版雲端壓縮檔 → 更新 VERSION & CHANGELOG.md → 推送 main 與 Tag → 建立 GitHub Release
+./release.sh 9.3.4 "簡短更新說明"
+
+# 或只自動遞增 patch / minor 版本號
+./release.sh --patch "修復某項問題"
+./release.sh --dry-run       # 先演練檢查與打包，不實際推送
 ```
 
 啟動後可於瀏覽器開啟：
