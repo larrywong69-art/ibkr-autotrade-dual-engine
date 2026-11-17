@@ -332,6 +332,8 @@ class LiveIBKRDualEngine:
         self._last_hist_fail_ts: Dict[str, float] = {}
         self._warned_uncancellable_ids: set = set()
         self._cancel_attempt_ts: Dict[int, float] = {}
+        self._stop_breach_first_seen: Dict[str, float] = {}
+        self._last_soft_stop_ts: Dict[str, float] = {}
         self.status_message = "正在初始化雙引擎交易調度器..."
 
         # 自動重連與斷線守護狀態
@@ -1035,7 +1037,7 @@ class LiveIBKRDualEngine:
             totalQuantity=qty,
             lmtPrice=entry_p,
             tif="GTC",
-            outsideRth=False
+            outsideRth=True
         )
         parent.orderId = self.ib.client.getReqId()
         parent.orderRef = f"{order_ref_prefix}_ENTRY_{tp_tag}"
@@ -1046,7 +1048,7 @@ class LiveIBKRDualEngine:
             totalQuantity=qty,
             stopPrice=sl_p,
             tif="GTC",
-            outsideRth=False
+            outsideRth=True
         )
         sl_order.orderId = self.ib.client.getReqId()
         sl_order.parentId = parent.orderId
@@ -1058,7 +1060,7 @@ class LiveIBKRDualEngine:
             totalQuantity=qty,
             lmtPrice=tp_p,
             tif="GTC",
-            outsideRth=False
+            outsideRth=True
         )
         tp_order.orderId = self.ib.client.getReqId()
         tp_order.parentId = parent.orderId
@@ -1302,6 +1304,8 @@ class LiveIBKRDualEngine:
             # A. 空倉檢查：清理無主殘留出場單 & 超時未成交進場單 (> 20 分鐘)
             # -----------------------------------------------------------------
             if qty <= 0:
+                if hasattr(self, "_stop_breach_first_seen"):
+                    self._stop_breach_first_seen.pop(symbol, None)
                 cancelled_any = False
                 for t in sym_trades:
                     oid = int(getattr(t.order, "orderId", 0) or 0)
@@ -1395,6 +1399,71 @@ class LiveIBKRDualEngine:
                 sl_qty = sum(int(t.order.totalQuantity) for t in sl_trades)
                 tp_qty = sum(int(t.order.totalQuantity) for t in tp_trades)
 
+            # -----------------------------------------------------------------
+            # D. 軟體級防穿倉緊急市價止損 (Soft Hard-Stop Failsafe, Code 7007)
+            # 防止 IBKR 模擬撮合或盤前掛單卡在 PreSubmitted 導致穿過止蝕價仍未平倉
+            # -----------------------------------------------------------------
+            if not hasattr(self, "_stop_breach_first_seen"):
+                self._stop_breach_first_seen = {}
+            if not hasattr(self, "_last_soft_stop_ts"):
+                self._last_soft_stop_ts = {}
+
+            sl_prices = []
+            for t in sl_trades:
+                try:
+                    ap = float(getattr(t.order, "auxPrice", 0.0) or 0.0)
+                    if ap > 0:
+                        sl_prices.append(ap)
+                except (TypeError, ValueError):
+                    pass
+
+            cur_mkt = float(pos.get("current_price") or 0.0)
+            breach_tol = 0.50 if symbol == "MES" else 1.00
+            breached = False
+            sl_trigger = 0.0
+            if sl_prices and cur_mkt > 0:
+                if direction == "LONG":
+                    sl_trigger = max(sl_prices)
+                    breached = cur_mkt <= (sl_trigger - breach_tol)
+                else:
+                    sl_trigger = min(sl_prices)
+                    breached = cur_mkt >= (sl_trigger + breach_tol)
+
+            if breached:
+                first_breach = self._stop_breach_first_seen.setdefault(symbol, now_ts)
+                dwell = now_ts - first_breach
+                last_soft = self._last_soft_stop_ts.get(symbol, 0.0)
+                if dwell >= 5.0 and (now_ts - last_soft) >= 15.0:
+                    self._last_soft_stop_ts[symbol] = now_ts
+                    self._stop_breach_first_seen.pop(symbol, None)
+                    fail_msg = (
+                        f"🚨 [軟體止蝕防穿倉 7007] {symbol} {direction} {qty} 口現價 ({cur_mkt:.2f}) "
+                        f"已穿過原生止蝕價 ({sl_trigger:.2f}) 超過 {dwell:.1f} 秒仍未觸發，立即執行市價強制平倉！"
+                    )
+                    logger.critical(fail_msg)
+                    self.incident_mgr.record_incident(
+                        severity="CRITICAL",
+                        category="TRADING",
+                        code=7007,
+                        message=fail_msg,
+                        source="SOFT_STOP_FAILSAFE",
+                        details={
+                            "symbol": symbol,
+                            "direction": direction,
+                            "qty": qty,
+                            "current_price": cur_mkt,
+                            "stop_price": sl_trigger,
+                            "dwell_seconds": round(dwell, 2),
+                        },
+                    )
+                    self.emergency_flat_symbol(
+                        symbol,
+                        reason=f"軟體止蝕防穿倉保護 (現價 {cur_mkt:.2f} 穿過止蝕 {sl_trigger:.2f})",
+                    )
+                    continue
+            else:
+                self._stop_breach_first_seen.pop(symbol, None)
+
             if sl_qty >= qty:
                 continue
 
@@ -1465,7 +1534,7 @@ class LiveIBKRDualEngine:
                     totalQuantity=t_qty,
                     stopPrice=sl_p,
                     tif="GTC",
-                    outsideRth=False
+                    outsideRth=True
                 )
                 sl_o.orderId = self.ib.client.getReqId()
                 sl_o.orderRef = f"GUARD_{symbol}_SL_{t_tag}"
@@ -1481,7 +1550,7 @@ class LiveIBKRDualEngine:
                         totalQuantity=t_qty,
                         lmtPrice=t_tp,
                         tif="GTC",
-                        outsideRth=False
+                        outsideRth=True
                     )
                     tp_o.orderId = self.ib.client.getReqId()
                     tp_o.orderRef = f"GUARD_{symbol}_TP_{t_tag}"
@@ -1629,6 +1698,9 @@ class LiveIBKRDualEngine:
                         cancelled_count += 1
                     except Exception as ce:
                         logger.warning(f"撤銷掛單異常: {ce}")
+
+            if cancelled_count > 0:
+                self.ib.sleep(0.3)
 
             # 2. 查詢當前持倉並發送市價反向平倉單
             executed_flat = False

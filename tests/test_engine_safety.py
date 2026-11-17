@@ -78,13 +78,51 @@ class TestLiveEngineOrderHygiene(unittest.TestCase):
         self.eng.ib.placeOrder.side_effect = lambda c, o: self.placed_orders.append((c.symbol, o))
         self.eng.ib.sleep.return_value = None
 
-    def test_bracket_outside_rth_false_and_distinct_refs(self):
+    def test_bracket_outside_rth_true_and_distinct_refs(self):
         orders = self.eng._build_single_bracket("BUY", "SELL", 2, 7560.0, 7555.0, 7570.0, "V93_MES", "TP1")
         self.assertEqual(len(orders), 3)
-        self.assertTrue(all(o.outsideRth is False for o in orders))
+        self.assertTrue(all(o.outsideRth is True for o in orders))
         self.assertEqual(orders[0].orderRef, "V93_MES_ENTRY_TP1")
         self.assertEqual(orders[1].orderRef, "V93_MES_SL_TP1")
         self.assertEqual(orders[2].orderRef, "V93_MES_TP_TP1")
+
+    def test_soft_stop_failsafe_triggers_emergency_flat_after_dwell(self):
+        flatted = []
+        self.eng.emergency_flat_symbol = lambda sym, reason="": flatted.append((sym, reason)) or {"status": "ok"}
+        self.eng._stop_breach_first_seen = {}
+        self.eng._last_soft_stop_ts = {}
+
+        # Case 1: Normal unbreached SHORT MES (SL=7416.50, current=7409.00) -> no trigger
+        mes_ok = {"symbol": "MES", "direction": "SHORT", "contracts": 7, "entry_price": 7411.20, "current_price": 7409.00}
+        self.eng.get_real_positions = lambda: (mes_ok, None)
+        self.eng.ib.openTrades.return_value = [
+            _make_trade(7623, "MES", "STP", "BUY", 7, 7416.50, "V93_MES_SL_RUNNER", status="PreSubmitted"),
+        ]
+        self.eng.ensure_position_protection()
+        self.assertEqual(flatted, [])
+        self.assertNotIn("MES", self.eng._stop_breach_first_seen)
+
+        # Case 2: Market jumps to 7439.75 while STP stays PreSubmitted -> starts timer, flats after dwell >= 5s
+        mes_breach = {"symbol": "MES", "direction": "SHORT", "contracts": 7, "entry_price": 7411.20, "current_price": 7439.75}
+        self.eng.get_real_positions = lambda: (mes_breach, None)
+        self.eng.ensure_position_protection()
+        self.assertEqual(flatted, [])
+        self.assertIn("MES", self.eng._stop_breach_first_seen)
+
+        self.eng._stop_breach_first_seen["MES"] = time.time() - 6.0
+        self.eng.ensure_position_protection()
+        self.assertEqual(len(flatted), 1)
+        self.assertEqual(flatted[0][0], "MES")
+        self.eng.incident_mgr.record_incident.assert_called()
+        self.assertEqual(self.eng.incident_mgr.record_incident.call_args.kwargs.get("code"), 7007)
+
+        # Case 3: Naked position gets GUARD STP+TP with outsideRth=True
+        self.eng.engine_v93_mes.calculate_tranches.return_value = (3, 2, 2)
+        self.eng._fetch_latest_atr = lambda c, f=4.5: 5.0
+        self.eng.ib.openTrades.return_value = []
+        self.eng.ensure_position_protection()
+        self.assertTrue(len(self.placed_orders) >= 2)
+        self.assertTrue(all(o.outsideRth is True for _, o in self.placed_orders))
 
     def test_cancels_wrong_direction_and_flat_orphan_orders(self):
         mes_pos = {"symbol": "MES", "direction": "SHORT", "contracts": 1, "entry_price": 7566.38, "current_price": 7563.0}
