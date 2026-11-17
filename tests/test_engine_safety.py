@@ -643,6 +643,97 @@ class TestDailyAutoAuditFixer(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_overnight_pairing_from_jsonl_and_orphan_open_timestamp(self):
+        import json
+        import os
+        import tempfile
+        import live_ibkr_dual_engine as eng_mod
+
+        # 1. 真孤立平倉單不得把平倉時間偽造成開倉時間
+        orphan = eng_mod.pair_executions_fifo([
+            {"exec_id": "oc1", "timestamp": "2026-11-17 09:03:43", "symbol": "MNQ", "side": "BOT", "direction": "LONG", "contracts": 1, "price": 27161.25, "realized_pnl": 416.78, "commission": 0.61}
+        ], fx_rate=7.78)
+        self.assertEqual(len(orphan), 1)
+        self.assertEqual(orphan[0]["status"], "ORPHAN_CLOSE")
+        self.assertEqual(orphan[0]["open_timestamp"], "")
+        self.assertEqual(orphan[0]["close_orders"][0]["timestamp"], "2026-11-17 09:03:43")
+
+        # 2. 跨日平倉應自動與 data/trades.jsonl 的前日開倉紀錄配對，各自顯示開倉與平倉時間
+        eng = eng_mod.LiveIBKRDualEngine.__new__(eng_mod.LiveIBKRDualEngine)
+        eng.is_connected = True
+        eng.is_reconnecting = False
+        eng.reconnect_attempts = 0
+        eng.reconnect_delay = 5.0
+        eng.account_id = "DU123456"
+        eng.currency = "HKD"
+        eng.usd_hkd_rate = 7.78
+        eng.status_message = "OK"
+        eng.market_paused = False
+        eng.market_data_type = 1
+        eng.market_data_status = "REAL_TIME"
+        eng.net_liquidation = 1000000.0
+        eng.cash_balance = 950000.0
+        eng.available_funds = 900000.0
+        eng.init_margin_req = 50000.0
+        eng.realized_pnl = 0.0
+        eng.unrealized_pnl = 0.0
+        eng.equity_usd_total = 128534.7
+        eng.pool_v43_usd = 77120.82
+        eng.pool_v50_usd = 51413.88
+        eng.symbol_mes = "MESZ6"
+        eng.symbol_mnq = "MNQZ6"
+        eng.trading_enabled_global = True
+        eng.trading_enabled_v43 = True
+        eng.trading_enabled_v50 = True
+        eng.price_mes = 7408.75
+        eng.bid_mes = 7408.5
+        eng.ask_mes = 7409.0
+        eng.price_mnq = 27161.25
+        eng.bid_mnq = 27161.0
+        eng.ask_mnq = 27161.5
+        eng.engine_v91_mes = eng_mod.StrategyEngineV93(eng_mod.CONFIG_V93)
+        eng.engine_v91_mnq = eng_mod.StrategyEngineV93(eng_mod.CONFIG_V93)
+        eng.get_real_positions = lambda: (None, None)
+        eng.get_real_open_orders = lambda: ([], [])
+        eng.get_real_executions = lambda: (
+            [],
+            [{"exec_id": "close_today", "timestamp": "2026-11-17 09:03:43", "symbol": "MNQ", "side": "BOT", "direction": "LONG", "contracts": 1, "price": 27161.25, "realized_pnl": 416.78, "commission": 0.61}],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "data"), exist_ok=True)
+            with open(os.path.join(tmp, "data", "trades.jsonl"), "w", encoding="utf-8") as tf:
+                tf.write(json.dumps({
+                    "exec_id": "open_yest",
+                    "timestamp": "2026-11-16 19:08:42",
+                    "symbol": "MNQ",
+                    "side": "SLD",
+                    "direction": "SHORT",
+                    "shares": 1,
+                    "price": 27370.25,
+                    "realized_pnl": 0.0,
+                    "commission": 0.61,
+                }) + "\n")
+
+            tmp_status = os.path.join(tmp, "trade_status.json")
+            orig_status = eng_mod.STATUS_FILE
+            try:
+                eng_mod.STATUS_FILE = tmp_status
+                eng.write_status_file()
+            finally:
+                eng_mod.STATUS_FILE = orig_status
+
+            with open(tmp_status, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+        self.assertEqual(len(data["paired_trades"]), 1)
+        grp = data["paired_trades"][0]
+        self.assertEqual(grp["status"], "CLOSED")
+        self.assertEqual(grp["open_timestamp"], "2026-11-16 19:08:42")
+        self.assertEqual(grp["open_price"], 27370.25)
+        self.assertEqual(grp["close_orders"][0]["timestamp"], "2026-11-17 09:03:43")
+        self.assertAlmostEqual(grp["total_pnl"], 416.78, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

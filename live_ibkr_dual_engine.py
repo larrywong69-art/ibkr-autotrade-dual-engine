@@ -212,7 +212,7 @@ def pair_executions_fifo(executions: List[Dict[str, Any]], fx_rate: float = 7.78
                     "symbol": sym,
                     "direction": "SHORT" if side == "BOT" else "LONG",
                     "status": "ORPHAN_CLOSE",
-                    "open_timestamp": ts,
+                    "open_timestamp": "",
                     "open_price": None,
                     "contracts": rem_int,
                     "closed_contracts": rem_int,
@@ -1768,6 +1768,48 @@ class LiveIBKRDualEngine:
             pos["tp2_price"] = tp_prices[1]
         return pos
 
+    @staticmethod
+    def _merge_with_historical_trades(live_trades: List[Dict[str, Any]], max_hist: int = 250) -> List[Dict[str, Any]]:
+        """將今日即時成交與 data/trades.jsonl 近期紀錄去重合併，使跨日持倉平倉時可對應原開倉單。"""
+        base_dir = os.path.dirname(os.path.abspath(STATUS_FILE))
+        hist_path = os.path.join(base_dir, "data", "trades.jsonl")
+        seen_ids = set()
+        merged: List[Dict[str, Any]] = []
+
+        def _exec_key(rec: Dict[str, Any]) -> str:
+            eid = str(rec.get("exec_id") or "").strip()
+            if eid:
+                return f"eid:{eid}"
+            return f"{rec.get('timestamp','')}|{rec.get('symbol','')}|{rec.get('side','')}|{rec.get('price','')}|{rec.get('contracts', rec.get('shares', ''))}"
+
+        for t in live_trades:
+            k = _exec_key(t)
+            if k not in seen_ids:
+                seen_ids.add(k)
+                merged.append(t)
+
+        if os.path.exists(hist_path):
+            try:
+                with open(hist_path, "r", encoding="utf-8") as hf:
+                    lines = hf.readlines()[-max_hist:]
+                for raw in lines:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        rec = json.loads(raw)
+                        if isinstance(rec, dict):
+                            k = _exec_key(rec)
+                            if k not in seen_ids:
+                                seen_ids.add(k)
+                                merged.append(rec)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        return merged
+
     def write_status_file(self):
         """實時將 6:4 資金池與雙策略實況寫入 trade_status.json"""
         pos_v43, pos_v50 = self.get_real_positions() if self.is_connected else (None, None)
@@ -1801,7 +1843,8 @@ class LiveIBKRDualEngine:
             key=lambda x: x.get("timestamp", ""),
             reverse=True
         )
-        paired_trades = pair_executions_fifo(all_recent_trades, fx_rate=fx)
+        merged_for_pairing = self._merge_with_historical_trades(all_recent_trades)
+        paired_trades = pair_executions_fifo(merged_for_pairing, fx_rate=fx)[:60]
 
         status = {
             "mode": "DUAL_ENGINE_PARALLEL",

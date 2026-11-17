@@ -536,7 +536,7 @@
           <thead class="bg-[var(--background)]/80 text-[var(--muted-foreground)] font-semibold border-b border-[var(--border)]">
             <tr>
               <th class="py-2.5 px-3">#</th>
-              <th class="py-2.5 px-3">成交時間</th>
+              <th class="py-2.5 px-3">交易時間 (開倉 / 平倉)</th>
               <th class="py-2.5 px-3">標的/策略</th>
               <th class="py-2.5 px-3">方向</th>
               <th class="py-2.5 px-3">訂單層級 / 狀態</th>
@@ -911,7 +911,7 @@
               symbol: sym,
               direction: side === 'BOT' ? 'SHORT' : 'LONG',
               status: 'ORPHAN_CLOSE',
-              open_timestamp: ts,
+              open_timestamp: '',
               open_price: null,
               contracts: remQty,
               closed_contracts: remQty,
@@ -1060,12 +1060,16 @@
           groupPnlHtml = `<span class="${pnlColor}">${formatSignedUsd(pnlVal)}</span>`;
         }
 
+        const openTimeHtml = g.open_timestamp
+          ? `<span class="text-[10px] text-[var(--muted-foreground)] mr-1">開倉</span>${escapeHtml(g.open_timestamp)}`
+          : '<span class="text-[11px] text-[var(--muted-foreground)]">早於查詢視窗</span>';
+
         // 開倉主單 (上層)
         const trParent = document.createElement('tr');
         trParent.className = 'bg-[var(--card)] hover:bg-[var(--accent)]/40 transition-colors';
         trParent.innerHTML = `
           <td class="py-2.5 px-3 text-[var(--muted-foreground)] font-mono font-bold">${idx + 1}</td>
-          <td class="py-2.5 px-3 font-mono text-[var(--foreground)]">${escapeHtml(g.open_timestamp || '-')}</td>
+          <td class="py-2.5 px-3 font-mono text-[var(--foreground)]">${openTimeHtml}</td>
           <td class="py-2.5 px-3">${symBadge}</td>
           <td class="py-2.5 px-3">${dirBadge}</td>
           <td class="py-2.5 px-3">${statusBadge}</td>
@@ -1075,12 +1079,10 @@
         `;
         tbody.appendChild(trParent);
 
-        // 平倉次級子單 (下層縮排，同組顯示)
+        // 平倉次級子單 (下層縮排，同組顯示；盈虧只顯示於主單，次單不重覆顯示)
         closeOrders.forEach((co, cIdx) => {
           const trChild = document.createElement('tr');
           trChild.className = 'bg-[var(--background)]/45 hover:bg-[var(--accent)]/30 transition-colors text-[11px] border-l-2 border-l-blue-500/40';
-          const coPnl = Number(co.pnl) || 0;
-          const coColor = coPnl > 0 ? 'text-emerald-400 font-semibold' : (coPnl < 0 ? 'text-rose-400 font-semibold' : 'text-[var(--muted-foreground)]');
           const subTag = closeOrders.length > 1 ? `次級平倉 #${cIdx + 1}` : '次級平倉單';
           const refText = co.order_ref ? ` <span class="text-[10px] text-[var(--muted-foreground)] font-mono">(${escapeHtml(co.order_ref)})</span>` : '';
           const closePriceStr = Number(co.close_price) > 0
@@ -1089,13 +1091,13 @@
 
           trChild.innerHTML = `
             <td class="py-2 px-3 text-center text-[var(--muted-foreground)] font-mono">↳</td>
-            <td class="py-2 px-3 font-mono text-[var(--muted-foreground)]">${escapeHtml(co.timestamp || '-')}</td>
+            <td class="py-2 px-3 font-mono text-[var(--muted-foreground)]"><span class="text-[10px] text-[var(--muted-foreground)]/80 mr-1">平倉</span>${escapeHtml(co.timestamp || '-')}</td>
             <td class="py-2 px-3 pl-5 text-[var(--muted-foreground)]">└ 平倉子單</td>
             <td class="py-2 px-3 text-[var(--muted-foreground)] font-medium">${escapeHtml(co.action_label || '平倉')}</td>
             <td class="py-2 px-3"><span class="px-1.5 py-0.5 rounded bg-[var(--background)] border border-[var(--border)] text-[10px] text-[var(--muted-foreground)]">${subTag}</span>${refText}</td>
             <td class="py-2 px-3 font-mono text-[var(--muted-foreground)]">${co.contracts || 1} 口</td>
             <td class="py-2 px-3 font-mono">${closePriceStr}</td>
-            <td class="py-2 px-3 text-right font-mono ${coColor}">${formatSignedUsd(coPnl)}</td>
+            <td class="py-2 px-3 text-right font-mono text-[var(--muted-foreground)]/60">—</td>
           `;
           tbody.appendChild(trChild);
         });
