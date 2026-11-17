@@ -19,7 +19,7 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from live_ibkr_dual_engine import LiveIBKRDualEngine, _IBKRWrapperNoiseFilter
+from live_ibkr_dual_engine import LiveIBKRDualEngine, _IBKRWrapperNoiseFilter, Direction
 from report_and_incident_manager import IncidentManager
 from daily_auto_audit_fixer import DailyAutoAuditFixer
 
@@ -203,6 +203,120 @@ class TestLiveEngineOrderHygiene(unittest.TestCase):
         ]
         self.eng.ensure_position_protection()
         self.assertEqual(set(self.cancelled_ids), {6568, 6570})
+
+    def test_partial_fill_grace_preserves_pending_entry_siblings_then_cleans_tail(self):
+        mes_pos = {"symbol": "MES", "direction": "SHORT", "contracts": 3, "entry_price": 7411.25, "current_price": 7410.0}
+        self.eng.get_real_positions = lambda: (mes_pos, None)
+        trades = [
+            _make_trade(105, "MES", "STP", "BUY", 3, 7416.50, "V93_MES_SL_TP1", parent_id=101, status="Submitted"),
+            _make_trade(102, "MES", "LMT", "SELL", 3, 7411.25, "V93_MES_ENTRY_TP2", parent_id=0, status="Submitted"),
+            _make_trade(103, "MES", "STP", "BUY", 3, 7416.50, "V93_MES_SL_TP2", parent_id=102, status="PreSubmitted"),
+            _make_trade(104, "MES", "LMT", "BUY", 3, 7395.25, "V93_MES_TP_TP2", parent_id=102, status="PreSubmitted"),
+        ]
+        self.eng.ib.openTrades.return_value = trades
+        # Within 15s partial-fill grace window: neither Parent 2 (102) nor SL1/SL2 should be cancelled
+        self.eng.ensure_position_protection()
+        self.assertEqual(self.cancelled_ids, [])
+
+        # Past 15s grace window: only Parent 2 tail (102) is cancelled cleanly (code 7008), active SL1 (105) remains
+        self.eng._entry_order_first_seen[102] = time.time() - 16.0
+        self.eng.ensure_position_protection()
+        self.assertEqual(self.cancelled_ids, [102])
+        self.assertEqual(self.eng.incident_mgr.record_incident.call_args.kwargs.get("code"), 7008)
+
+    def test_margin_guard_checks_both_symbols_and_uses_live_fx(self):
+        self.eng.account_id = "DU999999"
+        self.eng.currency = "HKD"
+        self.eng.usd_hkd_rate = 7.85
+        self.eng.pool_v43_usd = 20000.0
+        self.eng.engine_v93_mes.calculate_tranches.return_value = (1, 1, 0)
+
+        sig = SimpleNamespace(
+            direction=Direction.LONG,
+            contracts=5,
+            entry_price=7500.0,
+            sl_price=7495.0,
+            tp1_price=7507.75,
+            tp2_price=7515.50,
+            runner_price=None,
+            split_lots=None,
+        )
+
+        # net_liquidation <= 0 blocks new entries
+        self.eng.net_liquidation = 0.0
+        self.eng.available_funds = 30000.0
+        self.eng.place_v93_bracket_order("MES", sig)
+        self.assertEqual(self.placed_orders, [])
+
+        # With live FX 7.85 and 30,000 HKD (~$3,821 USD) available, 5 MES gets downsized to 2 lots (1800 * 2 <= 3821)
+        self.eng.net_liquidation = 250000.0
+        self.eng.available_funds = 30000.0
+        self.eng.place_v93_bracket_order("MES", sig)
+        self.assertEqual(sig.contracts, 2)
+        self.assertEqual(len(self.placed_orders), 6)  # 2 tranches * 3 orders, runner_price=None safe
+
+    def test_emergency_flat_sets_market_order_outside_rth(self):
+        self.eng.account_id = "DU999999"
+        self.eng.usd_hkd_rate = 7.78
+        self.eng.currency = "HKD"
+        self.eng.price_mes = 7415.0
+        self.eng.contract_mes = SimpleNamespace(symbol="MES", conId=815824257)
+        self.eng.contract_mnq = SimpleNamespace(symbol="MNQ", conId=815824267)
+        self.eng.ib.openTrades.return_value = []
+        self.eng.ib.positions.return_value = [
+            SimpleNamespace(contract=SimpleNamespace(symbol="MES", conId=815824257), position=-2, avgCost=37050.0)
+        ]
+        self.eng.write_status_file = lambda: None
+        self.eng.sync_account_and_market = lambda: None
+
+        res = self.eng.emergency_flat_symbol("MES", reason="測試盤外平倉")
+        self.assertEqual(res.get("status"), "ok")
+        self.assertTrue(res.get("executed"))
+        flat_orders = [o for sym, o in self.placed_orders if sym == "MES"]
+        self.assertEqual(len(flat_orders), 1)
+        self.assertIs(flat_orders[0].outsideRth, True)
+        self.assertEqual(flat_orders[0].tif, "GTC")
+
+    def test_live_breakeven_and_trailing_stop_moves_monotonically(self):
+        self.eng._active_trade_meta = {
+            "MES": {
+                "direction": "LONG",
+                "entry": 7500.0,
+                "init_sl": 7490.0,
+                "sl_dist": 10.0,
+                "tp1": 7515.50,
+                "tp2": 7531.00,
+                "be_active": False,
+                "trailing_active": False,
+            }
+        }
+        self.eng._last_sl_modify_ts = {}
+        sl_trade = _make_trade(888, "MES", "STP", "SELL", 1, 7490.0, "V93_MES_SL_RUNNER")
+        self.eng.ib.openTrades.return_value = [sl_trade]
+
+        # At TP1 (7516.00 >= 7515.50): move SL to BE +0.25 -> 7500.25
+        mes_tp1 = {"symbol": "MES", "direction": "LONG", "contracts": 1, "entry_price": 7500.0, "current_price": 7516.0}
+        self.eng.get_real_positions = lambda: (mes_tp1, None)
+        self.eng.ensure_position_protection()
+        self.assertEqual(sl_trade.order.auxPrice, 7500.25)
+        self.assertTrue(self.eng._active_trade_meta["MES"]["be_active"])
+
+        enriched = self.eng._enrich_pos_with_orders(dict(mes_tp1), [], self.eng._active_trade_meta.get("MES"))
+        self.assertTrue(enriched.get("is_trailing_active"))
+
+        # Past TP2 (7541.00 >= 7531.00): SL trails to 7515.50 + (7541 - 7531)*0.5 = 7520.50
+        self.eng._last_sl_modify_ts["MES"] = time.time() - 12.0
+        mes_tp2 = {"symbol": "MES", "direction": "LONG", "contracts": 1, "entry_price": 7500.0, "current_price": 7541.0}
+        self.eng.get_real_positions = lambda: (mes_tp2, None)
+        self.eng.ensure_position_protection()
+        self.assertEqual(sl_trade.order.auxPrice, 7520.50)
+
+        # Pullback to 7535.00: trailing SL NEVER steps backwards
+        self.eng._last_sl_modify_ts["MES"] = time.time() - 12.0
+        mes_pullback = {"symbol": "MES", "direction": "LONG", "contracts": 1, "entry_price": 7500.0, "current_price": 7535.0}
+        self.eng.get_real_positions = lambda: (mes_pullback, None)
+        self.eng.ensure_position_protection()
+        self.assertEqual(sl_trade.order.auxPrice, 7520.50)
 
 
 class TestIncidentManagerClassification(unittest.TestCase):

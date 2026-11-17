@@ -354,6 +354,8 @@ class LiveIBKRDualEngine:
         self._cancel_attempt_ts: Dict[int, float] = {}
         self._stop_breach_first_seen: Dict[str, float] = {}
         self._last_soft_stop_ts: Dict[str, float] = {}
+        self._active_trade_meta: Dict[str, Dict[str, Any]] = {}
+        self._last_sl_modify_ts: Dict[str, float] = {}
         self.status_message = "正在初始化雙引擎交易調度器..."
 
         # 自動重連與斷線守護狀態
@@ -750,11 +752,16 @@ class LiveIBKRDualEngine:
             except Exception:
                 pass
 
-            # 計算美金淨值與 6:4 資金池
+            # 計算美金淨值與 6:4 資金池（僅於淨值已同步 > 0 時啟用，避免啟動瞬間誤用假設淨值）
             usd_rate = self.usd_hkd_rate if self.currency == "HKD" else 1.0
-            self.equity_usd_total = max(30000.0, self.net_liquidation / usd_rate)
-            self.pool_v43_usd = self.equity_usd_total * 0.60
-            self.pool_v50_usd = self.equity_usd_total * 0.40
+            if self.net_liquidation > 0:
+                self.equity_usd_total = self.net_liquidation / usd_rate
+                self.pool_v43_usd = self.equity_usd_total * 0.60
+                self.pool_v50_usd = self.equity_usd_total * 0.40
+            else:
+                self.equity_usd_total = 0.0
+                self.pool_v43_usd = 0.0
+                self.pool_v50_usd = 0.0
 
             # 每 60 秒記錄一次官方淨值歷史快照
             now_ts = time.time()
@@ -1106,6 +1113,61 @@ class LiveIBKRDualEngine:
 
         return [parent, sl_order, tp_order]
 
+    def _apply_live_margin_guard(self, symbol: str, signal: TradeSignal) -> bool:
+        """統一雙標的開倉前資金與保證金校驗 (含防飢餓配額保留、真實匯率折算與雙向降口保護)"""
+        net_liq = float(getattr(self, "net_liquidation", 0.0) or 0.0)
+        if net_liq <= 0:
+            logger.warning(f"⏸️ [資金未就緒] 尚未同步 IBKR 帳戶淨值，暫緩 {symbol} 開倉。")
+            return False
+
+        avail_funds = float(getattr(self, "available_funds", 0.0) or 0.0)
+        if avail_funds <= 0:
+            logger.warning(f"🛑 [可用資金為零] AvailableFunds ({avail_funds:.2f}) 不足，拒絕 {symbol} 開倉。")
+            return False
+
+        cur = getattr(self, "currency", "HKD")
+        fx = float(getattr(self, "usd_hkd_rate", 7.78) or 7.78) if cur == "HKD" else 1.0
+        avail_usd = avail_funds / fx
+        est_margin_per_contract = 2000.0 if symbol == "MNQ" else 1800.0
+        reserve_floor = (float(getattr(self, "pool_v43_usd", 0.0) or 0.0) * 0.20) if symbol == "MNQ" else 0.0
+        usable_usd = avail_usd - reserve_floor
+
+        orig_qty = int(signal.contracts)
+        req_margin = orig_qty * est_margin_per_contract
+        if req_margin <= usable_usd:
+            return True
+
+        affordable = int(usable_usd // est_margin_per_contract)
+        if affordable >= 1:
+            signal.contracts = min(orig_qty, affordable)
+            logger.warning(
+                f"⚠️ [保證金防飢餓] 可用資金 (${avail_usd:,.0f}) 偏緊，自動將 V9.3 {symbol} 開倉由 {orig_qty} 口降至 {signal.contracts} 口"
+                + (f"以保障 MES 配額 (${reserve_floor:,.0f} USD)。" if reserve_floor > 0 else "。")
+            )
+            self.incident_mgr.record_incident(
+                severity="WARNING",
+                category="MARGIN",
+                code=4001,
+                message=f"V9.3 保證金自適應調整: {symbol} 開倉口數由 {orig_qty} 口降至 {signal.contracts} 口",
+                details={"symbol": symbol, "avail_usd": round(avail_usd, 2), "floor_usd": round(reserve_floor, 2)},
+                source="GATEKEEPER"
+            )
+            return True
+
+        logger.critical(
+            f"🛑 [保證金安全攔截] 拒絕 V9.3 {symbol} 開倉！可用資金 (${avail_usd:,.0f} USD) 不足以支應 1 口保證金 (${est_margin_per_contract:,.0f} USD)"
+            + (f" 與 MES 保留金 (${reserve_floor:,.0f} USD)。" if reserve_floor > 0 else "。")
+        )
+        self.incident_mgr.record_incident(
+            severity="ERROR",
+            category="MARGIN",
+            code=4002,
+            message=f"V9.3 保證金安全攔截: 拒絕 {symbol} 開倉！可用資金 (${avail_usd:,.0f} USD) 不足",
+            details={"symbol": symbol, "avail_usd": round(avail_usd, 2), "floor_usd": round(reserve_floor, 2)},
+            source="GATEKEEPER"
+        )
+        return False
+
     def place_v93_bracket_order(self, symbol: str, signal: TradeSignal):
         """
         向 IBKR 下發 V9.3 旗艦雙引擎整數自適應實盤版專屬 Bracket 訂單 (100% 整數口分梯獨立 Bracket + 0.82x ATR 緊密止損)
@@ -1116,57 +1178,41 @@ class LiveIBKRDualEngine:
         if not target_contract:
             return
 
-        # -------------------------------------------------------------
-        # 若為 MNQ，執行核心防飢餓保護機制 (Anti-Starvation Gatekeeper)
-        # -------------------------------------------------------------
-        if symbol == "MNQ":
-            usd_rate = 7.78 if self.currency == "HKD" else 1.0
-            avail_usd = self.available_funds / usd_rate
-            est_margin_per_contract = 2000.0
-            mes_reserved_floor = self.pool_v43_usd * 0.20
-
-            req_margin = signal.contracts * est_margin_per_contract
-            if (avail_usd - req_margin) < mes_reserved_floor:
-                if signal.contracts > 1:
-                    logger.warning(f"⚠️ [保證金防飢餓] 可用資金 (${avail_usd:,.0f}) 偏緊，自動將 V9.3 MNQ 開倉由 {signal.contracts} 口降至 1 口以保障 MES 配額。")
-                    self.incident_mgr.record_incident(
-                        severity="WARNING",
-                        category="MARGIN",
-                        code=4001,
-                        message=f"V9.3 保證金防飢餓調整: MNQ 開倉口數由 {signal.contracts} 口自適應降至 1 口以保留 MES 專屬維持金 (${mes_reserved_floor:,.0f} USD)",
-                        details={"avail_usd": round(avail_usd, 2), "floor_usd": round(mes_reserved_floor, 2)},
-                        source="GATEKEEPER"
-                    )
-                    signal.contracts = 1
-                    req_margin = 1 * est_margin_per_contract
-
-                if (avail_usd - req_margin) < mes_reserved_floor:
-                    logger.critical(f"🛑 [保證金安全攔截] 拒絕 V9.3 MNQ 開倉！可用資金 (${avail_usd:,.0f}) 需全額優先保留給 MES (${mes_reserved_floor:,.0f})。")
-                    self.incident_mgr.record_incident(
-                        severity="ERROR",
-                        category="MARGIN",
-                        code=4002,
-                        message=f"V9.3 保證金安全攔截: 拒絕 MNQ 開倉！可用資金 (${avail_usd:,.0f} USD) 需全額優先保留給 MES (${mes_reserved_floor:,.0f} USD)",
-                        details={"avail_usd": round(avail_usd, 2), "floor_usd": round(mes_reserved_floor, 2)},
-                        source="GATEKEEPER"
-                    )
-                    return
+        if not self._apply_live_margin_guard(symbol, signal):
+            return
 
         direction_action = "BUY" if signal.direction == Direction.LONG else "SELL"
         exit_action = "SELL" if signal.direction == Direction.LONG else "BUY"
         qty = int(signal.contracts)
+        if qty <= 0:
+            return
 
         entry_p = self._round_to_tick(signal.entry_price, 0.25)
         sl_p = self._round_to_tick(signal.sl_price, 0.25)
         tp1_p = self._round_to_tick(signal.tp1_price, 0.25)
         tp2_p = self._round_to_tick(signal.tp2_price, 0.25)
         runner_calc = entry_p + 5.50 * abs(entry_p - sl_p) if signal.direction == Direction.LONG else entry_p - 5.50 * abs(entry_p - sl_p)
-        runner_p = self._round_to_tick(getattr(signal, "runner_price", runner_calc), 0.25)
+        raw_runner = getattr(signal, "runner_price", None)
+        runner_p = self._round_to_tick(raw_runner if raw_runner is not None else runner_calc, 0.25)
 
         engine_inst = self.engine_v93_mes if symbol == "MES" else self.engine_v93_mnq
         cnt_a, cnt_b, cnt_c = getattr(signal, "split_lots", None) or engine_inst.calculate_tranches(qty)
         if cnt_a + cnt_b + cnt_c != qty:
             cnt_a, cnt_b, cnt_c = engine_inst.calculate_tranches(qty)
+
+        if hasattr(self, "_active_trade_meta"):
+            self._active_trade_meta[symbol] = {
+                "direction": "LONG" if signal.direction == Direction.LONG else "SHORT",
+                "entry": entry_p,
+                "init_sl": sl_p,
+                "sl_dist": max(1.0, abs(entry_p - sl_p)),
+                "tp1": tp1_p,
+                "tp2": tp2_p,
+                "runner": runner_p,
+                "be_active": False,
+                "trailing_active": False,
+                "opened_at": time.time(),
+            }
 
         prefix = f"V93_{symbol}"
         logger.info(
@@ -1338,11 +1384,15 @@ class LiveIBKRDualEngine:
             qty = int(pos.get("contracts", 0)) if pos else 0
 
             # -----------------------------------------------------------------
-            # A. 空倉檢查：清理無主殘留出場單 & 超時未成交進場單 (> 20 分鐘)
+            # A. 空倉檢查：清理無主殘留出場單 & 超時未成交進場單 (> 15 分鐘，對齊 3 根 5m K 棒)
             # -----------------------------------------------------------------
             if qty <= 0:
                 if hasattr(self, "_stop_breach_first_seen"):
                     self._stop_breach_first_seen.pop(symbol, None)
+                if hasattr(self, "_active_trade_meta"):
+                    self._active_trade_meta.pop(symbol, None)
+                if hasattr(self, "_last_sl_modify_ts"):
+                    self._last_sl_modify_ts.pop(symbol, None)
                 cancelled_any = False
                 for t in sym_trades:
                     oid = int(getattr(t.order, "orderId", 0) or 0)
@@ -1357,10 +1407,10 @@ class LiveIBKRDualEngine:
                             cancelled_any = True
                     elif int(getattr(t.order, "parentId", 0) or 0) == 0:
                         first_seen = self._entry_order_first_seen.setdefault(oid, now_ts)
-                        if now_ts - first_seen > 1200.0:
+                        if now_ts - first_seen > 900.0:
                             if self._cancel_trade_safely(
                                 t, symbol, 7004,
-                                f"進場限價單超過 20 分鐘未成交，撤銷避免阻擋後續訊號"
+                                f"進場限價單超過 15 分鐘 (3 根 K 棒) 未成交，撤銷避免阻擋後續訊號"
                             ):
                                 self._entry_order_first_seen.pop(oid, None)
                                 cancelled_any = True
@@ -1368,22 +1418,32 @@ class LiveIBKRDualEngine:
                     self.ib.sleep(0.3)
                 continue
 
-            # 有持倉時重置進場計時器
-            for t in sym_trades:
-                self._entry_order_first_seen.pop(int(getattr(t.order, "orderId", 0) or 0), None)
-
             direction = pos.get("direction", "LONG")
             exit_action = "SELL" if direction == "LONG" else "BUY"
 
             # -----------------------------------------------------------------
-            # B. 有持倉檢查：撤銷所有錯誤方向掛單 (例如持有 SHORT 卻仍有 SELL 止損/止盈單)
+            # B. 有持倉檢查：撤銷錯誤方向掛單，對進行中的分梯 _ENTRY_ 父單保留 15 秒成交寬限期
             # -----------------------------------------------------------------
             wrong_dir_trades = [t for t in sym_trades if getattr(t.order, "action", "") != exit_action]
             cancelled_dirty = False
             for t in wrong_dir_trades:
+                oid = int(getattr(t.order, "orderId", 0) or 0)
+                pid = int(getattr(t.order, "parentId", 0) or 0)
                 act = getattr(t.order, "action", "")
                 otype = getattr(t.order, "orderType", "")
-                oref = getattr(t.order, "orderRef", "")
+                oref = str(getattr(t.order, "orderRef", "") or "")
+                if pid == 0 and "_ENTRY_" in oref:
+                    first_seen = self._entry_order_first_seen.setdefault(oid, now_ts)
+                    if (now_ts - first_seen) < 15.0:
+                        continue
+                    if self._cancel_trade_safely(
+                        t, symbol, 7008,
+                        f"分梯進場限價單部分成交後逾時 15 秒仍有殘餘未成交 ({otype} {act} {t.order.totalQuantity}口, ref={oref})，自動撤銷尾部進場掛單"
+                    ):
+                        self._entry_order_first_seen.pop(oid, None)
+                        cancelled_dirty = True
+                    continue
+
                 if self._cancel_trade_safely(
                     t, symbol, 7002,
                     f"持倉為 {direction} (應平倉方向={exit_action})，撤銷反向衝突掛單 ({otype} {act} {t.order.totalQuantity}口, ref={oref})"
@@ -1394,11 +1454,21 @@ class LiveIBKRDualEngine:
                 sym_trades = self._get_symbol_open_trades(symbol)
 
             # -----------------------------------------------------------------
-            # C. 檢查同方向平倉掛單是否超額 (避免雙重停利或反手多賣變反向開倉)
+            # C. 檢查同方向平倉掛單是否超額 (排除尚在等待父單成交的未啟動子單)
             # -----------------------------------------------------------------
+            pending_entry_parent_ids = {
+                int(getattr(t.order, "orderId", 0) or 0)
+                for t in sym_trades
+                if int(getattr(t.order, "parentId", 0) or 0) == 0 and getattr(t.order, "action", "") != exit_action
+            }
             exit_trades = [t for t in sym_trades if getattr(t.order, "action", "") == exit_action]
-            sl_trades = [t for t in exit_trades if getattr(t.order, "orderType", "") in ("STP", "STP PRT", "TRAIL")]
-            tp_trades = [t for t in exit_trades if getattr(t.order, "orderType", "") == "LMT"]
+            active_exit_trades = [
+                t for t in exit_trades
+                if int(getattr(t.order, "parentId", 0) or 0) not in pending_entry_parent_ids
+            ]
+            sl_trades = [t for t in active_exit_trades if getattr(t.order, "orderType", "") in ("STP", "STP PRT", "TRAIL")]
+            tp_trades = [t for t in active_exit_trades if getattr(t.order, "orderType", "") == "LMT"]
+            all_sl_trades = [t for t in exit_trades if getattr(t.order, "orderType", "") in ("STP", "STP PRT", "TRAIL")]
 
             sl_qty = sum(int(t.order.totalQuantity) for t in sl_trades)
             tp_qty = sum(int(t.order.totalQuantity) for t in tp_trades)
@@ -1430,9 +1500,19 @@ class LiveIBKRDualEngine:
             if trimmed_sl or trimmed_tp:
                 self.ib.sleep(0.3)
                 sym_trades = self._get_symbol_open_trades(symbol)
+                pending_entry_parent_ids = {
+                    int(getattr(t.order, "orderId", 0) or 0)
+                    for t in sym_trades
+                    if int(getattr(t.order, "parentId", 0) or 0) == 0 and getattr(t.order, "action", "") != exit_action
+                }
                 exit_trades = [t for t in sym_trades if getattr(t.order, "action", "") == exit_action]
-                sl_trades = [t for t in exit_trades if getattr(t.order, "orderType", "") in ("STP", "STP PRT", "TRAIL")]
-                tp_trades = [t for t in exit_trades if getattr(t.order, "orderType", "") == "LMT"]
+                active_exit_trades = [
+                    t for t in exit_trades
+                    if int(getattr(t.order, "parentId", 0) or 0) not in pending_entry_parent_ids
+                ]
+                sl_trades = [t for t in active_exit_trades if getattr(t.order, "orderType", "") in ("STP", "STP PRT", "TRAIL")]
+                tp_trades = [t for t in active_exit_trades if getattr(t.order, "orderType", "") == "LMT"]
+                all_sl_trades = [t for t in exit_trades if getattr(t.order, "orderType", "") in ("STP", "STP PRT", "TRAIL")]
                 sl_qty = sum(int(t.order.totalQuantity) for t in sl_trades)
                 tp_qty = sum(int(t.order.totalQuantity) for t in tp_trades)
 
@@ -1446,7 +1526,7 @@ class LiveIBKRDualEngine:
                 self._last_soft_stop_ts = {}
 
             sl_prices = []
-            for t in sl_trades:
+            for t in (sl_trades or all_sl_trades):
                 try:
                     ap = float(getattr(t.order, "auxPrice", 0.0) or 0.0)
                     if ap > 0:
@@ -1502,6 +1582,10 @@ class LiveIBKRDualEngine:
                 self._stop_breach_first_seen.pop(symbol, None)
 
             if sl_qty >= qty:
+                self._update_live_breakeven_and_trailing(symbol, contract, pos, sl_trades, now_ts)
+                continue
+
+            if sl_qty == 0 and pending_entry_parent_ids and sum(int(t.order.totalQuantity) for t in all_sl_trades) >= qty:
                 continue
 
             last_ts = self._last_protect_ts.get(symbol, 0.0)
@@ -1610,6 +1694,116 @@ class LiveIBKRDualEngine:
                 details={"symbol": symbol, "qty": qty, "sl_price": sl_p, "need_tp": need_tp, "order_ids": placed_ids}
             )
 
+    def _update_live_breakeven_and_trailing(
+        self,
+        symbol: str,
+        contract: Any,
+        pos: Dict[str, Any],
+        sl_trades: List[Any],
+        now_ts: float
+    ):
+        """TP1(1.55R) 觸及後將剩餘倉位 STP 單調移至保本 (BE +/- 0.25)，TP2(3.10R) 後啟動 Runner 追蹤止盈"""
+        if not sl_trades:
+            return
+        entry_p = float(pos.get("entry_price") or 0.0)
+        cur_mkt = float(pos.get("current_price") or 0.0)
+        direction = pos.get("direction", "LONG")
+        if entry_p <= 0 or cur_mkt <= 0:
+            return
+
+        mod_map = getattr(self, "_last_sl_modify_ts", None)
+        if mod_map is None:
+            self._last_sl_modify_ts = {}
+            mod_map = self._last_sl_modify_ts
+        if now_ts - mod_map.get(symbol, 0.0) < 10.0:
+            return
+
+        meta_map = getattr(self, "_active_trade_meta", None)
+        if meta_map is None:
+            self._active_trade_meta = {}
+            meta_map = self._active_trade_meta
+        meta = meta_map.get(symbol)
+
+        sl_prices = [
+            float(getattr(t.order, "auxPrice", 0.0) or 0.0)
+            for t in sl_trades
+            if float(getattr(t.order, "auxPrice", 0.0) or 0.0) > 0
+        ]
+        if not sl_prices:
+            return
+
+        if not meta or meta.get("direction") != direction:
+            init_sl = min(sl_prices) if direction == "LONG" else max(sl_prices)
+            inferred_dist = (entry_p - init_sl) if direction == "LONG" else (init_sl - entry_p)
+            if inferred_dist < 2.0 or inferred_dist > 250.0:
+                return
+            meta = {
+                "direction": direction,
+                "entry": entry_p,
+                "init_sl": init_sl,
+                "sl_dist": inferred_dist,
+                "tp1": self._round_to_tick(entry_p + (1.55 * inferred_dist if direction == "LONG" else -1.55 * inferred_dist), 0.25),
+                "tp2": self._round_to_tick(entry_p + (3.10 * inferred_dist if direction == "LONG" else -3.10 * inferred_dist), 0.25),
+                "be_active": False,
+                "trailing_active": False,
+            }
+            meta_map[symbol] = meta
+
+        tp1_p = float(meta.get("tp1") or 0.0)
+        tp2_p = float(meta.get("tp2") or 0.0)
+        if tp1_p <= 0 or tp2_p <= 0:
+            return
+
+        if direction == "LONG":
+            tp1_hit = bool(meta.get("be_active")) or (cur_mkt >= tp1_p)
+            tp2_hit = bool(meta.get("trailing_active")) or (cur_mkt >= tp2_p)
+            if not tp1_hit:
+                return
+            be_target = self._round_to_tick(entry_p + 0.25, 0.25)
+            desired_sl = be_target
+            if tp2_hit:
+                trail_sl = self._round_to_tick(tp1_p + max(0.0, cur_mkt - tp2_p) * 0.5, 0.25)
+                desired_sl = max(be_target, trail_sl)
+            desired_sl = min(desired_sl, self._round_to_tick(cur_mkt - 0.50, 0.25))
+        else:
+            tp1_hit = bool(meta.get("be_active")) or (cur_mkt <= tp1_p)
+            tp2_hit = bool(meta.get("trailing_active")) or (cur_mkt <= tp2_p)
+            if not tp1_hit:
+                return
+            be_target = self._round_to_tick(entry_p - 0.25, 0.25)
+            desired_sl = be_target
+            if tp2_hit:
+                trail_sl = self._round_to_tick(tp1_p - max(0.0, tp2_p - cur_mkt) * 0.5, 0.25)
+                desired_sl = min(be_target, trail_sl)
+            desired_sl = max(desired_sl, self._round_to_tick(cur_mkt + 0.50, 0.25))
+
+        meta["be_active"] = True
+        if tp2_hit:
+            meta["trailing_active"] = True
+
+        modified_ids = []
+        for t in sl_trades:
+            cur_sl = float(getattr(t.order, "auxPrice", 0.0) or 0.0)
+            if cur_sl <= 0:
+                continue
+            improved = (desired_sl >= cur_sl + 0.25) if direction == "LONG" else (desired_sl <= cur_sl - 0.25)
+            if not improved:
+                continue
+            try:
+                t.order.auxPrice = desired_sl
+                t.order.outsideRth = True
+                self.ib.placeOrder(contract, t.order)
+                modified_ids.append(getattr(t.order, "orderId", 0))
+            except Exception as me:
+                logger.warning(f"移動 {symbol} 保本/追蹤止損失敗: {me}")
+
+        if modified_ids:
+            mod_map[symbol] = now_ts
+            stage = "追蹤止盈" if tp2_hit else "保本保護 (BE)"
+            logger.info(
+                f"⚡ [{stage} 啟動] {symbol} {direction} 現價 {cur_mkt:.2f} 已達目標，將 {len(modified_ids)} 張 STP 單調移至 {desired_sl:.2f} (OrderIds: {modified_ids})"
+            )
+
     def _can_query_hist_bar(self, symbol: str, now_ts: float) -> bool:
         """檢查是否允許發起 5m 歷史 K 棒查詢（失敗指數退避 + 同 5 分鐘週期去重）"""
         streak_map = getattr(self, "_hist_fail_streak", {})
@@ -1658,6 +1852,8 @@ class LiveIBKRDualEngine:
         """共用 K 棒策略評估器：強制僅評估已收盤 5m K 棒 (len-2)，且每 5 分鐘週期最多評估一次"""
         if pos is not None or len(orders) > 0:
             return
+        if float(getattr(self, "net_liquidation", 0.0) or 0.0) <= 0 or float(pool_usd or 0.0) <= 0:
+            return
         now_ts = time.time()
         if not self._can_query_hist_bar(symbol, now_ts):
             return
@@ -1670,7 +1866,7 @@ class LiveIBKRDualEngine:
                 barSizeSetting='5 mins',
                 whatToShow='TRADES',
                 useRTH=False,
-                formatDate=1,
+                formatDate=2,
                 timeout=25
             )
             if not bars or len(bars) < 30:
@@ -1684,7 +1880,7 @@ class LiveIBKRDualEngine:
 
             df = util.df(bars)
             if 'date' in df.columns:
-                df['date'] = pd.to_datetime(df['date'])
+                df['date'] = pd.to_datetime(df['date'], utc=True)
                 df = df.set_index('date')
             df['atr14'] = calculate_atr(df, period=14).fillna(fallback_atr)
             df['atr'] = df['atr14']
@@ -1796,6 +1992,8 @@ class LiveIBKRDualEngine:
                     flat_action = "SELL" if p.position > 0 else "BUY"
                     flat_qty = abs(int(p.position))
                     mo = MarketOrder(flat_action, flat_qty)
+                    mo.tif = "GTC"
+                    mo.outsideRth = True
                     trade = self.ib.placeOrder(target_contract, mo)
                     executed_flat = True
                     detail_str = f"{flat_action} {flat_qty} 口 {symbol} (原持倉: {p.position})"
@@ -1903,7 +2101,11 @@ class LiveIBKRDualEngine:
                 logger.warning(f"讀取控制檔案異常: {e}")
 
     @staticmethod
-    def _enrich_pos_with_orders(pos: Optional[Dict[str, Any]], orders: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def _enrich_pos_with_orders(
+        pos: Optional[Dict[str, Any]],
+        orders: List[Dict[str, Any]],
+        trade_meta: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
         """將實際 IBKR 掛單中的止損價與止盈價同步至持倉物件供儀表板顯示"""
         if not pos:
             return None
@@ -1922,6 +2124,8 @@ class LiveIBKRDualEngine:
             pos["tp1_price"] = tp_prices[0]
         if len(tp_prices) >= 2:
             pos["tp2_price"] = tp_prices[1]
+        if trade_meta:
+            pos["is_trailing_active"] = bool(trade_meta.get("be_active") or trade_meta.get("trailing_active"))
         return pos
 
     @staticmethod
@@ -1970,8 +2174,9 @@ class LiveIBKRDualEngine:
         """實時將 6:4 資金池與雙策略實況寫入 trade_status.json"""
         pos_v43, pos_v50 = self.get_real_positions() if self.is_connected else (None, None)
         orders_v43, orders_v50 = self.get_real_open_orders() if self.is_connected else ([], [])
-        pos_v43 = self._enrich_pos_with_orders(pos_v43, orders_v43)
-        pos_v50 = self._enrich_pos_with_orders(pos_v50, orders_v50)
+        meta_map = getattr(self, "_active_trade_meta", {})
+        pos_v43 = self._enrich_pos_with_orders(pos_v43, orders_v43, meta_map.get("MES"))
+        pos_v50 = self._enrich_pos_with_orders(pos_v50, orders_v50, meta_map.get("MNQ"))
         trades_v43, trades_v50 = self.get_real_executions() if self.is_connected else ([], [])
 
         # 若官方 accountSummary/reqPnL 尚未回傳，改由即時持倉與今日成交紀錄加總并折算 HKD 補齊損益
