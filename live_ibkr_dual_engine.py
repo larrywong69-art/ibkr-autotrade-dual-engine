@@ -367,6 +367,9 @@ class LiveIBKRDualEngine:
         # 市場行情數據訂閱狀態 (1 = 實時 Type 1, 3 = 延遲 Type 3)
         self.market_data_type = 1
         self.market_data_status = "REAL_TIME"
+        self._competing_session_ts: float = 0.0
+        self._last_10197_log_ts: float = 0.0
+        self._last_live_quote_sig: Optional[Tuple[float, float, float, float, float, float]] = None
 
         # 異常稽核與每日結算報告管理器
         self.incident_mgr = IncidentManager()
@@ -419,6 +422,19 @@ class LiveIBKRDualEngine:
         elif error_code == 10167:
             self.market_data_type = 3
             self.market_data_status = "DELAYED"
+        elif error_code == 10197:
+            now_ts = time.time()
+            self._competing_session_ts = now_ts
+            self.market_data_status = "COMPETING_SESSION"
+            self.status_message = (
+                "⚠️ IBKR 行情被其他裝置登入搶佔 (代碼 10197)：請關閉手機 IBKR Mobile / 網頁 Client Portal / 其他 TWS，關閉後報價會自動恢復。"
+            )
+            if now_ts - getattr(self, "_last_10197_log_ts", 0.0) >= 120.0:
+                self._last_10197_log_ts = now_ts
+                logger.warning(
+                    "⚠️ [行情工作階段衝突 10197] IBKR 回報 No market data during competing live session，"
+                    "代表另一裝置正同時使用相同帳號查看行情；已暫緩新開倉，請關閉手機 App / 網頁版後恢復。"
+                )
         elif error_code == 162 and "different IP address" in error_string.lower():
             self.status_message = "⚠️ 偵測到另一裝置 (如手機 IBKR Mobile 或網頁) 正在登入該帳戶，搶奪了連線權限！請退出手機 App 並重啟 Gateway。"
             logger.warning(f"⚠️ [IP 衝突攔截] 收到 IBKR 代碼 162: {error_string}。偵測到另一裝置正在連線同一帳號，導致本機 Session IP 衝突。")
@@ -810,9 +826,29 @@ class LiveIBKRDualEngine:
             if self.ticker_mnq.ask and not math.isnan(self.ticker_mnq.ask):
                 self.ask_mnq = round(float(self.ticker_mnq.ask), 2)
 
-        # 4. 同步當前報價數據流狀態 (Type 1 實時 vs Type 3 延遲)
-        if self.ticker_mes and hasattr(self.ticker_mes, "marketDataType") and self.ticker_mes.marketDataType > 0:
+        # 4. 同步當前報價數據流狀態 (優先保留 10197 工作階段衝突警告，直到新報價到達或逾時清除)
+        quote_sig = (
+            float(getattr(self, "price_mes", 0.0) or 0.0),
+            float(getattr(self, "bid_mes", 0.0) or 0.0),
+            float(getattr(self, "ask_mes", 0.0) or 0.0),
+            float(getattr(self, "price_mnq", 0.0) or 0.0),
+            float(getattr(self, "bid_mnq", 0.0) or 0.0),
+            float(getattr(self, "ask_mnq", 0.0) or 0.0),
+        )
+        prev_sig = getattr(self, "_last_live_quote_sig", None)
+        comp_ts = float(getattr(self, "_competing_session_ts", 0.0) or 0.0)
+        now_sync = time.time()
+        if comp_ts > 0.0 and prev_sig is not None and quote_sig != prev_sig and (now_sync - comp_ts) >= 2.0:
+            self._competing_session_ts = 0.0
+            comp_ts = 0.0
+        self._last_live_quote_sig = quote_sig
+
+        if comp_ts > 0.0 and (now_sync - comp_ts) < 90.0:
+            self.market_data_status = "COMPETING_SESSION"
+        elif self.ticker_mes and hasattr(self.ticker_mes, "marketDataType") and self.ticker_mes.marketDataType > 0:
             self.market_data_type = self.ticker_mes.marketDataType
+            self.market_data_status = "REAL_TIME" if self.market_data_type == 1 else "DELAYED"
+        elif self.market_data_status == "COMPETING_SESSION":
             self.market_data_status = "REAL_TIME" if self.market_data_type == 1 else "DELAYED"
 
     def get_real_positions(self) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
@@ -1855,6 +1891,8 @@ class LiveIBKRDualEngine:
             return
         if float(getattr(self, "net_liquidation", 0.0) or 0.0) <= 0 or float(pool_usd or 0.0) <= 0:
             return
+        if getattr(self, "market_data_status", "REAL_TIME") == "COMPETING_SESSION":
+            return
         now_ts = time.time()
         if not self._can_query_hist_bar(symbol, now_ts):
             return
@@ -2228,7 +2266,15 @@ class LiveIBKRDualEngine:
             # 市場行情數據流狀態
             "market_data_type": self.market_data_type,
             "market_data_status": self.market_data_status,
-            "market_data_desc": "🟢 實時報價 (Type 1)" if self.market_data_status == "REAL_TIME" else "🟡 延遲報價 (Type 3 - 待重啟 Gateway 刷新)",
+            "market_data_desc": (
+                "🔴 行情被他端搶佔 (10197 - 請關閉手機App/網頁Portal)"
+                if self.market_data_status == "COMPETING_SESSION"
+                else (
+                    "🟢 實時報價 (Type 1)"
+                    if self.market_data_status == "REAL_TIME"
+                    else "🟡 延遲報價 (Type 3 - 待重啟 Gateway 刷新)"
+                )
+            ),
 
             # 全局帳戶總覽（Unrealized / Realized 統一以 HKD 提供）
             "equity": self.net_liquidation,

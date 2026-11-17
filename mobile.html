@@ -581,7 +581,11 @@
       const mktDot = document.getElementById("mkt-data-dot");
       const mktText = document.getElementById("mkt-data-text");
       if (mktPill && mktDot && mktText) {
-        if (data.market_data_status === "REAL_TIME" || data.market_data_type === 1) {
+        if (data.market_data_status === "COMPETING_SESSION") {
+          mktPill.className = "flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-semibold bg-rose-500/15 text-rose-400 border border-rose-500/30";
+          mktDot.className = "w-1.5 h-1.5 rounded-full bg-rose-400";
+          mktText.textContent = "他端搶佔(10197)";
+        } else if (data.market_data_status === "REAL_TIME" || (!data.market_data_status && data.market_data_type === 1)) {
           mktPill.className = "flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25";
           mktDot.className = "w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse";
           mktText.textContent = "CME 實時";

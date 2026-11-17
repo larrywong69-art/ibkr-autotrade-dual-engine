@@ -1202,7 +1202,9 @@
           if (data.market_data_desc) {
             mktBadge.innerText = data.market_data_desc;
           }
-          if (data.market_data_status === 'REAL_TIME' || data.market_data_type === 1) {
+          if (data.market_data_status === 'COMPETING_SESSION') {
+            mktBadge.className = 'px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-500/15 text-rose-400 border border-rose-500/30';
+          } else if (data.market_data_status === 'REAL_TIME' || (!data.market_data_status && data.market_data_type === 1)) {
             mktBadge.className = 'px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25';
           } else {
             mktBadge.className = 'px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/25';

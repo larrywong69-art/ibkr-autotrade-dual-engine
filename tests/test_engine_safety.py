@@ -973,6 +973,96 @@ class TestDailyAutoAuditFixer(unittest.TestCase):
             notifier.bot_token = orig_token
             notifier.chat_id = orig_chat_id
 
+    def test_competing_session_10197_throttles_halts_opens_and_recovers(self):
+        import tempfile
+        import types
+        import report_and_incident_manager as rim
+        import live_ibkr_dual_engine as eng_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            orig_jsonl = rim.INCIDENTS_JSONL
+            orig_log = rim.INCIDENTS_LOG
+            rim.INCIDENTS_JSONL = os.path.join(tmp, "incidents.jsonl")
+            rim.INCIDENTS_LOG = os.path.join(tmp, "incidents.log")
+            try:
+                mgr = rim.IncidentManager()
+                mgr._rate_limit_ts = {}
+                with unittest.mock.patch.object(mgr, "record_incident", wraps=mgr.record_incident) as rec_mock:
+                    mgr.handle_ibkr_error_event(1, 10197, "No market data during competing live session")
+                    mgr.handle_ibkr_error_event(2, 10197, "No market data during competing live session")
+                    self.assertEqual(rec_mock.call_count, 1)
+                    self.assertIn("10197", rec_mock.call_args.kwargs["message"])
+
+                eng = eng_mod.LiveIBKRDualEngine.__new__(eng_mod.LiveIBKRDualEngine)
+                eng.incident_mgr = mgr
+                eng.account_id = "DU123456"
+                eng.currency = "HKD"
+                eng.usd_hkd_rate = 7.78
+                eng.net_liquidation = 1000000.0
+                eng.cash_balance = 950000.0
+                eng.available_funds = 900000.0
+                eng.init_margin_req = 50000.0
+                eng.realized_pnl = 0.0
+                eng.unrealized_pnl = 0.0
+                eng.last_snapshot_time = time.time()
+                eng.market_data_type = 1
+                eng.market_data_status = "REAL_TIME"
+                eng._competing_session_ts = 0.0
+                eng._last_10197_log_ts = 0.0
+                eng._last_live_quote_sig = None
+                eng.price_mes = 7400.0
+                eng.bid_mes = 7399.75
+                eng.ask_mes = 7400.25
+                eng.price_mnq = 27100.0
+                eng.bid_mnq = 27099.75
+                eng.ask_mnq = 27100.25
+
+                class _FakeTicker:
+                    def __init__(self, px):
+                        self.px = px
+                        self.last = px
+                        self.close = px
+                        self.bid = px - 0.25
+                        self.ask = px + 0.25
+                        self.marketDataType = 1
+
+                    def marketPrice(self):
+                        return self.px
+
+                eng.ticker_mes = _FakeTicker(7400.0)
+                eng.ticker_mnq = _FakeTicker(27100.0)
+
+                hist_calls = {"n": 0}
+                eng.ib = types.SimpleNamespace(
+                    isConnected=lambda: True,
+                    accountValues=lambda acc: [],
+                    accountSummary=lambda: [],
+                    pnl=lambda: [],
+                    reqHistoricalData=lambda *a, **kw: hist_calls.__setitem__("n", hist_calls["n"] + 1) or [],
+                )
+                eng.ledger_mgr = types.SimpleNamespace(record_equity_snapshot=lambda *a, **kw: None)
+
+                eng.on_ibkr_error(1, 10197, "No market data during competing live session")
+                self.assertEqual(eng.market_data_status, "COMPETING_SESSION")
+
+                # Sync with stale identical quotes keeps COMPETING_SESSION even though ticker.marketDataType == 1
+                eng.sync_account_and_market()
+                self.assertEqual(eng.market_data_status, "COMPETING_SESSION")
+
+                # New openings halted during COMPETING_SESSION
+                eng._evaluate_symbol_bar("MES", object(), object(), 50000.0, 5.0, None, [])
+                self.assertEqual(hist_calls["n"], 0)
+
+                # Once competing session closes and live quotes advance (>2s later), status recovers to REAL_TIME
+                eng._competing_session_ts = time.time() - 5.0
+                eng.ticker_mes.px = 7401.5
+                eng.ticker_mes.last = 7401.5
+                eng.sync_account_and_market()
+                self.assertEqual(eng.market_data_status, "REAL_TIME")
+            finally:
+                rim.INCIDENTS_JSONL = orig_jsonl
+                rim.INCIDENTS_LOG = orig_log
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -76,6 +76,7 @@ class IncidentManager:
             return
         self._initialized = True
         self.file_lock = threading.Lock()
+        self._rate_limit_ts: Dict[int, float] = {}
 
     def record_incident(
         self,
@@ -219,6 +220,24 @@ class IncidentManager:
         elif error_code == 322:
             category = "SYSTEM"
             severity = "WARNING"
+
+        # 行情工作階段被其他登入裝置搶佔 (10197: No market data during competing live session)
+        # IBKR 每 30 秒會為 MES/MNQ 各發一次，節流為每 300 秒記錄/通報一次避免洗版
+        elif error_code == 10197:
+            category = "DATA"
+            severity = "WARNING"
+            now_ts = time.time()
+            rl_map = getattr(self, "_rate_limit_ts", None)
+            if rl_map is None:
+                self._rate_limit_ts = {}
+                rl_map = self._rate_limit_ts
+            if now_ts - rl_map.get(10197, 0.0) < 300.0:
+                return
+            rl_map[10197] = now_ts
+            error_string = (
+                "⚠️ [行情被他端登入搶佔 10197] 同一 IBKR 帳號正在手機 App、網頁或另一裝置查看即時行情，"
+                "導致本機實時報價暫停（已暫停新開倉，現有持倉硬止損仍由 CME 伺服器守護）；請關閉其他裝置登入。"
+            )
 
         contract_info = None
         if contract:
@@ -455,6 +474,7 @@ class TradeLedgerManager:
             return
         self._initialized = True
         self.file_lock = threading.Lock()
+        self._rate_limit_ts: Dict[int, float] = {}
         self.recorded_exec_ids = set()
         self._load_recorded_exec_ids()
 
