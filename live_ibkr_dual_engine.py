@@ -1792,6 +1792,7 @@ class LiveIBKRDualEngine:
             try:
                 t.order.auxPrice = desired_sl
                 t.order.outsideRth = True
+                t.order.transmit = True
                 self.ib.placeOrder(contract, t.order)
                 modified_ids.append(getattr(t.order, "orderId", 0))
             except Exception as me:

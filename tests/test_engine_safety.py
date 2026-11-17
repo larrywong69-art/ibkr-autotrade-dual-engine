@@ -299,6 +299,7 @@ class TestLiveEngineOrderHygiene(unittest.TestCase):
         self.eng.get_real_positions = lambda: (mes_tp1, None)
         self.eng.ensure_position_protection()
         self.assertEqual(sl_trade.order.auxPrice, 7500.25)
+        self.assertIs(sl_trade.order.transmit, True)
         self.assertTrue(self.eng._active_trade_meta["MES"]["be_active"])
 
         enriched = self.eng._enrich_pos_with_orders(dict(mes_tp1), [], self.eng._active_trade_meta.get("MES"))
