@@ -481,6 +481,65 @@ class TestDailyAutoAuditFixer(unittest.TestCase):
         self.assertAlmostEqual(data["realized_pnl_hkd"], 778.0, places=2)
         self.assertEqual(len(data["paired_trades"]), 2)
 
+    def test_build_daily_pnl_calendar_and_endpoint(self):
+        import json
+        import os
+        import tempfile
+        import threading
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+        import server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, "data")
+            rep_dir = os.path.join(tmp, "reports")
+            os.makedirs(data_dir, exist_ok=True)
+            os.makedirs(rep_dir, exist_ok=True)
+
+            # 11-12 由 daily_report 補齊 (63.78 USD -> 496.21 HKD)
+            with open(os.path.join(rep_dir, "daily_report_2026-11-12.json"), "w", encoding="utf-8") as rf:
+                json.dump({
+                    "report_date": "2026-11-12",
+                    "pnl_performance": {"total_trades": 1, "win_count": 1, "loss_count": 0, "total_realized_pnl": 63.78},
+                    "strategy_breakdown": {"v43_mes": {"realized_pnl": 63.78}, "v50_mnq": {"realized_pnl": 0.0}},
+                }, rf)
+
+            # 11-16 由 trades.jsonl 配對 (+65.06 USD -> +506.17 HKD)
+            rows = [
+                {"exec_id": "c1", "timestamp": "2026-11-16 03:50:28", "symbol": "MES", "side": "BOT", "direction": "LONG", "shares": 2, "price": 7559.75, "realized_pnl": 0.0, "commission": 1.22},
+                {"exec_id": "c2", "timestamp": "2026-11-16 04:23:47", "symbol": "MES", "side": "SLD", "direction": "SHORT", "shares": 2, "price": 7566.50, "realized_pnl": 65.06, "commission": 1.22},
+            ]
+            with open(os.path.join(data_dir, "trades.jsonl"), "w", encoding="utf-8") as tf:
+                for r in rows:
+                    tf.write(json.dumps(r) + "\n")
+
+            with open(os.path.join(tmp, "trade_status.json"), "w", encoding="utf-8") as sf:
+                json.dump({"fx_rate_usd_hkd": 7.78, "recent_trades": []}, sf)
+
+            cal = server.build_daily_pnl_calendar(month_str="2026-11", base_dir=tmp)
+            self.assertEqual(cal["month"], "2026-11")
+            self.assertIn("2026-11-12", cal["days"])
+            self.assertIn("2026-11-16", cal["days"])
+            self.assertAlmostEqual(cal["days"]["2026-11-12"]["pnl_hkd"], 496.21, places=2)
+            self.assertAlmostEqual(cal["days"]["2026-11-16"]["pnl_hkd"], 506.17, places=2)
+            self.assertAlmostEqual(cal["monthly_summary"]["net_pnl_hkd"], 1002.38, places=2)
+            self.assertEqual(cal["monthly_summary"]["win_days"], 2)
+
+        # 驗證真實專案下的 HTTP /api/pnl/calendar 端點可回傳標準 JSON
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.ControlDashboardHandler)
+        port = httpd.server_address[1]
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/pnl/calendar?month=2026-11", timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                payload = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(payload["status"], "ok")
+                self.assertEqual(payload["month"], "2026-11")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

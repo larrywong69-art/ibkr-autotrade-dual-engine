@@ -118,6 +118,206 @@ def get_audit_job_status():
             pass
     return snapshot
 
+
+def _load_deduped_executions(base_dir: str = CURRENT_DIR):
+    """載入並合併 trades.jsonl 與 trade_status.json 之去重成交紀錄與最新狀態快照。"""
+    trades = []
+    seen_ids = set()
+    status_snapshot = {}
+
+    trades_file = os.path.join(base_dir, "data", "trades.jsonl")
+    if os.path.exists(trades_file):
+        try:
+            with open(trades_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    item = json.loads(line)
+                    eid = item.get("exec_id") or item.get("position_id")
+                    if eid:
+                        seen_ids.add(eid)
+                    trades.append(item)
+        except Exception:
+            pass
+
+    status_file = os.path.join(base_dir, "trade_status.json")
+    if os.path.exists(status_file):
+        try:
+            with open(status_file, "r", encoding="utf-8") as sf:
+                status_snapshot = json.load(sf)
+                for r in status_snapshot.get("recent_trades", []):
+                    eid = r.get("exec_id") or r.get("position_id")
+                    if eid and eid not in seen_ids:
+                        seen_ids.add(eid)
+                        trades.append(r)
+        except Exception:
+            pass
+
+    return trades, status_snapshot
+
+
+def build_daily_pnl_calendar(month_str: str = None, base_dir: str = CURRENT_DIR):
+    """彙整歷史報告、成交流水配對與即時狀態為日曆式每日 HKD 盈虧數據。"""
+    from live_ibkr_dual_engine import pair_executions_fifo
+
+    target_month = (month_str or "").strip()
+    if len(target_month) != 7 or "-" not in target_month:
+        target_month = datetime.now().strftime("%Y-%m")
+
+    all_trades, status_snapshot = _load_deduped_executions(base_dir=base_dir)
+    fx_rate = float(status_snapshot.get("fx_rate_usd_hkd") or 7.78)
+    paired_groups = pair_executions_fifo(all_trades, fx_rate=fx_rate)
+
+    days_map = {}
+    available_months = set([datetime.now().strftime("%Y-%m"), target_month])
+
+    def _ensure_day(d_str: str):
+        if d_str not in days_map:
+            days_map[d_str] = {
+                "date": d_str,
+                "pnl_usd": 0.0,
+                "pnl_hkd": 0.0,
+                "mes_pnl_hkd": 0.0,
+                "mnq_pnl_hkd": 0.0,
+                "closed_count": 0,
+                "win_count": 0,
+                "loss_count": 0,
+                "open_count": 0,
+                "source": "executions",
+                "trades": [],
+            }
+        return days_map[d_str]
+
+    # 1. 由 FIFO 配對成交組彙整每日平倉損益（依平倉日期入帳，已含雙邊手續費）
+    for grp in paired_groups:
+        close_orders = grp.get("close_orders") or []
+        sym = str(grp.get("symbol") or "MES").upper()
+        if not close_orders:
+            open_date = str(grp.get("open_timestamp") or "")[:10]
+            if len(open_date) == 10:
+                available_months.add(open_date[:7])
+                if open_date.startswith(target_month):
+                    entry = _ensure_day(open_date)
+                    entry["open_count"] += 1
+                    entry["trades"].append({
+                        "symbol": sym,
+                        "direction": grp.get("direction", "LONG"),
+                        "status": grp.get("status", "OPEN"),
+                        "contracts": grp.get("contracts", 1),
+                        "open_price": grp.get("open_price"),
+                        "close_price": None,
+                        "pnl_usd": 0.0,
+                        "pnl_hkd": 0.0,
+                        "timestamp": grp.get("open_timestamp", ""),
+                    })
+            continue
+
+        # 將同一開倉單下的各平倉子單依其平倉日期彙整
+        for co in close_orders:
+            close_date = str(co.get("timestamp") or grp.get("open_timestamp") or "")[:10]
+            if len(close_date) != 10:
+                continue
+            available_months.add(close_date[:7])
+            if not close_date.startswith(target_month):
+                continue
+            entry = _ensure_day(close_date)
+            pnl_u = float(co.get("pnl") or 0.0)
+            pnl_h = float(co.get("pnl_hkd") if co.get("pnl_hkd") is not None else round(pnl_u * fx_rate, 2))
+            entry["pnl_usd"] = round(entry["pnl_usd"] + pnl_u, 2)
+            entry["pnl_hkd"] = round(entry["pnl_hkd"] + pnl_h, 2)
+            if "MNQ" in sym:
+                entry["mnq_pnl_hkd"] = round(entry["mnq_pnl_hkd"] + pnl_h, 2)
+            else:
+                entry["mes_pnl_hkd"] = round(entry["mes_pnl_hkd"] + pnl_h, 2)
+            entry["closed_count"] += 1
+            if pnl_u > 0:
+                entry["win_count"] += 1
+            elif pnl_u < 0:
+                entry["loss_count"] += 1
+            entry["trades"].append({
+                "symbol": sym,
+                "direction": grp.get("direction", "LONG"),
+                "status": grp.get("status", "CLOSED"),
+                "contracts": co.get("contracts", grp.get("contracts", 1)),
+                "open_price": grp.get("open_price"),
+                "close_price": co.get("close_price"),
+                "pnl_usd": round(pnl_u, 2),
+                "pnl_hkd": round(pnl_h, 2),
+                "timestamp": co.get("timestamp", ""),
+            })
+
+    # 2. 若歷史某日已有每日結算報告但不在 trades.jsonl 中，補齊該日損益
+    reports_dir = os.path.join(base_dir, "reports")
+    if os.path.isdir(reports_dir):
+        for fn in sorted(os.listdir(reports_dir)):
+            if not (fn.startswith("daily_report_") and fn.endswith(".json")):
+                continue
+            d_str = fn[len("daily_report_"):-len(".json")]
+            if len(d_str) != 10:
+                continue
+            available_months.add(d_str[:7])
+            if not d_str.startswith(target_month) or d_str in days_map:
+                continue
+            try:
+                with open(os.path.join(reports_dir, fn), "r", encoding="utf-8") as rf:
+                    rep = json.load(rf)
+                pnl_perf = rep.get("pnl_performance", {})
+                sb = rep.get("strategy_breakdown", {})
+                # total_realized_pnl 來自 IBKR commissionReport，已含雙邊手續費
+                raw_usd = float(pnl_perf.get("total_realized_pnl") or pnl_perf.get("net_pnl") or 0.0)
+                mes_usd = float((sb.get("v43_mes") or {}).get("realized_pnl") or 0.0)
+                mnq_usd = float((sb.get("v50_mnq") or {}).get("realized_pnl") or 0.0)
+                total_t = int(pnl_perf.get("total_trades") or 0)
+                wins = int(pnl_perf.get("win_count") or 0)
+                losses = int(pnl_perf.get("loss_count") or 0)
+                if total_t > 0 or abs(raw_usd) > 1e-6:
+                    entry = _ensure_day(d_str)
+                    entry["pnl_usd"] = round(raw_usd, 2)
+                    entry["pnl_hkd"] = round(raw_usd * fx_rate, 2)
+                    entry["mes_pnl_hkd"] = round(mes_usd * fx_rate, 2)
+                    entry["mnq_pnl_hkd"] = round(mnq_usd * fx_rate, 2)
+                    entry["closed_count"] = max(total_t, wins + losses)
+                    entry["win_count"] = wins
+                    entry["loss_count"] = losses
+                    entry["source"] = "daily_report"
+            except Exception:
+                pass
+
+    # 3. 若當日尚無配對成交紀錄，但 trade_status.json 已有即時已實現損益 (HKD)，補齊當日卡片
+    status_date = str(status_snapshot.get("last_update") or "")[:10]
+    if len(status_date) == 10 and status_date.startswith(target_month):
+        live_r_hkd = float(status_snapshot.get("realized_pnl_hkd") if status_snapshot.get("realized_pnl_hkd") is not None else (status_snapshot.get("realized_pnl") or 0.0))
+        if abs(live_r_hkd) > 1e-6 and status_date not in days_map:
+            entry = _ensure_day(status_date)
+            entry["pnl_hkd"] = round(live_r_hkd, 2)
+            entry["pnl_usd"] = round(live_r_hkd / fx_rate, 2)
+            entry["win_count"] = 1 if live_r_hkd > 0 else 0
+            entry["loss_count"] = 1 if live_r_hkd < 0 else 0
+            entry["source"] = "live_status"
+
+    net_pnl_hkd = round(sum(d["pnl_hkd"] for d in days_map.values()), 2)
+    net_pnl_usd = round(sum(d["pnl_usd"] for d in days_map.values()), 2)
+    win_days = sum(1 for d in days_map.values() if d["pnl_hkd"] > 0)
+    loss_days = sum(1 for d in days_map.values() if d["pnl_hkd"] < 0)
+    total_closed = sum(d["closed_count"] for d in days_map.values())
+
+    return {
+        "status": "ok",
+        "month": target_month,
+        "fx_rate_usd_hkd": round(fx_rate, 4),
+        "available_months": sorted(available_months, reverse=True),
+        "monthly_summary": {
+            "net_pnl_hkd": net_pnl_hkd,
+            "net_pnl_usd": net_pnl_usd,
+            "win_days": win_days,
+            "loss_days": loss_days,
+            "trading_days": win_days + loss_days,
+            "total_closed_orders": total_closed,
+        },
+        "days": days_map,
+    }
+
 def get_access_pin():
     """取得設定的安全 PIN 碼 (公網遠端防護，支援 .env 即時熱載入)"""
     env_path = os.path.join(CURRENT_DIR, ".env")
@@ -240,37 +440,7 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
 
     def _collect_recent_trades(self, limit: int = 50, symbol_filter: str = None):
         """整合 data/trades.jsonl 與 trade_status.json 最新成交紀錄"""
-        trades = []
-        seen_ids = set()
-        status_snapshot = {}
-
-        trades_file = os.path.join(CURRENT_DIR, "data", "trades.jsonl")
-        if os.path.exists(trades_file):
-            try:
-                with open(trades_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line:
-                            item = json.loads(line)
-                            eid = item.get("exec_id") or item.get("position_id")
-                            if eid:
-                                seen_ids.add(eid)
-                            trades.append(item)
-            except Exception:
-                pass
-
-        status_file = os.path.join(CURRENT_DIR, "trade_status.json")
-        if os.path.exists(status_file):
-            try:
-                with open(status_file, "r", encoding="utf-8") as sf:
-                    status_snapshot = json.load(sf)
-                    for r in status_snapshot.get("recent_trades", []):
-                        eid = r.get("exec_id") or r.get("position_id")
-                        if eid and eid not in seen_ids:
-                            seen_ids.add(eid)
-                            trades.append(r)
-            except Exception:
-                pass
+        trades, status_snapshot = _load_deduped_executions(base_dir=CURRENT_DIR)
 
         if symbol_filter:
             trades = [t for t in trades if symbol_filter.upper() in (t.get("symbol") or "").upper()]
@@ -402,11 +572,16 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                 "count": len(trades),
                 "trades": trades
             }
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+            self._send_json(200, resp)
+            return
+
+        if parsed.path == "/api/pnl/calendar":
+            month_param = query.get("month", [None])[0]
+            try:
+                resp = build_daily_pnl_calendar(month_str=month_param, base_dir=CURRENT_DIR)
+                self._send_json(200, resp)
+            except Exception as e:
+                self._send_json(500, {"status": "error", "message": f"讀取每日盈虧日曆失敗: {str(e)}"})
             return
 
         if parsed.path == "/api/lan_info":

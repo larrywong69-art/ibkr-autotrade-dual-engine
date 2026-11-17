@@ -211,66 +211,66 @@
     </div>
 
     <!-- ==================================================================== -->
-    <!-- 6:4 動態資金調度中樞 (Capital Allocation Hub) -->
+    <!-- 日曆式每日盈虧記錄 (Daily PnL Calendar) -->
     <!-- ==================================================================== -->
     <div class="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-4 sm:p-5 shadow-sm space-y-3.5">
-      <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 pb-3 border-b border-[var(--border)]">
-        <div class="flex items-center gap-2">
-          <span class="text-base font-bold text-[var(--foreground)]">⚖️ 6:4 資金調度池動態分流</span>
+      <div class="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-3 pb-3 border-b border-[var(--border)]">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-base font-bold text-[var(--foreground)]">📅 每日盈虧記錄 (Daily PnL Calendar · HKD)</span>
           <span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-            自動即時重平衡 (Dynamic Virtual Pool)
+            含雙邊手續費淨損益
           </span>
         </div>
-        <div class="text-xs text-[var(--muted-foreground)] font-mono">
-          帳戶總淨值折算: <span id="pool-total-usd" class="font-bold text-[var(--foreground)]">US$ 123,000</span>
+
+        <div class="flex flex-wrap items-center gap-2.5 w-full lg:w-auto justify-between lg:justify-end">
+          <!-- 月份統計 -->
+          <div class="flex items-center gap-3 text-xs font-mono">
+            <span>本月累計: <b id="cal-month-total" class="text-[var(--foreground)]">HK$ 0.00</b></span>
+            <span class="text-[var(--muted-foreground)]">|</span>
+            <span id="cal-month-days" class="text-[var(--muted-foreground)]">0 賺 / 0 虧</span>
+            <span class="text-[var(--muted-foreground)]">|</span>
+            <span id="cal-month-trades" class="text-[var(--muted-foreground)]">0 筆平倉</span>
+          </div>
+
+          <!-- 月份切換控制 -->
+          <div class="flex items-center gap-1 bg-[var(--background)] border border-[var(--border)] rounded-xl p-1 text-xs">
+            <button type="button" onclick="changePnlCalendarMonth(-1)" aria-label="上一個月" class="px-2 py-1 rounded-lg hover:bg-[var(--accent)] text-[var(--foreground)] font-bold transition-colors">‹ 上月</button>
+            <span id="cal-month-label" class="px-2.5 py-1 font-mono font-bold text-[var(--foreground)] min-w-[88px] text-center">---- --</span>
+            <button type="button" onclick="changePnlCalendarMonth(1)" aria-label="下一個月" class="px-2 py-1 rounded-lg hover:bg-[var(--accent)] text-[var(--foreground)] font-bold transition-colors">下月 ›</button>
+            <button type="button" onclick="resetPnlCalendarMonth()" class="px-2 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-400 font-semibold transition-colors">本月</button>
+          </div>
         </div>
       </div>
 
-      <!-- 6:4 長條進度圖表 -->
-      <div class="space-y-1.5">
-        <div class="flex items-center justify-between text-xs font-semibold">
-          <span class="text-blue-500 flex items-center gap-1.5">
-            <span class="w-2.5 h-2.5 rounded bg-blue-500 inline-block"></span>
-            V9.3 MES 優先資金池 (60% • <span id="pool-v43-val">US$ 73,800</span>)
-          </span>
-          <span class="text-emerald-500 flex items-center gap-1.5">
-            V9.3 MNQ 防飢餓資金池 (40% • <span id="pool-v50-val">US$ 49,200</span>)
-            <span class="w-2.5 h-2.5 rounded bg-emerald-500 inline-block"></span>
-          </span>
-        </div>
-        <div class="w-full bg-[var(--accent)] h-3.5 rounded-full overflow-hidden flex p-0.5 border border-[var(--border)]">
-          <div class="bg-gradient-to-r from-blue-600 to-indigo-500 h-full rounded-l-full transition-all duration-500" style="width: 60%" title="V4.3 Pool: 60%"></div>
-          <div class="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-r-full transition-all duration-500" style="width: 40%" title="V5.0 Pool: 40%"></div>
-        </div>
+      <!-- 星期標題列 -->
+      <div class="grid grid-cols-7 gap-1.5 sm:gap-2 text-center text-[11px] font-bold text-[var(--muted-foreground)]">
+        <div class="py-1 text-rose-400/80">日</div>
+        <div class="py-1">一</div>
+        <div class="py-1">二</div>
+        <div class="py-1">三</div>
+        <div class="py-1">四</div>
+        <div class="py-1">五</div>
+        <div class="py-1 text-amber-400/80">六</div>
       </div>
 
-      <!-- 資金規則與防飢餓機制說明卡片 (兩欄) -->
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
-        <!-- V4.3 優先池規則 -->
-        <div class="p-3 rounded-xl bg-blue-500/5 border border-blue-500/20 space-y-1.5">
-          <div class="flex items-center justify-between text-xs">
-            <span class="font-bold text-blue-500 flex items-center gap-1">🔥 V9.3 MES 旗艦權益</span>
-            <span class="px-2 py-0.2 rounded-full text-[10px] font-bold bg-blue-500/20 text-blue-400">絕對開倉優先權</span>
-          </div>
-          <div class="text-[11px] text-[var(--muted-foreground)] leading-relaxed">
-            • <b>調度上限</b>: 總淨值之 60%（約可承載 4～12 口 MES）<br>
-            • <b>保護邏輯</b>: 進場完全不受 V5.0 干擾，享有全天候一級撮合權。<br>
-            • <b>對沖特性</b>: 與 CME MNQ 物理標的獨立，交易所層級零 Netting 相抵。
-          </div>
-        </div>
+      <!-- 7 欄日曆格子 -->
+      <div id="pnl-calendar-grid" class="grid grid-cols-7 gap-1.5 sm:gap-2">
+        <div class="col-span-7 py-8 text-center text-xs text-[var(--muted-foreground)]">載入每日盈虧日曆中...</div>
+      </div>
 
-        <!-- V5.0 防飢餓池規則 -->
-        <div class="p-3 rounded-xl bg-emerald-500/5 border border-emerald-500/20 space-y-1.5">
-          <div class="flex items-center justify-between text-xs">
-            <span class="font-bold text-emerald-500 flex items-center gap-1">⚡ V9.3 MNQ 防飢餓閘門</span>
-            <span class="px-2 py-0.2 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400">20% 安全底線鎖定</span>
+      <!-- 點擊日期後的當日明細面板 -->
+      <div id="pnl-calendar-detail" class="hidden rounded-xl bg-[var(--background)]/75 border border-[var(--border)] p-3 space-y-2 text-xs">
+        <div class="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-[var(--border)]">
+          <div class="flex items-center gap-2">
+            <span id="cal-detail-date" class="font-mono font-bold text-sm text-[var(--foreground)]">--</span>
+            <span id="cal-detail-stats" class="text-[11px] text-[var(--muted-foreground)]"></span>
           </div>
-          <div class="text-[11px] text-[var(--muted-foreground)] leading-relaxed">
-            • <b>調度上限</b>: 總淨值之 40%（約可承載 2～6 口 MNQ）<br>
-            • <b>防飢餓校驗</b>: 開倉前嚴格審查可用資金是否 &gt; V4.3 池的 20% 安全維持金。<br>
-            • <b>自適應降口</b>: 資金趨緊時自動降為 1 口或直接放棄，絕不擠佔 V4.3 額度。
+          <div class="flex items-center gap-3 font-mono">
+            <span id="cal-detail-breakdown" class="text-[11px] text-[var(--muted-foreground)]"></span>
+            <span id="cal-detail-pnl" class="font-bold text-sm">HK$ 0.00</span>
           </div>
         </div>
+        <div id="cal-detail-trades" class="space-y-1 max-h-40 overflow-y-auto"></div>
       </div>
     </div>
 
@@ -1266,25 +1266,10 @@
           }
         }
 
-        // 3. 6:4 資金調度池數值更新
-        if (data.capital_allocation) {
-          const cap = data.capital_allocation;
-          const totEl = document.getElementById('pool-total-usd');
-          const v43El = document.getElementById('pool-v43-val');
-          const v50El = document.getElementById('pool-v50-val');
-          if (totEl) totEl.innerText = `US$ ${cap.total_equity_usd.toLocaleString('en-US')}`;
-          if (v43El) v43El.innerText = `US$ ${cap.v43_pool_usd.toLocaleString('en-US')}`;
-          if (v50El) v50El.innerText = `US$ ${cap.v50_pool_usd.toLocaleString('en-US')}`;
-        } else if (data.equity > 0) {
-          const usdTotal = Math.round(data.equity / (curr === 'HKD' ? 7.78 : 1.0));
-          const v43Val = Math.round(usdTotal * 0.6);
-          const v50Val = Math.round(usdTotal * 0.4);
-          const totEl = document.getElementById('pool-total-usd');
-          const v43El = document.getElementById('pool-v43-val');
-          const v50El = document.getElementById('pool-v50-val');
-          if (totEl) totEl.innerText = `US$ ${usdTotal.toLocaleString('en-US')}`;
-          if (v43El) v43El.innerText = `US$ ${v43Val.toLocaleString('en-US')}`;
-          if (v50El) v50El.innerText = `US$ ${v50Val.toLocaleString('en-US')}`;
+        // 3. 日曆同步：若成交組數有變則自動刷新本月日曆
+        if (window._lastCalendarTradeCount !== (data.recent_trades || []).length) {
+          window._lastCalendarTradeCount = (data.recent_trades || []).length;
+          if (typeof loadPnlCalendar === 'function') loadPnlCalendar(CALENDAR_MONTH);
         }
 
         // 4. V4.3 子策略渲染 (MES) (支援雙引擎子樹與單策略降級相容)
@@ -1462,9 +1447,241 @@
       }
     }
 
+    let CALENDAR_MONTH = new Date().toISOString().slice(0, 7);
+    let CALENDAR_DATA = null;
+    let SELECTED_CALENDAR_DATE = null;
+
+    function formatCompactHkd(val) {
+      const n = Number(val) || 0;
+      const absN = Math.abs(n);
+      const formatted = absN >= 1000
+        ? Math.round(absN).toLocaleString('en-US')
+        : absN.toFixed(0);
+      if (n > 0) return `+HK$${formatted}`;
+      if (n < 0) return `-HK$${formatted}`;
+      return 'HK$0';
+    }
+
+    function buildClientFallbackCalendar(monthStr) {
+      const fxRate = 7.78;
+      const allGroups = (Array.isArray(LIVE_PAIRED_TRADES) && LIVE_PAIRED_TRADES.length > 0)
+        ? LIVE_PAIRED_TRADES
+        : pairExecutionTrades(LIVE_TRADES_DATA, fxRate);
+      const days = {};
+      allGroups.forEach(g => {
+        const cos = g.close_orders || [];
+        cos.forEach(co => {
+          const dStr = String(co.timestamp || g.open_timestamp || '').slice(0, 10);
+          if (!dStr.startsWith(monthStr)) return;
+          if (!days[dStr]) {
+            days[dStr] = { date: dStr, pnl_usd: 0, pnl_hkd: 0, mes_pnl_hkd: 0, mnq_pnl_hkd: 0, closed_count: 0, win_count: 0, loss_count: 0, open_count: 0, trades: [] };
+          }
+          const pu = Number(co.pnl) || 0;
+          const ph = co.pnl_hkd !== undefined ? (Number(co.pnl_hkd) || 0) : Number((pu * fxRate).toFixed(2));
+          days[dStr].pnl_usd = Number((days[dStr].pnl_usd + pu).toFixed(2));
+          days[dStr].pnl_hkd = Number((days[dStr].pnl_hkd + ph).toFixed(2));
+          if ((g.symbol || '').includes('MNQ')) days[dStr].mnq_pnl_hkd = Number((days[dStr].mnq_pnl_hkd + ph).toFixed(2));
+          else days[dStr].mes_pnl_hkd = Number((days[dStr].mes_pnl_hkd + ph).toFixed(2));
+          days[dStr].closed_count += 1;
+          if (pu > 0) days[dStr].win_count += 1;
+          else if (pu < 0) days[dStr].loss_count += 1;
+          days[dStr].trades.push({
+            symbol: g.symbol, direction: g.direction, status: g.status, contracts: co.contracts || 1,
+            open_price: g.open_price, close_price: co.close_price, pnl_usd: pu, pnl_hkd: ph, timestamp: co.timestamp
+          });
+        });
+      });
+      const vals = Object.values(days);
+      return {
+        status: 'ok',
+        month: monthStr,
+        monthly_summary: {
+          net_pnl_hkd: Number(vals.reduce((s, d) => s + d.pnl_hkd, 0).toFixed(2)),
+          win_days: vals.filter(d => d.pnl_hkd > 0).length,
+          loss_days: vals.filter(d => d.pnl_hkd < 0).length,
+          total_closed_orders: vals.reduce((s, d) => s + d.closed_count, 0),
+        },
+        days
+      };
+    }
+
+    async function loadPnlCalendar(monthStr) {
+      const targetMonth = monthStr || CALENDAR_MONTH || new Date().toISOString().slice(0, 7);
+      CALENDAR_MONTH = targetMonth;
+      try {
+        const res = await fetch(`/api/pnl/calendar?month=${encodeURIComponent(targetMonth)}&_t=${Date.now()}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await parseJsonResponse(res);
+        CALENDAR_DATA = data;
+        renderPnlCalendar(data);
+      } catch (_) {
+        const fallback = buildClientFallbackCalendar(targetMonth);
+        CALENDAR_DATA = fallback;
+        renderPnlCalendar(fallback);
+      }
+    }
+
+    function changePnlCalendarMonth(delta) {
+      const parts = (CALENDAR_MONTH || new Date().toISOString().slice(0, 7)).split('-').map(Number);
+      const d = new Date(parts[0], (parts[1] - 1) + delta, 1);
+      const nextMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      SELECTED_CALENDAR_DATE = null;
+      loadPnlCalendar(nextMonth);
+    }
+
+    function resetPnlCalendarMonth() {
+      SELECTED_CALENDAR_DATE = null;
+      loadPnlCalendar(new Date().toISOString().slice(0, 7));
+    }
+
+    function selectPnlCalendarDay(dateStr) {
+      if (!CALENDAR_DATA || !CALENDAR_DATA.days) return;
+      const dayInfo = CALENDAR_DATA.days[dateStr];
+      const panel = document.getElementById('pnl-calendar-detail');
+      if (!panel) return;
+
+      if (!dayInfo || SELECTED_CALENDAR_DATE === dateStr) {
+        SELECTED_CALENDAR_DATE = null;
+        panel.classList.add('hidden');
+        renderPnlCalendar(CALENDAR_DATA);
+        return;
+      }
+
+      SELECTED_CALENDAR_DATE = dateStr;
+      renderPnlCalendar(CALENDAR_DATA);
+      panel.classList.remove('hidden');
+
+      document.getElementById('cal-detail-date').innerText = `📅 ${dateStr}`;
+      document.getElementById('cal-detail-stats').innerText =
+        `平倉 ${dayInfo.closed_count || 0} 筆 (${dayInfo.win_count || 0}勝 / ${dayInfo.loss_count || 0}負)` +
+        (dayInfo.open_count ? ` · 持倉開單 ${dayInfo.open_count}` : '');
+      document.getElementById('cal-detail-breakdown').innerText =
+        `MES: ${formatSignedHkd(dayInfo.mes_pnl_hkd || 0)} | MNQ: ${formatSignedHkd(dayInfo.mnq_pnl_hkd || 0)}`;
+
+      const pnlEl = document.getElementById('cal-detail-pnl');
+      const dPnl = Number(dayInfo.pnl_hkd) || 0;
+      pnlEl.innerText = formatSignedHkd(dPnl);
+      pnlEl.className = dPnl > 0 ? 'font-bold text-sm text-emerald-400' : (dPnl < 0 ? 'font-bold text-sm text-rose-400' : 'font-bold text-sm text-slate-300');
+
+      const listEl = document.getElementById('cal-detail-trades');
+      const trades = dayInfo.trades || [];
+      if (trades.length === 0) {
+        listEl.innerHTML = `<div class="text-[11px] text-[var(--muted-foreground)] py-1">本日盈虧來自每日結算報告／帳戶日終匯總。</div>`;
+      } else {
+        listEl.innerHTML = trades.map(t => {
+          const ph = Number(t.pnl_hkd) || 0;
+          const color = ph > 0 ? 'text-emerald-400' : (ph < 0 ? 'text-rose-400' : 'text-[var(--muted-foreground)]');
+          const dirTxt = t.direction === 'LONG' ? '好倉' : '淡倉';
+          const openP = t.open_price ? Number(t.open_price).toFixed(2) : '-';
+          const closeP = t.close_price ? Number(t.close_price).toFixed(2) : '持倉中';
+          const pnlTxt = t.close_price ? formatSignedHkd(ph) : '持倉中';
+          return `
+            <div class="flex items-center justify-between py-1 px-2 rounded-lg bg-[var(--card)]/70 border border-[var(--border)] text-[11px] font-mono">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="font-bold text-[var(--foreground)]">${escapeHtml(t.symbol || 'MES')}</span>
+                <span class="text-[var(--muted-foreground)]">${dirTxt} ${t.contracts || 1}口</span>
+                <span class="text-[var(--muted-foreground)] truncate">倉 ${openP} → 平 ${closeP}</span>
+              </div>
+              <span class="font-bold ${color} shrink-0">${pnlTxt}</span>
+            </div>
+          `;
+        }).join('');
+      }
+    }
+
+    function renderPnlCalendar(calData) {
+      if (!calData) return;
+      const monthStr = calData.month || CALENDAR_MONTH;
+      const [yearNum, monthNum] = monthStr.split('-').map(Number);
+
+      const labelEl = document.getElementById('cal-month-label');
+      if (labelEl) labelEl.innerText = `${yearNum}年 ${String(monthNum).padStart(2, '0')}月`;
+
+      const ms = calData.monthly_summary || {};
+      const mTotalEl = document.getElementById('cal-month-total');
+      if (mTotalEl) {
+        const netHkd = Number(ms.net_pnl_hkd) || 0;
+        mTotalEl.innerText = formatSignedHkd(netHkd);
+        mTotalEl.className = netHkd > 0 ? 'text-emerald-400 font-bold' : (netHkd < 0 ? 'text-rose-400 font-bold' : 'text-[var(--foreground)] font-bold');
+      }
+      const mDaysEl = document.getElementById('cal-month-days');
+      if (mDaysEl) mDaysEl.innerText = `${ms.win_days || 0} 賺 / ${ms.loss_days || 0} 虧`;
+      const mTradesEl = document.getElementById('cal-month-trades');
+      if (mTradesEl) mTradesEl.innerText = `${ms.total_closed_orders || 0} 筆平倉`;
+
+      const gridEl = document.getElementById('pnl-calendar-grid');
+      if (!gridEl) return;
+
+      const firstWeekday = new Date(yearNum, monthNum - 1, 1).getDay();
+      const daysInMonth = new Date(yearNum, monthNum, 0).getDate();
+      const now = new Date();
+      const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      const daysMap = calData.days || {};
+
+      let html = '';
+      for (let i = 0; i < firstWeekday; i++) {
+        html += `<div class="min-h-[64px] sm:min-h-[72px] rounded-xl bg-[var(--background)]/25 border border-transparent"></div>`;
+      }
+
+      for (let day = 1; day <= daysInMonth; day++) {
+        const dStr = `${monthStr}-${String(day).padStart(2, '0')}`;
+        const info = daysMap[dStr];
+        const isToday = dStr === todayStr;
+        const isSelected = dStr === SELECTED_CALENDAR_DATE;
+
+        if (!info) {
+          const ring = isToday ? 'border-blue-500/50 bg-blue-500/5' : 'border-[var(--border)]/60 bg-[var(--background)]/35';
+          html += `
+            <div class="min-h-[64px] sm:min-h-[72px] rounded-xl border ${ring} p-1.5 sm:p-2 flex flex-col justify-between">
+              <div class="flex items-center justify-between text-[11px] font-mono">
+                <span class="${isToday ? 'text-blue-400 font-bold' : 'text-[var(--muted-foreground)]'}">${day}</span>
+                ${isToday ? '<span class="text-[9px] px-1 rounded bg-blue-500/20 text-blue-400 font-bold">今</span>' : ''}
+              </div>
+              <div class="text-[10px] text-[var(--muted-foreground)]/40 text-right font-mono">-</div>
+            </div>
+          `;
+        } else {
+          const pnlHkd = Number(info.pnl_hkd) || 0;
+          const isWin = pnlHkd > 0;
+          const isLoss = pnlHkd < 0;
+          let boxCls = 'bg-slate-500/10 border-slate-500/30 hover:border-slate-400/50';
+          let pnlTxtCls = 'text-slate-300';
+          if (isWin) {
+            boxCls = 'bg-emerald-500/10 border-emerald-500/30 hover:border-emerald-400/60';
+            pnlTxtCls = 'text-emerald-400';
+          } else if (isLoss) {
+            boxCls = 'bg-rose-500/10 border-rose-500/30 hover:border-rose-400/60';
+            pnlTxtCls = 'text-rose-400';
+          }
+          const selectedRing = isSelected ? 'ring-2 ring-indigo-400' : (isToday ? 'ring-1 ring-blue-400/70' : '');
+          const subCount = info.closed_count > 0
+            ? `${info.closed_count}筆 (${info.win_count || 0}W/${info.loss_count || 0}L)`
+            : `持倉中 ${info.open_count || 1}`;
+
+          html += `
+            <button type="button" onclick="selectPnlCalendarDay('${dStr}')" aria-label="${dStr} 盈虧明細"
+              class="text-left min-h-[64px] sm:min-h-[72px] rounded-xl border ${boxCls} ${selectedRing} p-1.5 sm:p-2 flex flex-col justify-between transition-all cursor-pointer">
+              <div class="flex items-center justify-between text-[11px] font-mono w-full">
+                <span class="font-bold text-[var(--foreground)]">${day}</span>
+                ${isToday ? '<span class="text-[9px] px-1 rounded bg-blue-500/20 text-blue-400 font-bold">今</span>' : ''}
+              </div>
+              <div class="space-y-0.5 w-full">
+                <div class="text-[11px] sm:text-xs font-black font-mono truncate ${pnlTxtCls}">${info.closed_count > 0 || Math.abs(pnlHkd) > 0 ? formatCompactHkd(pnlHkd) : '持倉中'}</div>
+                <div class="text-[9px] sm:text-[10px] text-[var(--muted-foreground)] font-mono truncate">${subCount}</div>
+              </div>
+            </button>
+          `;
+        }
+      }
+
+      gridEl.innerHTML = html;
+    }
+
     // 每 2 秒自動拉取
     setInterval(pollTradeStatus, 2000);
+    setInterval(() => loadPnlCalendar(CALENDAR_MONTH), 30000);
     pollTradeStatus();
+    loadPnlCalendar(CALENDAR_MONTH);
 
     function exportCSV() {
       const groups = (Array.isArray(LIVE_PAIRED_TRADES) && LIVE_PAIRED_TRADES.length > 0)
