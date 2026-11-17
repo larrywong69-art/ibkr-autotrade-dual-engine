@@ -86,6 +86,22 @@ logging.basicConfig(
 logger = logging.getLogger("DualEngineLive")
 
 
+class _IBKRWrapperNoiseFilter(logging.Filter):
+    """過濾 ib_async/ib_insync 底層對 162 HMDS 查詢取消與 2109 無害訊息的重複刷屏"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "API historical data query cancelled" in msg:
+            return False
+        if "Error 2109" in msg and "now being processed" in msg:
+            return False
+        return True
+
+
+for _wrapper_name in ("ib_async.wrapper", "ib_insync.wrapper"):
+    logging.getLogger(_wrapper_name).addFilter(_IBKRWrapperNoiseFilter())
+
+
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     high = df['high']
     low = df['low']
@@ -327,9 +343,13 @@ class LiveIBKRDualEngine:
         self.last_bar_eval_v43: Optional[datetime] = None
         self.last_bar_eval_v50: Optional[datetime] = None
         self._last_eval_bar_ts: Dict[str, str] = {}
+        self._last_eval_bucket: Dict[str, int] = {}
         self._last_protect_ts: Dict[str, float] = {}
         self._entry_order_first_seen: Dict[int, float] = {}
         self._last_hist_fail_ts: Dict[str, float] = {}
+        self._hist_fail_streak: Dict[str, int] = {}
+        self._last_macro_fail_ts: Dict[str, float] = {}
+        self._last_162_log_ts: float = 0.0
         self._warned_uncancellable_ids: set = set()
         self._cancel_attempt_ts: Dict[int, float] = {}
         self._stop_breach_first_seen: Dict[str, float] = {}
@@ -400,6 +420,13 @@ class LiveIBKRDualEngine:
         elif error_code == 162 and "different IP address" in error_string.lower():
             self.status_message = "⚠️ 偵測到另一裝置 (如手機 IBKR Mobile 或網頁) 正在登入該帳戶，搶奪了連線權限！請退出手機 App 並重啟 Gateway。"
             logger.warning(f"⚠️ [IP 衝突攔截] 收到 IBKR 代碼 162: {error_string}。偵測到另一裝置正在連線同一帳號，導致本機 Session IP 衝突。")
+        elif error_code == 162 and "query cancelled" in error_string.lower():
+            now_ts = time.time()
+            if now_ts - getattr(self, "_last_162_log_ts", 0.0) >= 180.0:
+                self._last_162_log_ts = now_ts
+                logger.info(
+                    f"⏳ [HMDS 數據節流保護] IBKR 歷史數據查詢逾時取消 ({error_string})，系統將自動退避冷卻；持倉保護與即時報價不受影響。"
+                )
 
     @staticmethod
     def _safe_float(val: Any, default: float = 0.0, decimals: int = 2) -> float:
@@ -961,6 +988,9 @@ class LiveIBKRDualEngine:
         cache = self.macro_cache_mes if symbol == "MES" else self.macro_cache_mnq
         if now - cache.get("ts", 0.0) < 900.0 and cache.get("c", 0.0) > 0:
             return cache
+        macro_fail_map = getattr(self, "_last_macro_fail_ts", None)
+        if macro_fail_map is not None and now - macro_fail_map.get(symbol, 0.0) < 180.0:
+            return cache
 
         try:
             if self.ib and self.ib.isConnected() and contract:
@@ -972,9 +1002,11 @@ class LiveIBKRDualEngine:
                     whatToShow='TRADES',
                     useRTH=False,
                     formatDate=1,
-                    timeout=10
+                    timeout=20
                 )
                 if bars_4h and len(bars_4h) >= 20:
+                    if macro_fail_map is not None:
+                        macro_fail_map[symbol] = 0.0
                     df_4h = util.df(bars_4h)
                     idx_target = -2 if len(df_4h) >= 2 else -1
                     e20 = float(df_4h['close'].ewm(span=20, adjust=False).mean().iloc[idx_target])
@@ -1000,7 +1032,7 @@ class LiveIBKRDualEngine:
                             whatToShow='TRADES',
                             useRTH=False,
                             formatDate=1,
-                            timeout=8
+                            timeout=12
                         )
                         if bars_1h and len(bars_1h) >= 15:
                             df_1h = util.df(bars_1h)
@@ -1015,7 +1047,12 @@ class LiveIBKRDualEngine:
                         f"📊 [4H 宏觀趨勢更新] {symbol}: 4H收盤 {c:.2f} | EMA20 {e20:.2f} | "
                         f"EMA50 {e50:.2f} | EMA200 {e200:.2f} | 1H ADX: {cache.get('adx_1h', 20.0):.1f} -> 允許做多: {cache['long']} / 允許做空: {cache['short']}"
                     )
+                else:
+                    if macro_fail_map is not None:
+                        macro_fail_map[symbol] = now
         except Exception as e:
+            if macro_fail_map is not None:
+                macro_fail_map[symbol] = now
             logger.warning(f"獲取 {symbol} 4H 宏觀趨勢異常: {e}")
 
         return cache
@@ -1189,7 +1226,7 @@ class LiveIBKRDualEngine:
                 whatToShow='TRADES',
                 useRTH=False,
                 formatDate=1,
-                timeout=8
+                timeout=15
             )
             if bars and len(bars) >= 15:
                 df = util.df(bars)
@@ -1573,6 +1610,41 @@ class LiveIBKRDualEngine:
                 details={"symbol": symbol, "qty": qty, "sl_price": sl_p, "need_tp": need_tp, "order_ids": placed_ids}
             )
 
+    def _can_query_hist_bar(self, symbol: str, now_ts: float) -> bool:
+        """檢查是否允許發起 5m 歷史 K 棒查詢（失敗指數退避 + 同 5 分鐘週期去重）"""
+        streak_map = getattr(self, "_hist_fail_streak", {})
+        fail_ts_map = getattr(self, "_last_hist_fail_ts", {})
+        bucket_map = getattr(self, "_last_eval_bucket", {})
+
+        streak = int(streak_map.get(symbol, 0))
+        if streak > 0:
+            cooldown = min(300.0, 60.0 * (2 ** (streak - 1)))
+            if now_ts - fail_ts_map.get(symbol, 0.0) < cooldown:
+                return False
+
+        cur_bucket = int(now_ts // 300)
+        if bucket_map.get(symbol) == cur_bucket:
+            return False
+        if symbol in bucket_map and (now_ts % 300.0) < 4.0:
+            return False
+        return True
+
+    def _record_hist_failure(self, symbol: str, now_ts: float) -> float:
+        """記錄歷史 K 棒查詢失敗並計算下次退避冷卻秒數 (60s -> 120s -> 240s -> 300s)"""
+        streak_map = getattr(self, "_hist_fail_streak", None)
+        if streak_map is None:
+            self._hist_fail_streak = {}
+            streak_map = self._hist_fail_streak
+        fail_ts_map = getattr(self, "_last_hist_fail_ts", None)
+        if fail_ts_map is None:
+            self._last_hist_fail_ts = {}
+            fail_ts_map = self._last_hist_fail_ts
+
+        streak = int(streak_map.get(symbol, 0)) + 1
+        streak_map[symbol] = streak
+        fail_ts_map[symbol] = now_ts
+        return min(300.0, 60.0 * (2 ** (streak - 1)))
+
     def _evaluate_symbol_bar(
         self,
         symbol: str,
@@ -1583,10 +1655,11 @@ class LiveIBKRDualEngine:
         pos: Optional[Dict[str, Any]],
         orders: List[Dict[str, Any]]
     ):
-        """共用 K 棒策略評估器：強制僅評估已收盤 5m K 棒 (len-2)，且每根 K 棒僅觸發一次"""
+        """共用 K 棒策略評估器：強制僅評估已收盤 5m K 棒 (len-2)，且每 5 分鐘週期最多評估一次"""
         if pos is not None or len(orders) > 0:
             return
-        if time.time() - self._last_hist_fail_ts.get(symbol, 0.0) < 60.0:
+        now_ts = time.time()
+        if not self._can_query_hist_bar(symbol, now_ts):
             return
 
         try:
@@ -1598,11 +1671,16 @@ class LiveIBKRDualEngine:
                 whatToShow='TRADES',
                 useRTH=False,
                 formatDate=1,
-                timeout=15
+                timeout=25
             )
             if not bars or len(bars) < 30:
-                self._last_hist_fail_ts[symbol] = time.time()
+                self._record_hist_failure(symbol, now_ts)
                 return
+
+            if hasattr(self, "_hist_fail_streak"):
+                self._hist_fail_streak[symbol] = 0
+            if hasattr(self, "_last_hist_fail_ts"):
+                self._last_hist_fail_ts[symbol] = 0.0
 
             df = util.df(bars)
             if 'date' in df.columns:
@@ -1627,9 +1705,14 @@ class LiveIBKRDualEngine:
             # 只評估倒數第二根「已收盤」5 分鐘 K 棒，避免盤中閃爍與止蝕後同根 K 棒重複進場
             last_idx = len(df) - 2
             bar_ts_str = str(df.index[last_idx])
+            cur_bucket = int(now_ts // 300)
             if self._last_eval_bar_ts.get(symbol) == bar_ts_str:
+                if (now_ts % 300.0) >= 35.0 and hasattr(self, "_last_eval_bucket"):
+                    self._last_eval_bucket[symbol] = cur_bucket
                 return
             self._last_eval_bar_ts[symbol] = bar_ts_str
+            if hasattr(self, "_last_eval_bucket"):
+                self._last_eval_bucket[symbol] = cur_bucket
 
             engine_inst.pending_limit_order = None
             sig, pending = engine_inst.evaluate_bar(last_idx, df, pool_usd, 0.5)
@@ -1638,6 +1721,7 @@ class LiveIBKRDualEngine:
                 engine_inst.pending_limit_order = None
                 self.place_v93_bracket_order(symbol, target_sig)
         except Exception as e:
+            self._record_hist_failure(symbol, now_ts)
             logger.warning(f"V9.3 {symbol} K 棒評估異常: {e}")
 
     def evaluate_v43_bar(self):

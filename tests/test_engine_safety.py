@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import shutil
 import unittest
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -18,7 +19,7 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from live_ibkr_dual_engine import LiveIBKRDualEngine
+from live_ibkr_dual_engine import LiveIBKRDualEngine, _IBKRWrapperNoiseFilter
 from report_and_incident_manager import IncidentManager
 from daily_auto_audit_fixer import DailyAutoAuditFixer
 
@@ -123,6 +124,46 @@ class TestLiveEngineOrderHygiene(unittest.TestCase):
         self.eng.ensure_position_protection()
         self.assertTrue(len(self.placed_orders) >= 2)
         self.assertTrue(all(o.outsideRth is True for _, o in self.placed_orders))
+
+    def test_hmds_query_throttling_backoff_and_noise_filter(self):
+        self.eng._last_eval_bucket = {}
+        self.eng._hist_fail_streak = {}
+
+        t0 = 1794920110.0  # cleanly inside a 5-min bucket (offset >= 4s)
+        self.assertTrue(self.eng._can_query_hist_bar("MES", t0))
+
+        # Same 5-min bucket already evaluated -> blocked until next 5-min boundary
+        self.eng._last_eval_bucket["MES"] = int(t0 // 300)
+        self.assertFalse(self.eng._can_query_hist_bar("MES", t0 + 30.0))
+        next_bucket_early = (int(t0 // 300) + 1) * 300 + 2.0
+        self.assertFalse(self.eng._can_query_hist_bar("MES", next_bucket_early))
+        self.assertTrue(self.eng._can_query_hist_bar("MES", next_bucket_early + 3.0))
+
+        # Exponential failure backoff: 60s -> 120s -> 240s -> 300s
+        self.eng._last_eval_bucket = {}
+        self.assertEqual(self.eng._record_hist_failure("MES", t0), 60.0)
+        self.assertFalse(self.eng._can_query_hist_bar("MES", t0 + 30.0))
+        self.assertTrue(self.eng._can_query_hist_bar("MES", t0 + 61.0))
+
+        self.assertEqual(self.eng._record_hist_failure("MES", t0 + 61.0), 120.0)
+        self.assertFalse(self.eng._can_query_hist_bar("MES", t0 + 150.0))
+        self.assertEqual(self.eng._record_hist_failure("MES", t0 + 185.0), 240.0)
+        self.assertEqual(self.eng._record_hist_failure("MES", t0 + 430.0), 300.0)
+
+        # Noise filter drops benign 162 cancellation flood, keeps IP conflict & real errors
+        flt = _IBKRWrapperNoiseFilter()
+        rec_cancel = logging.LogRecord(
+            "ib_async.wrapper", logging.ERROR, "", 0,
+            "Error 162, reqId 7840: Historical Market Data Service error message:API historical data query cancelled: 7840",
+            (), None
+        )
+        rec_ip = logging.LogRecord(
+            "ib_async.wrapper", logging.ERROR, "", 0,
+            "Error 162, reqId 12: Trading TWS session is connected from a different IP address",
+            (), None
+        )
+        self.assertFalse(flt.filter(rec_cancel))
+        self.assertTrue(flt.filter(rec_ip))
 
     def test_cancels_wrong_direction_and_flat_orphan_orders(self):
         mes_pos = {"symbol": "MES", "direction": "SHORT", "contracts": 1, "entry_price": 7566.38, "current_price": 7563.0}
