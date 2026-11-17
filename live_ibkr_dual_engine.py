@@ -111,6 +111,164 @@ def calculate_session_vwap(df: pd.DataFrame) -> pd.Series:
     return vwap.fillna(df['close'])
 
 
+def pair_executions_fifo(executions: List[Dict[str, Any]], fx_rate: float = 7.78) -> List[Dict[str, Any]]:
+    """依標的採 FIFO 配對開倉與平倉成交，組成『開倉在上、平倉次級子單在下』的交易組（盈虧已含手續費）。"""
+    if not executions:
+        return []
+
+    def _positive_price(rec: Dict[str, Any]) -> float:
+        for k in ("price", "exit_price", "entry_price", "avg_price", "fill_price"):
+            val = rec.get(k)
+            try:
+                f = float(val)
+                if f > 0 and math.isfinite(f):
+                    return round(f, 2)
+            except (TypeError, ValueError):
+                pass
+        return 0.0
+
+    def _safe_num(val: Any, default: float = 0.0) -> float:
+        try:
+            f = float(val)
+            return f if math.isfinite(f) else default
+        except (TypeError, ValueError):
+            return default
+
+    # 按時間升序排列；同秒先處理含已實現損益的平倉單，再處理新開倉單
+    ordered = sorted(
+        executions,
+        key=lambda x: (
+            str(x.get("timestamp") or ""),
+            0 if abs(_safe_num(x.get("realized_pnl"))) > 1e-6 else 1,
+            str(x.get("exec_id") or ""),
+        ),
+    )
+
+    open_lots: Dict[str, List[Dict[str, Any]]] = {}
+    groups: List[Dict[str, Any]] = []
+
+    for ex in ordered:
+        raw_sym = str(ex.get("symbol") or "").upper()
+        sym = "MNQ" if "MNQ" in raw_sym else ("MES" if "MES" in raw_sym else (raw_sym or "MES"))
+        side = str(ex.get("side") or "").upper()
+        if side not in ("BOT", "SLD"):
+            side = "BOT" if str(ex.get("direction") or "").upper() == "LONG" else "SLD"
+        dir_label = "LONG" if side == "BOT" else "SHORT"
+        qty = max(1, int(round(_safe_num(ex.get("contracts") or ex.get("shares") or 1, 1.0))))
+        price = _positive_price(ex)
+        comm = _safe_num(ex.get("commission"), 0.0)
+        realized = _safe_num(ex.get("realized_pnl"), 0.0)
+        ts = str(ex.get("timestamp") or "")
+        order_ref = str(ex.get("order_ref") or ex.get("tranche") or "")
+        exec_id = str(ex.get("exec_id") or "")
+
+        mult = 2.0 if sym == "MNQ" else 5.0
+        queue = open_lots.setdefault(sym, [])
+        remaining = float(qty)
+
+        while remaining > 1e-6 and queue and queue[0]["direction"] != dir_label:
+            lot = queue[0]
+            matched = min(remaining, lot["remaining_qty"])
+            pts = (price - lot["open_price"]) if lot["direction"] == "LONG" else (lot["open_price"] - price)
+            gross_portion = pts * mult * matched
+            open_comm_portion = lot["open_comm"] * (matched / lot["open_qty"])
+            close_comm_portion = comm * (matched / qty)
+
+            if abs(realized) > 1e-6:
+                sub_pnl = round(realized * (matched / qty), 2)
+            else:
+                sub_pnl = round(gross_portion - open_comm_portion - close_comm_portion, 2)
+
+            grp = lot["group"]
+            grp["close_orders"].append({
+                "timestamp": ts,
+                "side": side,
+                "action_label": "買入平倉 BUY" if side == "BOT" else "沽出平倉 SELL",
+                "contracts": int(round(matched)) if abs(matched - round(matched)) < 1e-6 else matched,
+                "close_price": price,
+                "pnl": sub_pnl,
+                "pnl_hkd": round(sub_pnl * fx_rate, 2),
+                "order_ref": order_ref,
+                "exec_id": exec_id,
+            })
+            grp["closed_contracts"] = round(grp["closed_contracts"] + matched, 4)
+            grp["total_pnl"] = round(grp["total_pnl"] + sub_pnl, 2)
+            grp["total_pnl_hkd"] = round(grp["total_pnl"] * fx_rate, 2)
+            grp["latest_timestamp"] = ts or grp["latest_timestamp"]
+
+            lot["remaining_qty"] -= matched
+            remaining -= matched
+            if lot["remaining_qty"] <= 1e-6:
+                queue.pop(0)
+
+            grp["status"] = "CLOSED" if grp["closed_contracts"] + 1e-6 >= grp["contracts"] else "PARTIAL"
+
+        if remaining > 1e-6:
+            rem_int = int(round(remaining)) if abs(remaining - round(remaining)) < 1e-6 else remaining
+            # 若此筆在視窗最前緣就已是帶已實現損益的平倉單（開倉早於查詢視窗），保留為獨立已平倉組以免漏記
+            if remaining == qty and abs(realized) > 1e-6:
+                pnl_val = round(realized, 2)
+                groups.append({
+                    "symbol": sym,
+                    "direction": "SHORT" if side == "BOT" else "LONG",
+                    "status": "ORPHAN_CLOSE",
+                    "open_timestamp": ts,
+                    "open_price": None,
+                    "contracts": rem_int,
+                    "closed_contracts": rem_int,
+                    "total_pnl": pnl_val,
+                    "total_pnl_hkd": round(pnl_val * fx_rate, 2),
+                    "order_ref": order_ref,
+                    "exec_id": exec_id,
+                    "latest_timestamp": ts,
+                    "close_orders": [{
+                        "timestamp": ts,
+                        "side": side,
+                        "action_label": "買入平倉 BUY" if side == "BOT" else "沽出平倉 SELL",
+                        "contracts": rem_int,
+                        "close_price": price,
+                        "pnl": pnl_val,
+                        "pnl_hkd": round(pnl_val * fx_rate, 2),
+                        "order_ref": order_ref,
+                        "exec_id": exec_id,
+                    }],
+                })
+            else:
+                grp = {
+                    "symbol": sym,
+                    "direction": dir_label,
+                    "status": "OPEN",
+                    "open_timestamp": ts,
+                    "open_price": price,
+                    "contracts": rem_int,
+                    "closed_contracts": 0,
+                    "total_pnl": 0.0,
+                    "total_pnl_hkd": 0.0,
+                    "order_ref": order_ref,
+                    "exec_id": exec_id,
+                    "latest_timestamp": ts,
+                    "close_orders": [],
+                }
+                groups.append(grp)
+                queue.append({
+                    "group": grp,
+                    "direction": dir_label,
+                    "open_price": price,
+                    "open_qty": remaining,
+                    "remaining_qty": remaining,
+                    "open_comm": comm * (remaining / qty),
+                })
+
+    groups.sort(
+        key=lambda g: (
+            str(g.get("latest_timestamp") or g.get("open_timestamp") or ""),
+            1 if g.get("status") == "OPEN" else 0,
+        ),
+        reverse=True,
+    )
+    return groups
+
+
 class LiveIBKRDualEngine:
     def __init__(self, check_interval_sec: float = 2.0):
         self.interval = check_interval_sec
@@ -126,6 +284,7 @@ class LiveIBKRDualEngine:
         self.client_id = 25
         self.account_id: str = ""
         self.currency: str = "HKD"
+        self.usd_hkd_rate: float = 7.78
         self.is_connected = False
 
         # 4H 宏觀趨勢濾網快取 (4H_LOCK: 15 分鐘動態更新)
@@ -540,6 +699,13 @@ class LiveIBKRDualEngine:
                     self.realized_pnl = float(item.value)
                 elif item.tag == "UnrealizedPnL":
                     self.unrealized_pnl = float(item.value)
+                elif item.tag == "ExchangeRate" and getattr(item, "currency", "") == "USD":
+                    try:
+                        fx = float(item.value)
+                        if 6.5 <= fx <= 9.0:
+                            self.usd_hkd_rate = round(fx, 4)
+                    except (TypeError, ValueError):
+                        pass
 
             # 從官方 reqPnL() 訂閱更新即時每日已實現與未實現損益
             try:
@@ -556,7 +722,7 @@ class LiveIBKRDualEngine:
                 pass
 
             # 計算美金淨值與 6:4 資金池
-            usd_rate = 7.78 if self.currency == "HKD" else 1.0
+            usd_rate = self.usd_hkd_rate if self.currency == "HKD" else 1.0
             self.equity_usd_total = max(30000.0, self.net_liquidation / usd_rate)
             self.pool_v43_usd = self.equity_usd_total * 0.60
             self.pool_v50_usd = self.equity_usd_total * 0.40
@@ -630,54 +796,46 @@ class LiveIBKRDualEngine:
                     continue
 
                 pos_direction = "LONG" if p.position > 0 else "SHORT"
-
-                if sym == "MES":
-                    multiplier = 5.0
-                    entry_p = round(float(p.avgCost / multiplier), 2)
-                    cur_p = self.price_mes if self.price_mes > 0 else entry_p
-                    pts = (cur_p - entry_p) if pos_direction == "LONG" else (entry_p - cur_p)
-                    u_pnl = round(pts * qty * multiplier, 2)
-                    c_a, c_b, c_c = self.engine_v91_mes.calculate_tranches(qty)
-                    pos_v43 = {
-                        "strategy": "v9.1",
-                        "symbol": "MES",
-                        "position_id": f"POS_{self.symbol_mes}",
-                        "direction": pos_direction,
-                        "contracts": qty,
-                        "entry_price": entry_p,
-                        "current_price": cur_p,
-                        "unrealized_pnl": u_pnl,
-                        "floating_points": round(pts, 2),
-                        "tranche_a_contracts": c_a,
-                        "tranche_b_contracts": c_b,
-                        "tranche_c_contracts": c_c
-                    }
-
-                elif sym == "MNQ":
-                    multiplier = 2.0
-                    entry_p = round(float(p.avgCost / multiplier), 2)
-                    cur_p = self.price_mnq if self.price_mnq > 0 else entry_p
-                    pts = (cur_p - entry_p) if pos_direction == "LONG" else (entry_p - cur_p)
-                    u_pnl = round(pts * qty * multiplier, 2)
-                    c_a, c_b, c_c = self.engine_v91_mnq.calculate_tranches(qty)
-                    pos_v50 = {
-                        "strategy": "v9.1",
-                        "symbol": "MNQ",
-                        "position_id": f"POS_{self.symbol_mnq}",
-                        "direction": pos_direction,
-                        "contracts": qty,
-                        "entry_price": entry_p,
-                        "current_price": cur_p,
-                        "unrealized_pnl": u_pnl,
-                        "floating_points": round(pts, 2),
-                        "tranche_a_contracts": c_a,
-                        "tranche_b_contracts": c_b,
-                        "tranche_c_contracts": c_c
-                    }
+                if sym in ("MES", "MNQ"):
+                    snap = self._build_position_snapshot(sym, qty, pos_direction, p.avgCost)
+                    if sym == "MES":
+                        pos_v43 = snap
+                    else:
+                        pos_v50 = snap
         except Exception as e:
             logger.warning(f"讀取持倉異常: {e}")
 
         return pos_v43, pos_v50
+
+    def _build_position_snapshot(self, sym: str, qty: int, pos_direction: str, avg_cost: float) -> Dict[str, Any]:
+        """建立單標的即時持倉快照，並同時輸出 USD 與 HKD 浮動損益。"""
+        is_mnq = sym == "MNQ"
+        multiplier = 2.0 if is_mnq else 5.0
+        entry_p = round(float(avg_cost / multiplier), 2)
+        market_p = self.price_mnq if is_mnq else self.price_mes
+        cur_p = market_p if market_p > 0 else entry_p
+        pts = (cur_p - entry_p) if pos_direction == "LONG" else (entry_p - cur_p)
+        u_pnl_usd = round(pts * qty * multiplier, 2)
+        u_pnl_hkd = round(u_pnl_usd * self.usd_hkd_rate, 2)
+        engine = self.engine_v91_mnq if is_mnq else self.engine_v91_mes
+        c_a, c_b, c_c = engine.calculate_tranches(qty)
+        contract_label = self.symbol_mnq if is_mnq else self.symbol_mes
+        return {
+            "strategy": "v9.1",
+            "symbol": sym,
+            "position_id": f"POS_{contract_label}",
+            "direction": pos_direction,
+            "contracts": qty,
+            "entry_price": entry_p,
+            "current_price": cur_p,
+            "unrealized_pnl": u_pnl_usd,
+            "unrealized_pnl_hkd": u_pnl_hkd,
+            "fx_rate_usd_hkd": self.usd_hkd_rate,
+            "floating_points": round(pts, 2),
+            "tranche_a_contracts": c_a,
+            "tranche_b_contracts": c_b,
+            "tranche_c_contracts": c_c,
+        }
 
     def get_real_open_orders(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """從 IBKR 分流拉取 MES (V4.3) 與 MNQ (V5.0) 的當前真實掛單"""
@@ -754,10 +912,13 @@ class LiveIBKRDualEngine:
                 report = getattr(f, "commissionReport", None)
                 comm = self._safe_float(getattr(report, "commission", 0.0)) if report else 0.0
                 realized = self._safe_float(getattr(report, "realizedPNL", 0.0)) if report else 0.0
-                net_pnl = round(realized - comm, 2)
+                # IBKR commissionReport.realizedPNL 已扣除開倉與平倉雙邊手續費
+                net_pnl = round(realized, 2) if abs(realized) > 1e-6 else round(-comm, 2)
 
                 item = {
                     "exec_id": f.execution.execId,
+                    "order_id": int(getattr(f.execution, "orderId", 0) or 0),
+                    "order_ref": getattr(f.execution, "orderRef", "") or "",
                     "position_id": f"FILL_{f.execution.execId}",
                     "symbol": sym,
                     "timestamp": f.execution.time.strftime("%Y-%m-%d %H:%M:%S") if isinstance(f.execution.time, datetime) else str(f.execution.time),
@@ -769,6 +930,9 @@ class LiveIBKRDualEngine:
                     "commission": comm,
                     "net_pnl": net_pnl,
                     "pnl": net_pnl,
+                    "realized_pnl_hkd": round(realized * self.usd_hkd_rate, 2),
+                    "net_pnl_hkd": round(net_pnl * self.usd_hkd_rate, 2),
+                    "fx_rate_usd_hkd": self.usd_hkd_rate,
                     "is_live": True
                 }
 
@@ -1612,15 +1776,32 @@ class LiveIBKRDualEngine:
         pos_v50 = self._enrich_pos_with_orders(pos_v50, orders_v50)
         trades_v43, trades_v50 = self.get_real_executions() if self.is_connected else ([], [])
 
-        # 若官方 accountSummary/reqPnL 尚未回傳，改由即時持倉與今日成交紀錄加總補齊損益
+        # 若官方 accountSummary/reqPnL 尚未回傳，改由即時持倉與今日成交紀錄加總并折算 HKD 補齊損益
+        fx = self.usd_hkd_rate
         calc_unrealized = round(
             (pos_v43.get("unrealized_pnl", 0.0) if pos_v43 else 0.0) +
             (pos_v50.get("unrealized_pnl", 0.0) if pos_v50 else 0.0),
             2
         )
+        calc_unrealized_hkd = round(calc_unrealized * fx, 2)
         calc_realized = round(sum(float(t.get("realized_pnl", 0.0)) for t in (trades_v43 + trades_v50)), 2)
-        display_unrealized = self.unrealized_pnl if self.unrealized_pnl != 0.0 else calc_unrealized
-        display_realized = self.realized_pnl if self.realized_pnl != 0.0 else calc_realized
+        calc_realized_hkd = round(calc_realized * fx, 2)
+
+        if self.currency == "HKD":
+            display_unrealized_hkd = self.unrealized_pnl if self.unrealized_pnl != 0.0 else calc_unrealized_hkd
+            display_realized_hkd = self.realized_pnl if self.realized_pnl != 0.0 else calc_realized_hkd
+        else:
+            raw_u = self.unrealized_pnl if self.unrealized_pnl != 0.0 else calc_unrealized
+            raw_r = self.realized_pnl if self.realized_pnl != 0.0 else calc_realized
+            display_unrealized_hkd = round(raw_u * fx, 2)
+            display_realized_hkd = round(raw_r * fx, 2)
+
+        all_recent_trades = sorted(
+            trades_v43 + trades_v50,
+            key=lambda x: x.get("timestamp", ""),
+            reverse=True
+        )
+        paired_trades = pair_executions_fifo(all_recent_trades, fx_rate=fx)
 
         status = {
             "mode": "DUAL_ENGINE_PARALLEL",
@@ -1633,6 +1814,7 @@ class LiveIBKRDualEngine:
             "reconnect_delay": round(self.reconnect_delay, 1),
             "account_id": self.account_id if self.is_connected else "尚未連線",
             "currency": self.currency,
+            "fx_rate_usd_hkd": round(fx, 4),
             "status_message": self.status_message,
             "market_schedule_open": not getattr(self, "market_paused", False),
             "market_schedule_status": "CLOSED" if getattr(self, "market_paused", False) else "OPEN",
@@ -1643,13 +1825,15 @@ class LiveIBKRDualEngine:
             "market_data_status": self.market_data_status,
             "market_data_desc": "🟢 實時報價 (Type 1)" if self.market_data_status == "REAL_TIME" else "🟡 延遲報價 (Type 3 - 待重啟 Gateway 刷新)",
 
-            # 全局帳戶總覽
+            # 全局帳戶總覽（Unrealized / Realized 統一以 HKD 提供）
             "equity": self.net_liquidation,
             "cash_balance": self.cash_balance,
             "available_funds": self.available_funds,
             "margin_requirement": self.init_margin_req,
-            "realized_pnl": display_realized,
-            "unrealized_pnl": display_unrealized,
+            "realized_pnl": display_realized_hkd,
+            "realized_pnl_hkd": display_realized_hkd,
+            "unrealized_pnl": display_unrealized_hkd,
+            "unrealized_pnl_hkd": display_unrealized_hkd,
             "unrealized_pnl_usd": calc_unrealized,
 
             # 6:4 資金調度池
@@ -1719,11 +1903,8 @@ class LiveIBKRDualEngine:
             "trading_enabled": self.trading_enabled_global,
             "active_position": pos_v43 or pos_v50,
             "open_orders": orders_v43 + orders_v50,
-            "recent_trades": sorted(
-                trades_v43 + trades_v50,
-                key=lambda x: x.get("timestamp", ""),
-                reverse=True
-            )
+            "recent_trades": all_recent_trades,
+            "paired_trades": paired_trades,
         }
 
         # 注入 Cloudflare 戶外隧道網址 (若在線)

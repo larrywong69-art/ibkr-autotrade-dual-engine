@@ -128,9 +128,9 @@
 
       <!-- 今日損益 -->
       <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-3 shadow-sm">
-        <div class="text-[11px] text-[var(--muted)] font-medium">今日未實現損益</div>
+        <div class="text-[11px] text-[var(--muted)] font-medium">雙盤浮動損益 (HKD)</div>
         <div class="text-lg font-bold mt-1 tracking-tight" id="val-unrealized-pnl">--</div>
-        <div class="text-[10px] text-[var(--muted)] mt-0.5" id="val-realized-pnl">已實現: $0.00</div>
+        <div class="text-[10px] text-[var(--muted)] mt-0.5" id="val-realized-pnl">已實現: HK$ 0.00</div>
       </div>
 
       <!-- 可用資金 -->
@@ -183,7 +183,7 @@
           <div class="text-xs font-bold text-white mt-0.5" id="v43-entry">--</div>
         </div>
         <div>
-          <div class="text-[10px] text-[var(--muted)]">浮動盈虧</div>
+          <div class="text-[10px] text-[var(--muted)]">浮動盈虧 (HKD)</div>
           <div class="text-xs font-bold mt-0.5" id="v43-pnl">--</div>
         </div>
       </div>
@@ -236,7 +236,7 @@
           <div class="text-xs font-bold text-white mt-0.5" id="v50-entry">--</div>
         </div>
         <div>
-          <div class="text-[10px] text-[var(--muted)]">浮動盈虧</div>
+          <div class="text-[10px] text-[var(--muted)]">浮動盈虧 (HKD)</div>
           <div class="text-xs font-bold mt-0.5" id="v50-pnl">--</div>
         </div>
       </div>
@@ -598,13 +598,38 @@
       const eqUsd = data.capital_allocation && data.capital_allocation.total_equity_usd ? data.capital_allocation.total_equity_usd : (eq / 7.78);
       document.getElementById("val-equity-usd").textContent = `≈ $${eqUsd.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} USD`;
 
-      const uPnl = data.unrealized_pnl || 0;
-      const uEl = document.getElementById("val-unrealized-pnl");
-      uEl.textContent = (uPnl >= 0 ? "+" : "") + "$" + uPnl.toFixed(2);
-      uEl.className = "text-lg font-bold mt-1 tracking-tight " + (uPnl > 0 ? "text-emerald-400" : (uPnl < 0 ? "text-rose-400" : "text-white"));
+      const curr = data.currency || "HKD";
+      const fxRate = Number(data.fx_rate_usd_hkd) || 7.78;
+      const fmtHkd = (v) => {
+        const n = Number(v) || 0;
+        const absStr = Math.abs(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+        if (n > 0) return `+HK$ ${absStr}`;
+        if (n < 0) return `-HK$ ${absStr}`;
+        return "HK$ 0.00";
+      };
 
-      const rPnl = data.realized_pnl || 0;
-      document.getElementById("val-realized-pnl").textContent = `已實現: ${rPnl >= 0 ? '+' : ''}$${rPnl.toFixed(2)}`;
+      const v43 = data.v43 || {};
+      const v50 = data.v50 || {};
+      const v43Pos = v43.active_position;
+      const v50Pos = v50.active_position;
+      const p43UHkd = v43Pos ? (v43Pos.unrealized_pnl_hkd !== undefined ? Number(v43Pos.unrealized_pnl_hkd) : ((Number(v43Pos.unrealized_pnl) || 0) * fxRate)) : 0;
+      const p50UHkd = v50Pos ? (v50Pos.unrealized_pnl_hkd !== undefined ? Number(v50Pos.unrealized_pnl_hkd) : ((Number(v50Pos.unrealized_pnl) || 0) * fxRate)) : 0;
+
+      const hasActivePos = (v43Pos && v43Pos.contracts > 0) || (v50Pos && v50Pos.contracts > 0);
+      const uPnlHkd = hasActivePos
+        ? (p43UHkd + p50UHkd)
+        : (data.unrealized_pnl_hkd !== undefined
+          ? (Number(data.unrealized_pnl_hkd) || 0)
+          : (curr === "HKD" ? (Number(data.unrealized_pnl) || 0) : ((Number(data.unrealized_pnl) || 0) * fxRate)));
+
+      const uEl = document.getElementById("val-unrealized-pnl");
+      uEl.textContent = fmtHkd(uPnlHkd);
+      uEl.className = "text-lg font-bold mt-1 tracking-tight " + (uPnlHkd > 0 ? "text-emerald-400" : (uPnlHkd < 0 ? "text-rose-400" : "text-white"));
+
+      const rPnlHkd = data.realized_pnl_hkd !== undefined
+        ? (Number(data.realized_pnl_hkd) || 0)
+        : (curr === "HKD" ? (Number(data.realized_pnl) || 0) : ((Number(data.realized_pnl) || 0) * fxRate));
+      document.getElementById("val-realized-pnl").textContent = `已實現: ${fmtHkd(rPnlHkd)}`;
 
       const avail = data.available_funds || 0;
       document.getElementById("val-avail").textContent = "$" + avail.toLocaleString('en-US', {maximumFractionDigits: 0});
@@ -615,50 +640,44 @@
       document.getElementById("val-margin-ratio").textContent = `佔比: ${ratio}%`;
 
       // 策略 1: V4.3 MES
-      const v43 = data.v43 || {};
       document.getElementById("v43-contract-tag").textContent = "合約: " + (v43.active_contract || "MES 主力") + " (CME)";
       document.getElementById("v43-price").textContent = v43.current_price ? v43.current_price.toFixed(2) : "--";
 
-      const v43Pos = v43.active_position;
       const v43Badge = document.getElementById("v43-pos-badge");
       if (v43Pos && v43Pos.contracts > 0) {
         const isLong = v43Pos.direction === "LONG";
         v43Badge.textContent = (isLong ? "好倉 " : "淡倉 ") + v43Pos.contracts + " 張";
         v43Badge.className = `px-2 py-0.5 rounded-full text-xs font-bold ${isLong ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'}`;
         document.getElementById("v43-entry").textContent = v43Pos.entry_price ? v43Pos.entry_price.toFixed(2) : "--";
-        const pnl = v43Pos.unrealized_pnl || 0;
         const pnlEl = document.getElementById("v43-pnl");
-        pnlEl.textContent = (pnl >= 0 ? "+" : "") + "$" + pnl.toFixed(2);
-        pnlEl.className = "text-xs font-bold mt-0.5 " + (pnl >= 0 ? "text-emerald-400" : "text-rose-400");
+        pnlEl.textContent = fmtHkd(p43UHkd);
+        pnlEl.className = "text-xs font-bold mt-0.5 " + (p43UHkd >= 0 ? "text-emerald-400" : "text-rose-400");
       } else {
         v43Badge.textContent = "無持倉";
         v43Badge.className = "px-2 py-0.5 rounded-full text-xs font-bold bg-slate-800 text-slate-400 border border-slate-700";
         document.getElementById("v43-entry").textContent = "--";
-        document.getElementById("v43-pnl").textContent = "$0.00";
+        document.getElementById("v43-pnl").textContent = "HK$ 0.00";
         document.getElementById("v43-pnl").className = "text-xs font-bold mt-0.5 text-slate-400";
       }
 
       // 策略 2: V5.0 MNQ
-      const v50 = data.v50 || {};
       document.getElementById("v50-contract-tag").textContent = "合約: " + (v50.active_contract || "MNQ 主力") + " (CME)";
       document.getElementById("v50-price").textContent = v50.current_price ? v50.current_price.toFixed(2) : "--";
 
-      const v50Pos = v50.active_position;
       const v50Badge = document.getElementById("v50-pos-badge");
       if (v50Pos && v50Pos.contracts > 0) {
         const isLong = v50Pos.direction === "LONG";
         v50Badge.textContent = (isLong ? "好倉 " : "淡倉 ") + v50Pos.contracts + " 張";
         v50Badge.className = `px-2 py-0.5 rounded-full text-xs font-bold ${isLong ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'}`;
         document.getElementById("v50-entry").textContent = v50Pos.entry_price ? v50Pos.entry_price.toFixed(2) : "--";
-        const pnl = v50Pos.unrealized_pnl || 0;
         const pnlEl = document.getElementById("v50-pnl");
-        pnlEl.textContent = (pnl >= 0 ? "+" : "") + "$" + pnl.toFixed(2);
-        pnlEl.className = "text-xs font-bold mt-0.5 " + (pnl >= 0 ? "text-emerald-400" : "text-rose-400");
+        pnlEl.textContent = fmtHkd(p50UHkd);
+        pnlEl.className = "text-xs font-bold mt-0.5 " + (p50UHkd >= 0 ? "text-emerald-400" : "text-rose-400");
       } else {
         v50Badge.textContent = "無持倉";
         v50Badge.className = "px-2 py-0.5 rounded-full text-xs font-bold bg-slate-800 text-slate-400 border border-slate-700";
         document.getElementById("v50-entry").textContent = "--";
-        document.getElementById("v50-pnl").textContent = "$0.00";
+        document.getElementById("v50-pnl").textContent = "HK$ 0.00";
         document.getElementById("v50-pnl").className = "text-xs font-bold mt-0.5 text-slate-400";
       }
     }
@@ -672,6 +691,13 @@
       const posStatus = document.getElementById("modal-pos-status");
       const pnlEl = document.getElementById("modal-pnl");
 
+      const fxRate = (currentStatus && Number(currentStatus.fx_rate_usd_hkd)) || 7.78;
+      const fmtModalHkd = (p) => {
+        if (!p) return "HK$ 0.00";
+        const v = p.unrealized_pnl_hkd !== undefined ? Number(p.unrealized_pnl_hkd) : ((Number(p.unrealized_pnl) || 0) * fxRate);
+        return `${v >= 0 ? '+' : '-'}HK$ ${Math.abs(v).toFixed(2)}`;
+      };
+
       if (symbol === "ALL") {
         title.textContent = "🚨 確認全平所有持倉？";
         target.textContent = "全部持倉 (MES + MNQ)";
@@ -682,13 +708,13 @@
         target.textContent = "MES (微型標普期貨)";
         const v43Pos = currentStatus && currentStatus.v43 ? currentStatus.v43.active_position : null;
         posStatus.textContent = v43Pos ? `${v43Pos.direction === 'LONG' ? '好倉' : '淡倉'} ${v43Pos.contracts} 張` : "無持倉 (將撤銷所有掛單)";
-        pnlEl.textContent = v43Pos ? `$${v43Pos.unrealized_pnl || 0}` : "$0.00";
+        pnlEl.textContent = fmtModalHkd(v43Pos);
       } else if (symbol === "MNQ") {
         title.textContent = "🛑 確認手動平倉 MNQ？";
         target.textContent = "MNQ (微型納指期貨)";
         const v50Pos = currentStatus && currentStatus.v50 ? currentStatus.v50.active_position : null;
         posStatus.textContent = v50Pos ? `${v50Pos.direction === 'LONG' ? '好倉' : '淡倉'} ${v50Pos.contracts} 張` : "無持倉 (將撤銷所有掛單)";
-        pnlEl.textContent = v50Pos ? `$${v50Pos.unrealized_pnl || 0}` : "$0.00";
+        pnlEl.textContent = fmtModalHkd(v50Pos);
       }
 
       modal.classList.remove("hidden");
@@ -861,29 +887,119 @@
       }
     }
 
+    function pairExecutionTradesMobile(rawTrades) {
+      if (!Array.isArray(rawTrades) || rawTrades.length === 0) return [];
+      const toNum = (v, def = 0) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : def;
+      };
+      const pickPrice = (rec) => {
+        for (const k of ["price", "exit_price", "entry_price", "avg_price", "fill_price"]) {
+          const n = Number(rec?.[k]);
+          if (Number.isFinite(n) && n > 0) return Number(n.toFixed(2));
+        }
+        return 0;
+      };
+      const ordered = [...rawTrades].sort((a, b) => {
+        const ta = String(a?.timestamp || "");
+        const tb = String(b?.timestamp || "");
+        if (ta !== tb) return ta.localeCompare(tb);
+        const ra = Math.abs(toNum(a?.realized_pnl)) > 1e-6 ? 0 : 1;
+        const rb = Math.abs(toNum(b?.realized_pnl)) > 1e-6 ? 0 : 1;
+        if (ra !== rb) return ra - rb;
+        return String(a?.exec_id || "").localeCompare(String(b?.exec_id || ""));
+      });
+      const openLots = {};
+      const groups = [];
+      for (const ex of ordered) {
+        const rawSym = String(ex?.symbol || "").toUpperCase();
+        const sym = rawSym.includes("MNQ") ? "MNQ" : (rawSym.includes("MES") ? "MES" : (rawSym || "MES"));
+        let side = String(ex?.side || "").toUpperCase();
+        if (side !== "BOT" && side !== "SLD") side = String(ex?.direction || "").toUpperCase() === "LONG" ? "BOT" : "SLD";
+        const dirLabel = side === "BOT" ? "LONG" : "SHORT";
+        const qty = Math.max(1, Math.round(toNum(ex?.contracts ?? ex?.shares ?? 1, 1)));
+        const price = pickPrice(ex);
+        const comm = toNum(ex?.commission, 0);
+        const realized = toNum(ex?.realized_pnl, 0);
+        const ts = String(ex?.timestamp || "");
+        const orderRef = String(ex?.order_ref || ex?.tranche || "");
+        const mult = sym === "MNQ" ? 2.0 : 5.0;
+        if (!openLots[sym]) openLots[sym] = [];
+        const queue = openLots[sym];
+        let remaining = qty;
+        while (remaining > 1e-6 && queue.length > 0 && queue[0].direction !== dirLabel) {
+          const lot = queue[0];
+          const matched = Math.min(remaining, lot.remaining_qty);
+          const pts = lot.direction === "LONG" ? (price - lot.open_price) : (lot.open_price - price);
+          const gross = pts * mult * matched;
+          const openCommPortion = lot.open_comm * (matched / lot.open_qty);
+          const closeCommPortion = comm * (matched / qty);
+          const subPnl = Math.abs(realized) > 1e-6
+            ? Number((realized * (matched / qty)).toFixed(2))
+            : Number((gross - openCommPortion - closeCommPortion).toFixed(2));
+          const grp = lot.group;
+          grp.close_orders.push({
+            timestamp: ts,
+            action_label: side === "BOT" ? "買入平倉" : "沽出平倉",
+            contracts: Math.abs(matched - Math.round(matched)) < 1e-6 ? Math.round(matched) : matched,
+            close_price: price,
+            pnl: subPnl,
+            order_ref: orderRef,
+          });
+          grp.closed_contracts = Number((grp.closed_contracts + matched).toFixed(4));
+          grp.total_pnl = Number((grp.total_pnl + subPnl).toFixed(2));
+          grp.latest_timestamp = ts || grp.latest_timestamp;
+          lot.remaining_qty -= matched;
+          remaining -= matched;
+          if (lot.remaining_qty <= 1e-6) queue.shift();
+          grp.status = grp.closed_contracts + 1e-6 >= grp.contracts ? "CLOSED" : "PARTIAL";
+        }
+        if (remaining > 1e-6) {
+          const remQty = Math.abs(remaining - Math.round(remaining)) < 1e-6 ? Math.round(remaining) : remaining;
+          if (remaining === qty && Math.abs(realized) > 1e-6) {
+            const pnlVal = Number(realized.toFixed(2));
+            groups.push({
+              symbol: sym, direction: side === "BOT" ? "SHORT" : "LONG", status: "ORPHAN_CLOSE",
+              open_timestamp: ts, open_price: null, contracts: remQty, closed_contracts: remQty,
+              total_pnl: pnlVal, order_ref: orderRef, latest_timestamp: ts,
+              close_orders: [{ timestamp: ts, action_label: side === "BOT" ? "買入平倉" : "沽出平倉", contracts: remQty, close_price: price, pnl: pnlVal, order_ref: orderRef }],
+            });
+          } else {
+            const grp = {
+              symbol: sym, direction: dirLabel, status: "OPEN",
+              open_timestamp: ts, open_price: price, contracts: remQty, closed_contracts: 0,
+              total_pnl: 0, order_ref: orderRef, latest_timestamp: ts, close_orders: [],
+            };
+            groups.push(grp);
+            queue.push({ group: grp, direction: dirLabel, open_price: price, open_qty: remaining, remaining_qty: remaining, open_comm: comm * (remaining / qty) });
+          }
+        }
+      }
+      return groups.sort((a, b) => {
+        const ta = String(a.latest_timestamp || a.open_timestamp || "");
+        const tb = String(b.latest_timestamp || b.open_timestamp || "");
+        if (ta !== tb) return tb.localeCompare(ta);
+        return (b.status === "OPEN" ? 1 : 0) - (a.status === "OPEN" ? 1 : 0);
+      });
+    }
+
     function renderTrades(trades) {
       const container = document.getElementById("trades-container");
       const badge = document.getElementById("trades-count-badge");
       if (!container) return;
 
-      let filtered = trades || [];
+      const allGroups = (currentStatus && Array.isArray(currentStatus.paired_trades) && currentStatus.paired_trades.length > 0 && (!trades || trades.length === 0))
+        ? currentStatus.paired_trades
+        : pairExecutionTradesMobile(trades || []);
+
+      let filtered = allGroups;
       if (currentTradeFilter === "MES") {
-        filtered = filtered.filter(t => {
-          const sym = (t.symbol || "").toUpperCase();
-          const strat = (t.strategy || "").toLowerCase();
-          const ref = (t.order_ref || "").toUpperCase();
-          return sym.includes("MES") || strat.includes("4.3") || strat.includes("v4") || ref.includes("MES") || ref.includes("V43");
-        });
+        filtered = filtered.filter(g => (g.symbol || "").includes("MES") || (g.order_ref || "").toUpperCase().includes("V43"));
       } else if (currentTradeFilter === "MNQ") {
-        filtered = filtered.filter(t => {
-          const sym = (t.symbol || "").toUpperCase();
-          const strat = (t.strategy || "").toLowerCase();
-          const ref = (t.order_ref || "").toUpperCase();
-          return sym.includes("MNQ") || strat.includes("5.0") || strat.includes("v5") || ref.includes("MNQ") || ref.includes("V50");
-        });
+        filtered = filtered.filter(g => (g.symbol || "").includes("MNQ") || (g.order_ref || "").toUpperCase().includes("V50"));
       }
 
-      if (badge) badge.textContent = `${filtered.length} 筆`;
+      if (badge) badge.textContent = `${filtered.length} 組`;
 
       if (filtered.length === 0) {
         container.innerHTML = `
@@ -896,74 +1012,68 @@
         return;
       }
 
-      container.innerHTML = filtered.map(t => {
-        const sym = (t.symbol || (t.strategy && t.strategy.includes('4') ? 'MES' : 'MNQ')).toUpperCase();
-        const isMes = sym.includes("MES") || (t.strategy && t.strategy.includes("4"));
+      container.innerHTML = filtered.map(g => {
+        const sym = String(g.symbol || "MES").toUpperCase();
+        const isMes = sym.includes("MES");
         const stratName = isMes ? "V9.3 MES" : "V9.3 MNQ";
-        const stratIcon = "🔥";
-        const stratBadge = isMes 
-          ? "bg-blue-500/15 text-blue-400 border border-blue-500/30" 
+        const stratBadge = isMes
+          ? "bg-blue-500/15 text-blue-400 border border-blue-500/30"
           : "bg-indigo-500/15 text-indigo-400 border border-indigo-500/30";
 
-        const side = (t.side || (t.direction === "LONG" ? "BOT" : "SLD")).toUpperCase();
-        const isBuy = side === "BOT" || side === "BUY" || t.direction === "LONG";
-        const sideText = isBuy ? "買入 BOT" : "賣出 SLD";
-        const sideBadge = isBuy
+        const isLong = g.direction === "LONG";
+        const dirText = isLong ? "好倉 LONG" : "淡倉 SHORT";
+        const dirBadge = isLong
           ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
           : "bg-rose-500/20 text-rose-400 border border-rose-500/30";
 
-        const contracts = t.shares || t.contracts || 1;
-        const rawPrice = [t.price, t.exit_price, t.entry_price, t.avg_price, t.fill_price].find(
-          v => v !== undefined && v !== null && v !== '' && !Number.isNaN(Number(v)) && Number(v) > 0
-        );
-        const price = rawPrice !== undefined ? Number(rawPrice) : 0;
-        const rawPnl = [t.net_pnl, t.pnl, t.realized_pnl, t.pnl_usd].find(
-          v => v !== undefined && v !== null && v !== '' && !Number.isNaN(Number(v))
-        );
-        const pnl = rawPnl !== undefined ? Number(rawPnl) : 0;
-        const comm = t.commission !== undefined && t.commission !== null ? Number(t.commission) : 0;
-        
-        let pnlHtml = "";
-        if (pnl !== 0) {
-          const isProfitable = pnl > 0;
-          pnlHtml = `<span class="font-bold font-mono ${isProfitable ? 'text-emerald-400' : 'text-rose-400'}">${isProfitable ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}</span>`;
-        } else if (isBuy) {
-          pnlHtml = `<span class="text-[10px] text-slate-400">開倉建倉</span>`;
-        } else {
-          pnlHtml = `<span class="font-mono text-slate-400">$0.00</span>`;
+        const closeOrders = Array.isArray(g.close_orders) ? g.close_orders : [];
+        const hasClose = closeOrders.length > 0;
+        const openTime = (g.open_timestamp || "").length > 10 ? g.open_timestamp.slice(5) : (g.open_timestamp || "--:--");
+        const openPriceStr = g.open_price && Number(g.open_price) > 0 ? Number(g.open_price).toFixed(2) : "-";
+
+        let grpPnlHtml = `<span class="text-[10px] text-amber-400 font-semibold">持倉中</span>`;
+        if (hasClose) {
+          const pnl = Number(g.total_pnl) || 0;
+          const colorCls = pnl > 0 ? "text-emerald-400" : (pnl < 0 ? "text-rose-400" : "text-slate-300");
+          const sign = pnl > 0 ? "+" : (pnl < 0 ? "-" : "");
+          grpPnlHtml = `<span class="font-bold font-mono ${colorCls}">${sign}$${Math.abs(pnl).toFixed(2)}</span>`;
         }
 
-        const rawTime = t.timestamp || t.exit_time || t.entry_time || "";
-        const timeStr = rawTime.length > 10 ? rawTime.slice(5) : (rawTime || "--:--");
+        const subHtml = closeOrders.map((co, cIdx) => {
+          const ct = (co.timestamp || "").length > 10 ? co.timestamp.slice(5) : (co.timestamp || "--:--");
+          const cp = Number(co.pnl) || 0;
+          const cpColor = cp > 0 ? "text-emerald-400" : (cp < 0 ? "text-rose-400" : "text-slate-300");
+          const cpSign = cp > 0 ? "+" : (cp < 0 ? "-" : "");
+          const tag = closeOrders.length > 1 ? `次級平倉 #${cIdx + 1}` : "次級平倉單";
+          return `
+            <div class="ml-3 pl-2.5 py-1.5 border-l-2 border-blue-500/40 bg-black/20 rounded-r-lg flex items-center justify-between text-[11px]">
+              <div class="space-y-0.5">
+                <div class="text-slate-300 font-semibold">↳ ${tag} · ${co.contracts || 1} 張 @ 平倉價 <span class="font-mono text-white">${Number(co.close_price || 0).toFixed(2)}</span></div>
+                <div class="text-[10px] text-[var(--muted)] font-mono">${ct} · ${co.action_label || '平倉'}</div>
+              </div>
+              <div class="font-mono font-bold ${cpColor}">${cpSign}$${Math.abs(cp).toFixed(2)}</div>
+            </div>
+          `;
+        }).join("");
 
         return `
-          <div class="bg-black/25 hover:bg-black/40 border border-white/5 rounded-xl p-2.5 transition-all space-y-1.5">
+          <div class="bg-black/25 border border-white/5 rounded-xl p-2.5 space-y-1.5">
             <div class="flex items-center justify-between">
               <div class="flex items-center gap-1.5">
-                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${stratBadge}">
-                  ${stratIcon} ${stratName}
-                </span>
-                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${sideBadge}">
-                  ${sideText}
-                </span>
-                <span class="text-[11px] font-bold text-white">${sym}</span>
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${stratBadge}">🔥 ${stratName}</span>
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${dirBadge}">${dirText}</span>
               </div>
-              <span class="text-[10px] text-[var(--muted)] font-mono">${timeStr}</span>
+              <span class="text-[10px] text-[var(--muted)] font-mono">${openTime}</span>
             </div>
             <div class="flex items-center justify-between text-xs pt-0.5">
-              <div class="flex items-center gap-1">
-                <span class="font-bold text-slate-200">${contracts} 張</span>
-                <span class="text-[var(--muted)]">@</span>
-                <span class="font-mono font-bold text-white">${price > 0 ? '$' + price.toFixed(2) : '-'}</span>
+              <div>
+                <span class="font-bold text-slate-200">${g.contracts || 1} 張</span>
+                <span class="text-[var(--muted)] mx-1">· 倉價</span>
+                <span class="font-mono font-bold text-white">${openPriceStr}</span>
               </div>
-              <div class="text-right">
-                ${pnlHtml}
-              </div>
+              <div class="text-right">${grpPnlHtml}</div>
             </div>
-            <div class="flex items-center justify-between text-[10px] text-[var(--muted)] border-t border-white/5 pt-1">
-              <span class="truncate font-mono">${t.direction || (isBuy ? 'LONG' : 'SHORT')}</span>
-              <span>手續費: $${comm.toFixed(2)}</span>
-            </div>
+            ${subHtml}
           </div>
         `;
       }).join("");

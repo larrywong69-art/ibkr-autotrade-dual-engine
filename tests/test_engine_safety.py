@@ -365,6 +365,122 @@ class TestDailyAutoAuditFixer(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_pair_executions_fifo_and_commission_inclusive_pnl(self):
+        from live_ibkr_dual_engine import pair_executions_fifo
+
+        sample_fills = [
+            # Case A: Open SHORT 1 -> Close BOT 1 (IBKR realized_pnl=71.28 already includes open+close fees)
+            {"exec_id": "e1", "timestamp": "2026-11-16 00:00:10", "symbol": "MES", "side": "SLD", "direction": "SHORT", "contracts": 1, "price": 7613.75, "realized_pnl": 0.0, "commission": 0.61},
+            {"exec_id": "e2", "timestamp": "2026-11-16 00:05:10", "symbol": "MES", "side": "BOT", "direction": "LONG", "contracts": 1, "price": 7599.25, "realized_pnl": 71.28, "commission": 0.61},
+            # Case B: Open SHORT 2 -> 2 partial Closes BOT 1 + BOT 1
+            {"exec_id": "e3", "timestamp": "2026-11-16 01:00:00", "symbol": "MES", "side": "SLD", "direction": "SHORT", "contracts": 2, "price": 7611.50, "realized_pnl": 0.0, "commission": 1.22},
+            {"exec_id": "e4", "timestamp": "2026-11-16 01:10:00", "symbol": "MES", "side": "BOT", "direction": "LONG", "contracts": 1, "price": 7598.25, "realized_pnl": 65.03, "commission": 0.61},
+            {"exec_id": "e5", "timestamp": "2026-11-16 01:11:00", "symbol": "MES", "side": "BOT", "direction": "LONG", "contracts": 1, "price": 7598.25, "realized_pnl": 65.03, "commission": 0.61},
+            # Case C: Same-second Close (realized!=0) + New Open (realized==0) at 04:23:47
+            {"exec_id": "e6", "timestamp": "2026-11-16 03:50:28", "symbol": "MES", "side": "BOT", "direction": "LONG", "contracts": 2, "price": 7559.75, "realized_pnl": 0.0, "commission": 1.22},
+            {"exec_id": "e7", "timestamp": "2026-11-16 04:23:47", "symbol": "MES", "side": "SLD", "direction": "SHORT", "contracts": 1, "price": 7566.50, "realized_pnl": 0.0, "commission": 0.61},
+            {"exec_id": "e8", "timestamp": "2026-11-16 04:23:47", "symbol": "MES", "side": "SLD", "direction": "SHORT", "contracts": 2, "price": 7566.50, "realized_pnl": 65.06, "commission": 1.22},
+        ]
+
+        groups = pair_executions_fifo(sample_fills, fx_rate=7.78)
+        self.assertEqual(len(groups), 4)
+
+        # Latest group: open SHORT 1 @ 7566.50 (unclosed)
+        g0 = groups[0]
+        self.assertEqual(g0["status"], "OPEN")
+        self.assertEqual(g0["direction"], "SHORT")
+        self.assertEqual(g0["open_price"], 7566.50)
+        self.assertEqual(g0["close_orders"], [])
+
+        # Second latest: LONG 2 @ 7559.75 closed @ 7566.50 at same second (65.06)
+        g1 = groups[1]
+        self.assertEqual(g1["status"], "CLOSED")
+        self.assertEqual(g1["open_price"], 7559.75)
+        self.assertEqual(len(g1["close_orders"]), 1)
+        self.assertEqual(g1["close_orders"][0]["close_price"], 7566.50)
+        self.assertAlmostEqual(g1["total_pnl"], 65.06, places=2)
+
+        # Third: SHORT 2 @ 7611.50 paired with 2 sub-closes -> 130.06
+        g2 = groups[2]
+        self.assertEqual(g2["status"], "CLOSED")
+        self.assertEqual(g2["open_price"], 7611.50)
+        self.assertEqual(len(g2["close_orders"]), 2)
+        self.assertAlmostEqual(g2["total_pnl"], 130.06, places=2)
+
+        # Fourth: SHORT 1 @ 7613.75 -> 7599.25 = 71.28
+        g3 = groups[3]
+        self.assertAlmostEqual(g3["total_pnl"], 71.28, places=2)
+
+    def test_hkd_unified_pnl_status_export(self):
+        import json
+        import os
+        import tempfile
+        import live_ibkr_dual_engine as eng_mod
+
+        eng = eng_mod.LiveIBKRDualEngine.__new__(eng_mod.LiveIBKRDualEngine)
+        eng.is_connected = True
+        eng.is_reconnecting = False
+        eng.reconnect_attempts = 0
+        eng.reconnect_delay = 5.0
+        eng.account_id = "DU123456"
+        eng.currency = "HKD"
+        eng.usd_hkd_rate = 7.78
+        eng.status_message = "OK"
+        eng.market_paused = False
+        eng.market_data_type = 1
+        eng.market_data_status = "REAL_TIME"
+        eng.net_liquidation = 1000000.0
+        eng.cash_balance = 950000.0
+        eng.available_funds = 900000.0
+        eng.init_margin_req = 50000.0
+        eng.realized_pnl = 0.0
+        eng.unrealized_pnl = 0.0
+        eng.equity_usd_total = 128534.7
+        eng.pool_v43_usd = 77120.82
+        eng.pool_v50_usd = 51413.88
+        eng.symbol_mes = "MESZ6"
+        eng.symbol_mnq = "MNQZ6"
+        eng.trading_enabled_global = True
+        eng.trading_enabled_v43 = True
+        eng.trading_enabled_v50 = True
+        eng.price_mes = 7570.0
+        eng.bid_mes = 7569.75
+        eng.ask_mes = 7570.25
+        eng.price_mnq = 27900.0
+        eng.bid_mnq = 27899.5
+        eng.ask_mnq = 27900.5
+        eng.engine_v91_mes = eng_mod.StrategyEngineV93(eng_mod.CONFIG_V93)
+        eng.engine_v91_mnq = eng_mod.StrategyEngineV93(eng_mod.CONFIG_V93)
+
+        pos_mes = eng._build_position_snapshot("MES", 1, "LONG", 7560.0 * 5.0)
+        self.assertAlmostEqual(pos_mes["unrealized_pnl"], 50.0, places=2)
+        self.assertAlmostEqual(pos_mes["unrealized_pnl_hkd"], 389.0, places=2)
+
+        eng.get_real_positions = lambda: (pos_mes, None)
+        eng.get_real_open_orders = lambda: ([], [])
+        eng.get_real_executions = lambda: (
+            [{"exec_id": "x1", "timestamp": "2026-11-17 10:00:00", "symbol": "MES", "side": "BOT", "direction": "LONG", "contracts": 1, "price": 7560.0, "realized_pnl": 0.0, "commission": 0.61}],
+            [{"exec_id": "x2", "timestamp": "2026-11-17 11:00:00", "symbol": "MNQ", "side": "SLD", "direction": "SHORT", "contracts": 1, "price": 27900.0, "realized_pnl": 100.0, "commission": 0.61}],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_status = os.path.join(tmp, "trade_status.json")
+            orig_status_file = eng_mod.STATUS_FILE
+            try:
+                eng_mod.STATUS_FILE = tmp_status
+                eng.write_status_file()
+            finally:
+                eng_mod.STATUS_FILE = orig_status_file
+
+            with open(tmp_status, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+        self.assertAlmostEqual(data["unrealized_pnl"], 389.0, places=2)
+        self.assertAlmostEqual(data["unrealized_pnl_hkd"], 389.0, places=2)
+        self.assertAlmostEqual(data["realized_pnl"], 778.0, places=2)
+        self.assertAlmostEqual(data["realized_pnl_hkd"], 778.0, places=2)
+        self.assertEqual(len(data["paired_trades"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
