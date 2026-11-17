@@ -21,6 +21,7 @@ AutoTrade Telegram 即時交易、異常報警與定時巡檢推播通知器 (�
 
 import os
 import sys
+import time
 import json
 import html as html_lib
 import logging
@@ -103,8 +104,14 @@ class TelegramNotifier:
         """檢查是否已完成 Token 與 ChatID 配置"""
         return bool(self.bot_token and self.chat_id)
 
-    def send_message_sync(self, text: str, parse_mode: str = "HTML", disable_preview: bool = True) -> bool:
-        """同步發送訊息至 Telegram Bot API (帶 5 秒超時保護)"""
+    def send_message_sync(
+        self,
+        text: str,
+        parse_mode: str = "HTML",
+        disable_preview: bool = True,
+        max_retries: int = 3
+    ) -> bool:
+        """同步發送訊息至 Telegram Bot API (含瞬斷重試與超時保護)"""
         if not self.is_configured():
             logger.debug("Telegram Bot 未配置 Token 或 ChatID，跳過發送。")
             return False
@@ -116,20 +123,30 @@ class TelegramNotifier:
             "parse_mode": parse_mode,
             "disable_web_page_preview": disable_preview
         }
+        data = json.dumps(payload).encode("utf-8")
+        attempts = max(1, int(max_retries))
+        last_err: Optional[Exception] = None
 
-        try:
-            data = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(
-                url,
-                data=data,
-                headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=5.0) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-                return result.get("ok", False)
-        except Exception as e:
-            logger.warning(f"發送 Telegram 訊息失敗: {e}")
-            return False
+        for attempt in range(1, attempts + 1):
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=data,
+                    headers={"Content-Type": "application/json", "Connection": "close"}
+                )
+                with urllib.request.urlopen(req, timeout=8.0) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                    if result.get("ok", False):
+                        return True
+                    last_err = RuntimeError(f"Telegram API ok=False: {result}")
+            except Exception as e:
+                last_err = e
+
+            if attempt < attempts:
+                time.sleep(1.5 * attempt)
+
+        logger.warning(f"發送 Telegram 訊息失敗 (已重試 {attempts} 次): {last_err}")
+        return False
 
     def send_message_async(self, text: str, parse_mode: str = "HTML", disable_preview: bool = True):
         """在背景守護線程發送訊息，絕不阻塞主交易回圈"""
@@ -300,7 +317,7 @@ class TelegramNotifier:
         )
         self.send_message_async(msg)
 
-    def notify_tunnel_ready(self, public_url: str, pin: str):
+    def notify_tunnel_ready(self, public_url: str, pin: str, sync: bool = False) -> bool:
         """Cloudflare 穿透隧道建立成功通知"""
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         mobile_url = f"{public_url.rstrip('/')}/mobile.html"
@@ -318,7 +335,10 @@ class TelegramNotifier:
             f"💡 <i>首次在手機打開時輸入上述 PIN 碼即可自動解鎖並常駐記住。</i>\n"
             f"⏰ <b>啟動時間</b>: {now_str}"
         )
+        if sync:
+            return self.send_message_sync(msg)
         self.send_message_async(msg)
+        return True
 
     def notify_daily_report(self, report_data: Dict[str, Any], gdrive_urls: Optional[Dict[str, str]] = None):
         """每日 06:00 結算報告生成通報"""

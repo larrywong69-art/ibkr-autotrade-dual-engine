@@ -928,6 +928,51 @@ class TestDailyAutoAuditFixer(unittest.TestCase):
         self.assertEqual(grp["close_orders"][0]["timestamp"], "2026-11-17 09:03:43")
         self.assertAlmostEqual(grp["total_pnl"], 416.78, places=2)
 
+    def test_telegram_send_retries_after_connection_reset(self):
+        import telegram_notifier as tg_mod
+
+        notifier = tg_mod.TelegramNotifier()
+        orig_token, orig_chat_id = notifier.bot_token, notifier.chat_id
+        notifier.bot_token = "test-token"
+        notifier.chat_id = "123456"
+
+        class _FakeResp:
+            def __init__(self, body: bytes):
+                self._body = body
+
+            def read(self):
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        calls = {"n": 0}
+
+        def _fake_urlopen(req, timeout=0):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ConnectionResetError(104, "Connection reset by peer")
+            return _FakeResp(b'{"ok": true}')
+
+        try:
+            with unittest.mock.patch.object(tg_mod.urllib.request, "urlopen", side_effect=_fake_urlopen), \
+                    unittest.mock.patch.object(tg_mod.time, "sleep") as sleep_mock:
+                ok = notifier.send_message_sync("hello")
+                self.assertTrue(ok)
+                self.assertEqual(calls["n"], 2)
+                sleep_mock.assert_called_once()
+
+                calls["n"] = 0
+                ok_tunnel = notifier.notify_tunnel_ready("https://example.trycloudflare.com", "PIN123", sync=True)
+                self.assertTrue(ok_tunnel)
+                self.assertEqual(calls["n"], 2)
+        finally:
+            notifier.bot_token = orig_token
+            notifier.chat_id = orig_chat_id
+
 
 if __name__ == "__main__":
     unittest.main()

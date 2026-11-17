@@ -117,8 +117,11 @@ class CloudflareTunnelManager:
         try:
             from telegram_notifier import notifier
             pin = get_access_pin()
-            notifier.notify_tunnel_ready(public_url, pin)
-            logger.info("已透過 Telegram 成功發送戶外安全監控網址！")
+            ok = notifier.notify_tunnel_ready(public_url, pin, sync=True)
+            if ok:
+                logger.info("已透過 Telegram 成功發送戶外安全監控網址！")
+            else:
+                logger.warning("Telegram 未配置或發送監控網址失敗，請檢查上方錯誤訊息與 .env 設定。")
         except Exception as e:
             logger.warning(f"Telegram 通知發送跳過或失敗: {e}")
 

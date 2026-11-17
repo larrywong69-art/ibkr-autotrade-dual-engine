@@ -19,6 +19,7 @@ PYTHON_BIN="$(which python3)"
 tmux kill-session -t autotrade 2>/dev/null || true
 pkill -9 -f "server.py 8080" 2>/dev/null || true
 pkill -9 -f "tunnel_manager.py" 2>/dev/null || true
+pkill -9 -f "cloudflared tunnel --url http://127.0.0.1:8080" 2>/dev/null || true
 pkill -9 -f "live_ibkr_dual_engine.py" 2>/dev/null || true
 pkill -9 -f "websockify" 2>/dev/null || true
 
