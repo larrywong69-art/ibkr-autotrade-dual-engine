@@ -540,6 +540,72 @@ class TestDailyAutoAuditFixer(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_incident_ack_resets_unread_count_via_http(self):
+        import json
+        import os
+        import tempfile
+        import threading
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+        import report_and_incident_manager as rim
+        import server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            orig_jsonl = rim.INCIDENTS_JSONL
+            orig_ack = rim.INCIDENTS_ACK_FILE
+            orig_log = rim.INCIDENTS_LOG
+            rim.INCIDENTS_JSONL = os.path.join(tmp, "incidents.jsonl")
+            rim.INCIDENTS_ACK_FILE = os.path.join(tmp, "incidents_ack.json")
+            rim.INCIDENTS_LOG = os.path.join(tmp, "incidents.log")
+
+            try:
+                mgr = rim.IncidentManager()
+                mgr.record_incident("WARNING", "CONNECTION", 1100, "test disconnect 1")
+                mgr.record_incident("ERROR", "TRADING", 201, "test order reject 2")
+
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.ControlDashboardHandler)
+                port = httpd.server_address[1]
+                t = threading.Thread(target=httpd.serve_forever, daemon=True)
+                t.start()
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/incidents?limit=10", timeout=5) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        self.assertEqual(data["summary"]["total_count"], 2)
+                        self.assertEqual(data["summary"]["unread_count"], 2)
+                        self.assertTrue(data["summary"]["unread_has_error"])
+
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/api/incidents/ack",
+                        data=json.dumps({"total_count": 2}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        ack_data = json.loads(resp.read().decode("utf-8"))
+                        self.assertEqual(ack_data["status"], "ok")
+                        self.assertEqual(ack_data["summary"]["unread_count"], 0)
+                        self.assertEqual(ack_data["summary"]["total_count"], 2)
+                        self.assertFalse(ack_data["summary"]["unread_has_error"])
+
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/incidents?limit=1", timeout=5) as resp:
+                        polled = json.loads(resp.read().decode("utf-8"))
+                        self.assertEqual(polled["summary"]["unread_count"], 0)
+                        self.assertEqual(polled["summary"]["total_count"], 2)
+
+                    mgr.record_incident("CRITICAL", "MARGIN", 4002, "test new incident 3")
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/incidents?limit=1", timeout=5) as resp:
+                        polled2 = json.loads(resp.read().decode("utf-8"))
+                        self.assertEqual(polled2["summary"]["total_count"], 3)
+                        self.assertEqual(polled2["summary"]["unread_count"], 1)
+                        self.assertTrue(polled2["summary"]["unread_has_critical"])
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+            finally:
+                rim.INCIDENTS_JSONL = orig_jsonl
+                rim.INCIDENTS_ACK_FILE = orig_ack
+                rim.INCIDENTS_LOG = orig_log
+
 
 if __name__ == "__main__":
     unittest.main()

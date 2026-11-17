@@ -844,6 +844,28 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
             self._send_json(200, resp)
             return
 
+        if parsed.path == "/api/incidents/ack":
+            content_length = int(self.headers.get("Content-Length", 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                payload = json.loads(post_data.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    payload = {}
+            except Exception:
+                payload = {}
+
+            try:
+                summary = IncidentManager().ack_incidents(
+                    ack_total_count=payload.get("total_count"),
+                    last_incident_id=payload.get("last_incident_id"),
+                    last_timestamp=payload.get("last_timestamp"),
+                )
+                resp = {"status": "ok", "summary": summary}
+                self._send_json(200, resp)
+            except Exception as e:
+                self._send_json(500, {"status": "error", "message": f"標記異常稽核已讀失敗: {e}"})
+            return
+
         if parsed.path == "/api/audit/run":
             content_length = int(self.headers.get("Content-Length", 0))
             post_data = self.rfile.read(content_length) if content_length > 0 else b"{}"

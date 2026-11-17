@@ -42,6 +42,7 @@ os.makedirs(REPORTS_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
 INCIDENTS_JSONL = os.path.join(DATA_DIR, "incidents.jsonl")
+INCIDENTS_ACK_FILE = os.path.join(DATA_DIR, "incidents_ack.json")
 INCIDENTS_LOG = os.path.join(LOGS_DIR, "incidents.log")
 TRADES_JSONL = os.path.join(DATA_DIR, "trades.jsonl")
 EQUITY_SNAPSHOTS_JSONL = os.path.join(DATA_DIR, "equity_snapshots.jsonl")
@@ -242,46 +243,104 @@ class IncidentManager:
             source="IBKR_SOCKET"
         )
 
-    def get_recent_incidents(
-        self,
-        limit: int = 50,
+    def _read_all_valid_incidents_unlocked(self) -> List[Dict[str, Any]]:
+        """依寫入時間先後讀取所有有效的異常事件紀錄 (舊 -> 新)。"""
+        if not os.path.exists(INCIDENTS_JSONL):
+            return []
+
+        items: List[Dict[str, Any]] = []
+        try:
+            with open(INCIDENTS_JSONL, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        items.append(json.loads(line))
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.error(f"讀取 incidents.jsonl 失敗: {e}")
+        return items
+
+    def _read_ack_state_unlocked(self) -> Dict[str, Any]:
+        """讀取異常稽核已讀水位線。"""
+        if not os.path.exists(INCIDENTS_ACK_FILE):
+            return {}
+        try:
+            with open(INCIDENTS_ACK_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _filter_incidents(
+        items: List[Dict[str, Any]],
         category: Optional[str] = None,
         severity: Optional[str] = None,
         date_str: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """讀取近期異常紀錄"""
-        if not os.path.exists(INCIDENTS_JSONL):
-            return []
+        cat_u = category.upper() if category else None
+        sev_u = severity.upper() if severity else None
+        out = []
+        for inc in items:
+            if date_str and inc.get("date") != date_str:
+                continue
+            if cat_u and inc.get("category") != cat_u:
+                continue
+            if sev_u and inc.get("severity") != sev_u:
+                continue
+            out.append(inc)
+        return out
 
-        results = []
-        with self.file_lock:
-            try:
-                with open(INCIDENTS_JSONL, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            inc = json.loads(line)
-                            if date_str and inc.get("date") != date_str:
-                                continue
-                            if category and inc.get("category") != category.upper():
-                                continue
-                            if severity and inc.get("severity") != severity.upper():
-                                continue
-                            results.append(inc)
-                        except Exception:
-                            continue
-            except Exception as e:
-                logger.error(f"讀取 incidents.jsonl 失敗: {e}")
+    @staticmethod
+    def _find_unread_start_index(items: List[Dict[str, Any]], ack: Dict[str, Any]) -> int:
+        """計算尚未確認 (未讀) 異常紀錄在時間序列表中的起始索引。"""
+        if not ack:
+            return 0
+        total = len(items)
+        if total == 0:
+            return 0
 
-        results.reverse()
-        return results[:limit]
+        ack_total_raw = ack.get("acked_total_count")
+        last_ack_id = str(ack.get("last_ack_incident_id") or "")
+        last_ack_ts = str(ack.get("last_ack_timestamp") or "")
 
-    def get_incident_summary(self, target_date: Optional[str] = None) -> Dict[str, Any]:
-        """匯總特定日期的異常統計"""
-        incidents = self.get_recent_incidents(limit=1000, date_str=target_date)
-        by_category = {}
+        if isinstance(ack_total_raw, int) and 0 <= ack_total_raw <= total:
+            if ack_total_raw == 0:
+                return 0
+            anchor = items[ack_total_raw - 1]
+            if not last_ack_id or anchor.get("incident_id") == last_ack_id:
+                return ack_total_raw
+
+        if last_ack_id:
+            for idx in range(total - 1, -1, -1):
+                if items[idx].get("incident_id") == last_ack_id:
+                    return idx + 1
+
+        if last_ack_ts:
+            for idx, inc in enumerate(items):
+                if str(inc.get("timestamp") or "") > last_ack_ts:
+                    return idx
+            return total
+
+        return 0
+
+    def _build_summary_from_items_unlocked(
+        self,
+        all_items: List[Dict[str, Any]],
+        ack: Dict[str, Any],
+        target_date: Optional[str] = None
+    ) -> Dict[str, Any]:
+        unread_start = self._find_unread_start_index(all_items, ack)
+        global_unread = all_items[unread_start:]
+
+        incidents_chrono = self._filter_incidents(all_items, date_str=target_date)
+        unread_chrono = self._filter_incidents(global_unread, date_str=target_date)
+
+        incidents = list(reversed(incidents_chrono))
+        by_category: Dict[str, int] = {}
         by_severity = {"INFO": 0, "WARNING": 0, "ERROR": 0, "CRITICAL": 0}
 
         for inc in incidents:
@@ -290,15 +349,87 @@ class IncidentManager:
             by_category[cat] = by_category.get(cat, 0) + 1
             by_severity[sev] = by_severity.get(sev, 0) + 1
 
+        unread_has_critical = any(inc.get("severity") == "CRITICAL" for inc in unread_chrono)
+        unread_has_error = any(inc.get("severity") == "ERROR" for inc in unread_chrono)
+
         return {
             "date": target_date or datetime.now().strftime("%Y-%m-%d"),
             "total_count": len(incidents),
+            "unread_count": len(unread_chrono),
             "by_severity": by_severity,
             "by_category": by_category,
             "has_critical": by_severity.get("CRITICAL", 0) > 0,
             "has_error": by_severity.get("ERROR", 0) > 0,
+            "unread_has_critical": unread_has_critical,
+            "unread_has_error": unread_has_error,
+            "acked_at": ack.get("acked_at", ""),
             "recent_top": incidents[:10]
         }
+
+    def ack_incidents(
+        self,
+        ack_total_count: Optional[int] = None,
+        last_incident_id: Optional[str] = None,
+        last_timestamp: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """將現有異常紀錄標記為已讀，讓未讀通知數歸零直到新事件產生。"""
+        with self.file_lock:
+            all_items = self._read_all_valid_incidents_unlocked()
+            actual_total = len(all_items)
+
+            if ack_total_count is not None:
+                try:
+                    resolved_total = max(0, min(int(ack_total_count), actual_total))
+                except (TypeError, ValueError):
+                    resolved_total = actual_total
+            elif last_incident_id:
+                matched_count = None
+                for idx in range(actual_total - 1, -1, -1):
+                    if all_items[idx].get("incident_id") == last_incident_id:
+                        matched_count = idx + 1
+                        break
+                resolved_total = matched_count if matched_count is not None else actual_total
+            else:
+                resolved_total = actual_total
+
+            anchor = all_items[resolved_total - 1] if resolved_total > 0 else None
+            ack_payload = {
+                "acked_total_count": resolved_total,
+                "last_ack_incident_id": (anchor.get("incident_id") if anchor else (last_incident_id or "")),
+                "last_ack_timestamp": (anchor.get("timestamp") if anchor else (last_timestamp or "")),
+                "acked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            try:
+                tmp_path = INCIDENTS_ACK_FILE + ".tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(ack_payload, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, INCIDENTS_ACK_FILE)
+            except Exception as e:
+                logger.error(f"寫入 incidents_ack.json 失敗: {e}")
+
+            return self._build_summary_from_items_unlocked(all_items, ack_payload)
+
+    def get_recent_incidents(
+        self,
+        limit: int = 50,
+        category: Optional[str] = None,
+        severity: Optional[str] = None,
+        date_str: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """讀取近期異常紀錄"""
+        with self.file_lock:
+            all_items = self._read_all_valid_incidents_unlocked()
+
+        results = self._filter_incidents(all_items, category=category, severity=severity, date_str=date_str)
+        results.reverse()
+        return results[:limit]
+
+    def get_incident_summary(self, target_date: Optional[str] = None) -> Dict[str, Any]:
+        """匯總特定日期的異常統計與未讀通知數"""
+        with self.file_lock:
+            all_items = self._read_all_valid_incidents_unlocked()
+            ack = self._read_ack_state_unlocked()
+        return self._build_summary_from_items_unlocked(all_items, ack, target_date=target_date)
 
 
 # ==============================================================================

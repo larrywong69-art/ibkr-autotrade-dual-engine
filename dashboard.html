@@ -1711,6 +1711,8 @@
     let CURRENT_REPORT_MARKDOWN = "";
     let INCIDENTS_DATA = [];
     let CURRENT_INCIDENT_FILTER = "ALL";
+    let INCIDENTS_ACK_IN_FLIGHT = false;
+    const INCIDENTS_ACK_STORAGE_KEY = "autotrade_incidents_ack_total";
 
     // 1. 每日結算報告 Modal
     function openReportsModal() {
@@ -2243,10 +2245,105 @@
     }
 
     // 2. 異常稽核 (Incident Log) Modal
+    function isIncidentsModalOpen() {
+      const modal = document.getElementById('incidents-modal');
+      return Boolean(modal && !modal.classList.contains('hidden'));
+    }
+
+    function renderIncidentBadge(count, hasCritical, hasError) {
+      const badge = document.getElementById('incident-count-badge');
+      const indicator = document.getElementById('incident-indicator');
+
+      const safeCount = Math.max(0, Number(count) || 0);
+      if (badge) badge.innerText = safeCount;
+
+      if (safeCount === 0) {
+        if (indicator) indicator.className = 'w-2 h-2 rounded-full bg-emerald-500';
+        if (badge) badge.className = 'px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-500 text-[10px] font-bold';
+      } else if (hasCritical) {
+        if (indicator) indicator.className = 'w-2 h-2 rounded-full bg-rose-500 animate-pulse';
+        if (badge) badge.className = 'px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[10px] font-bold';
+      } else if (hasError || safeCount > 0) {
+        if (indicator) indicator.className = 'w-2 h-2 rounded-full bg-amber-500';
+        if (badge) badge.className = 'px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-500 text-[10px] font-bold';
+      }
+    }
+
+    function getLocalIncidentAckCount() {
+      try {
+        const raw = localStorage.getItem(INCIDENTS_ACK_STORAGE_KEY);
+        const parsed = parseInt(raw || '0', 10);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+      } catch (e) {
+        return 0;
+      }
+    }
+
+    function setLocalIncidentAckCount(count) {
+      try {
+        localStorage.setItem(INCIDENTS_ACK_STORAGE_KEY, String(Math.max(0, Number(count) || 0)));
+      } catch (e) {}
+    }
+
+    function applyIncidentBadgeFromSummary(summary) {
+      const s = summary || {};
+      const totalCount = Math.max(0, Number(s.total_count) || 0);
+      let unreadCount;
+      let hasCritical;
+      let hasError;
+
+      if (typeof s.unread_count === 'number') {
+        unreadCount = Math.max(0, s.unread_count);
+        hasCritical = Boolean(s.unread_has_critical);
+        hasError = Boolean(s.unread_has_error);
+      } else {
+        const acked = getLocalIncidentAckCount();
+        unreadCount = totalCount > acked ? (totalCount - acked) : (totalCount < acked ? totalCount : 0);
+        hasCritical = unreadCount > 0 && Boolean(s.has_critical);
+        hasError = unreadCount > 0 && Boolean(s.has_error);
+      }
+
+      renderIncidentBadge(unreadCount, hasCritical, hasError);
+    }
+
+    async function acknowledgeIncidents(summary, incidents) {
+      const s = summary || {};
+      const list = Array.isArray(incidents) ? incidents : [];
+      const latest = list.length > 0 ? list[0] : null;
+      const totalCount = typeof s.total_count === 'number' ? s.total_count : list.length;
+
+      setLocalIncidentAckCount(totalCount);
+      INCIDENTS_ACK_IN_FLIGHT = true;
+      try {
+        const res = await fetch('/api/incidents/ack', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            total_count: s.total_count,
+            last_incident_id: latest ? latest.incident_id : '',
+            last_timestamp: latest ? latest.timestamp : ''
+          })
+        });
+        if (res.ok) {
+          const ackData = await res.json();
+          if (ackData && ackData.summary) {
+            applyIncidentBadgeFromSummary(ackData.summary);
+            return;
+          }
+        }
+      } catch (e) {
+      } finally {
+        INCIDENTS_ACK_IN_FLIGHT = false;
+      }
+      renderIncidentBadge(0, false, false);
+    }
+
     function openIncidentsModal() {
       const modal = document.getElementById('incidents-modal');
       if (modal) modal.classList.remove('hidden');
-      loadIncidents();
+      // 點開連線與交易異常稽核日誌後，立即將頂部通知數歸零
+      renderIncidentBadge(0, false, false);
+      loadIncidents({ ack: true });
     }
 
     function closeIncidentsModal() {
@@ -2254,15 +2351,27 @@
       if (modal) modal.classList.add('hidden');
     }
 
-    async function loadIncidents() {
+    async function loadIncidents(options = {}) {
+      const shouldAck = Boolean(options.ack || isIncidentsModalOpen());
+      if (shouldAck) {
+        INCIDENTS_ACK_IN_FLIGHT = true;
+      }
       try {
-        const res = await fetch('/api/incidents?limit=100');
+        const res = await fetch('/api/incidents?limit=100&_t=' + Date.now());
         if (!res.ok) return;
         const data = await res.json();
         INCIDENTS_DATA = data.incidents || [];
         renderIncidentsSummary(data.summary || {});
         renderIncidentsTable();
-      } catch (e) {}
+        if (shouldAck) {
+          await acknowledgeIncidents(data.summary || {}, INCIDENTS_DATA);
+        }
+      } catch (e) {
+      } finally {
+        if (shouldAck) {
+          INCIDENTS_ACK_IN_FLIGHT = false;
+        }
+      }
     }
 
     function renderIncidentsSummary(summary) {
@@ -2330,28 +2439,29 @@
 
     // 輪詢異常計數器更新標籤
     async function pollIncidentStatus() {
+      if (INCIDENTS_ACK_IN_FLIGHT) return;
       try {
-        const res = await fetch('/api/incidents?limit=1');
+        const res = await fetch('/api/incidents?limit=1&_t=' + Date.now());
         if (!res.ok) return;
         const data = await res.json();
         const summary = data.summary || {};
-        const count = summary.total_count || 0;
 
-        const badge = document.getElementById('incident-count-badge');
-        const indicator = document.getElementById('incident-indicator');
-        const btn = document.getElementById('btn-incidents-modal');
+        if (INCIDENTS_ACK_IN_FLIGHT) return;
 
-        if (badge) badge.innerText = count;
-        if (summary.has_critical) {
-          if (indicator) indicator.className = 'w-2 h-2 rounded-full bg-rose-500 animate-pulse';
-          if (badge) badge.className = 'px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[10px] font-bold';
-        } else if (summary.has_error || count > 0) {
-          if (indicator) indicator.className = 'w-2 h-2 rounded-full bg-amber-500';
-          if (badge) badge.className = 'px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-500 text-[10px] font-bold';
-        } else {
-          if (indicator) indicator.className = 'w-2 h-2 rounded-full bg-emerald-500';
-          if (badge) badge.className = 'px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-500 text-[10px] font-bold';
+        if (isIncidentsModalOpen()) {
+          // 異常日誌視窗開啟期間若收到新異常，自動刷新並標記已讀，保持通知數為 0
+          const hasUnread = typeof summary.unread_count === 'number'
+            ? summary.unread_count > 0
+            : (summary.total_count || 0) > getLocalIncidentAckCount();
+          if (hasUnread) {
+            await loadIncidents({ ack: true });
+          } else {
+            renderIncidentBadge(0, false, false);
+          }
+          return;
         }
+
+        applyIncidentBadgeFromSummary(summary);
       } catch (e) {}
     }
 
