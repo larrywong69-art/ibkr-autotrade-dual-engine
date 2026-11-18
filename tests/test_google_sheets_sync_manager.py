@@ -113,17 +113,17 @@ class TestGoogleSheetsSyncManager(unittest.TestCase):
     def test_classify_trade_strategy_rule(self):
         self.assertEqual(classify_trade_strategy_rule({"reason": "RULE_1_TREND_PULLBACK"}), "規則 1：順勢波 3 回踩")
         self.assertEqual(classify_trade_strategy_rule({"reason": "RULE_2_EXTREME_BOUNCE"}), "規則 2：極端邊界反彈 (頂 1 口)")
-        self.assertEqual(classify_trade_strategy_rule({"reason": "RULE_3_BREAKDOWN_REVERSAL"}), "規則 3：做空破位反轉 (頂 1 口)")
+        self.assertEqual(classify_trade_strategy_rule({"reason": "RULE_3_BREAKDOWN_REVERSAL"}), "規則 3：微突破反轉 (頂 1 口)")
         # Default rule
         self.assertEqual(classify_trade_strategy_rule({"reason": "UNKNOWN"}), "規則 1：順勢波 3 回踩")
 
     def test_classify_trading_session(self):
         # 22:30 HKT = 09:30 ET -> US RTH
-        self.assertEqual(classify_trading_session("2026-11-18 22:30:00"), "🕒 美盤 RTH (09:30-16:00 ET)")
+        self.assertEqual(classify_trading_session("2026-11-18 22:30:00"), "☀️ 美盤 RTH (09:30-16:00 ET)")
         # 16:00 HKT = 03:00 ET -> London
-        self.assertEqual(classify_trading_session("2026-11-18 16:00:00"), "🕒 歐盤倫敦 (02:00-09:30 ET)")
-        # 10:00 HKT = 21:00 ET -> Asia / Pre-market
-        self.assertEqual(classify_trading_session("2026-11-18 10:00:00"), "🕒 亞盤盤前 (18:00-02:00 ET)")
+        self.assertEqual(classify_trading_session("2026-11-18 16:00:00"), "☕ 歐盤倫敦 (02:00-09:30 ET)")
+        # 10:00 HKT = 21:00 ET -> Asia / Overnight
+        self.assertEqual(classify_trading_session("2026-11-18 10:00:00"), "🌙 亞盤夜盤 (18:00-02:00 ET)")
 
     def test_compute_multidimensional_stats(self):
         stats = compute_multidimensional_stats(self.sample_trades, fx_rate=self.fx_rate)

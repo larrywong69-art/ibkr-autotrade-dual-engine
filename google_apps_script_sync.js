@@ -151,7 +151,7 @@ function doPost(e) {
             netHkd,
             t.exec_id || t.trade_id || "",
             t.exit_reason || "進場開倉 (Entry)",
-            t.session || "🕒 美盤 RTH (09:30-16:00 ET)",
+            t.session || "☀️ 美盤 RTH (09:30-16:00 ET)",
             t.reason || t.order_ref || ""
           ]);
         }
@@ -219,7 +219,7 @@ function doPost(e) {
           // 標題行 (Row 15)
           rSheet.getRange("A15:D15").merge();
           var tCell = rSheet.getRange("A15");
-          tCell.setValue("🎨 規則進場原因與時段表現 (含 Exit Reason 出場維度)");
+          tCell.setValue("🥩 規則進場原因與時段表現 (含 Exit Reason 出場維度)");
           tCell.setFontSize(12).setFontWeight("bold").setFontColor("#1E3A8A");
 
           // 表頭 (Row 16) - 深藍背景 #1E293B，白字置中粗體

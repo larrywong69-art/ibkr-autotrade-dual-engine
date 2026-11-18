@@ -195,8 +195,8 @@ def classify_trade_strategy_rule(trade: Dict[str, Any]) -> str:
     ref = str(trade.get("order_ref", "")).upper()
     combined = f"{strat} {reason} {ref} {symbol}"
 
-    if any(k in combined for k in ["破位", "做空", "反轉", "RULE_3", "RULE 3", "SHORT", "SLD"]):
-        return "規則 3：做空破位反轉 (頂 1 口)"
+    if any(k in combined for k in ["微突破", "破位", "做空", "反轉", "RULE_3", "RULE 3", "SHORT", "SLD"]):
+        return "規則 3：微突破反轉 (頂 1 口)"
     elif any(k in combined for k in ["5.0", "MNQ", "極端", "邊界", "動量", "RULE_2", "RULE 2", "BOUNCE", "EXTREME"]):
         return "規則 2：極端邊界反彈 (頂 1 口)"
     else:
@@ -204,9 +204,9 @@ def classify_trade_strategy_rule(trade: Dict[str, Any]) -> str:
 
 
 def classify_trading_session(timestamp_str: str) -> str:
-    """分類所屬交易時段 (美盤 RTH / 歐盤倫敦 / 亞盤盤前)"""
+    """分類所屬交易時段 (美盤 RTH / 歐盤倫敦 / 亞盤夜盤 - 精確匹配回測報表截圖格式)"""
     if not timestamp_str:
-        return "🕒 美盤 RTH (09:30-16:00 ET)"
+        return "☀️ 美盤 RTH (09:30-16:00 ET)"
     try:
         t_clean = timestamp_str.replace("T", " ")[:19]
         dt = datetime.strptime(t_clean, "%Y-%m-%d %H:%M:%S")
@@ -215,13 +215,13 @@ def classify_trading_session(timestamp_str: str) -> str:
         et_hour = (hkt_hour - 13.0) % 24.0
 
         if 9.5 <= et_hour < 16.0:
-            return "🕒 美盤 RTH (09:30-16:00 ET)"
+            return "☀️ 美盤 RTH (09:30-16:00 ET)"
         elif 2.0 <= et_hour < 9.5:
-            return "🕒 歐盤倫敦 (02:00-09:30 ET)"
+            return "☕ 歐盤倫敦 (02:00-09:30 ET)"
         else:
-            return "🕒 亞盤盤前 (18:00-02:00 ET)"
+            return "🌙 亞盤夜盤 (18:00-02:00 ET)"
     except Exception:
-        return "🕒 美盤 RTH (09:30-16:00 ET)"
+        return "☀️ 美盤 RTH (09:30-16:00 ET)"
 
 
 def compute_multidimensional_stats(trades: List[Dict[str, Any]], fx_rate: float = 7.78) -> Dict[str, Any]:
@@ -229,7 +229,7 @@ def compute_multidimensional_stats(trades: List[Dict[str, Any]], fx_rate: float 
     standard_rules = [
         "規則 1：順勢波 3 回踩",
         "規則 2：極端邊界反彈 (頂 1 口)",
-        "規則 3：做空破位反轉 (頂 1 口)",
+        "規則 3：微突破反轉 (頂 1 口)",
     ]
     standard_exit_reasons = [
         "🎯 第一止盈 (TP1 1.55R)",
@@ -244,9 +244,9 @@ def compute_multidimensional_stats(trades: List[Dict[str, Any]], fx_rate: float 
         "🔄 策略動態出場 (Dynamic Exit)",
     ]
     standard_sessions = [
-        "🕒 美盤 RTH (09:30-16:00 ET)",
-        "🕒 歐盤倫敦 (02:00-09:30 ET)",
-        "🕒 亞盤盤前 (18:00-02:00 ET)",
+        "☀️ 美盤 RTH (09:30-16:00 ET)",
+        "☕ 歐盤倫敦 (02:00-09:30 ET)",
+        "🌙 亞盤夜盤 (18:00-02:00 ET)",
     ]
 
     dim_buckets: Dict[str, List[Dict[str, Any]]] = {}
@@ -297,8 +297,8 @@ def compute_multidimensional_stats(trades: List[Dict[str, Any]], fx_rate: float 
 
     table_rows = []
     table_rows.extend(rule_items)
-    table_rows.extend(exit_items)
     table_rows.extend(session_items)
+    table_rows.extend(exit_items)
 
     return {
         "rules": rule_items,
@@ -813,7 +813,7 @@ class GoogleSheetsSyncManager:
         # ----------------------------------------------------------------------
         ws1.merge_cells("A15:D15")
         dim_title = ws1["A15"]
-        dim_title.value = "🎨 規則進場原因與時段表現 (含 Exit Reason 出場維度)"
+        dim_title.value = "🥩 規則進場原因與時段表現 (含 Exit Reason 出場維度)"
         dim_title.font = Font(name="Microsoft JhengHei", size=12, bold=True, color="1E3A8A")
         ws1.row_dimensions[15].height = 26
 

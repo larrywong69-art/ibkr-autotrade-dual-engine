@@ -169,46 +169,163 @@ class TelegramNotifier:
         action: str,
         quantity: float,
         price: float,
-        order_type: str = "LMT",
+        order_type: str = "FILLED",
         tp_price: Optional[float] = None,
         sl_price: Optional[float] = None,
         pnl: Optional[float] = None,
-        reason: str = ""
-    ):
-        """成交通知：開倉、止賺平倉、止蝕平倉"""
+        reason: str = "",
+        is_closing: Optional[bool] = None,
+        entry_rule: str = "",
+        exit_reason: str = "",
+        commission: Optional[float] = None,
+        pnl_hkd: Optional[float] = None,
+        fx_rate: float = 7.78,
+        sync: bool = False
+    ) -> bool:
+        """
+        成交通知 (升級版)：
+        1. 寫明開倉或平倉 (標題與動作清晰標記)
+        2. 觸發原因顯示開倉邏輯 (如規則一：順勢波 3 回踩 / 0.618 趨勢回調)
+        3. 平倉附帶出場原因 (TP1/TP2/Runner/保本/止蝕等) 與雙幣實現損益 (USD + HKD)
+        """
         if not self.notify_trades:
-            return
+            return False
+
+        # 1. 判定開倉還是平倉
+        if is_closing is None:
+            if exit_reason:
+                is_closing = True
+            elif any(k in action for k in ["平倉", "CLOSE", "COVER", "EXIT"]):
+                is_closing = True
+            elif pnl is not None and pnl != 0.0:
+                is_closing = True
+            elif any(k in action for k in ["開倉", "ENTRY", "OPEN"]):
+                is_closing = False
+            else:
+                is_closing = False
+
+        # 2. 開倉邏輯字串解析
+        rule_logic = entry_rule.strip()
+        if not rule_logic:
+            if reason and any(k in reason for k in ["規則", "回踩", "回調", "反彈", "破位", "波 3", "PULLBACK", "BOUNCE"]):
+                rule_logic = reason.strip()
+            elif "MNQ" in symbol.upper():
+                rule_logic = "規則 2：極端邊界反彈 (頂 1 口)"
+            elif ("做空" in action or "淡倉" in action or "SHORT" in action.upper() or "SLD" in action.upper()) and not is_closing:
+                rule_logic = "規則 3：微突破反轉 (頂 1 口)"
+            else:
+                rule_logic = "規則 1：順勢波 3 回踩"
+
+        # 3. 動作類型清晰描述
+        qty_str = f"{int(quantity)} 口" if quantity == int(quantity) else f"{quantity:.1f} 口"
+
+        if is_closing:
+            if "平倉" in action:
+                action_desc = action
+            else:
+                if any(k in action for k in ["買入", "好倉", "BOT", "BUY"]):
+                    action_desc = "買入平倉 (平淡倉 / BUY TO COVER)"
+                else:
+                    action_desc = "沽出平倉 (平好倉 / SELL CLOSE)"
+        else:
+            if "開倉" in action:
+                action_desc = action
+            else:
+                if any(k in action for k in ["買入", "好倉", "BOT", "BUY"]):
+                    action_desc = "🟢 買入開倉 (好倉 / LONG)"
+                else:
+                    action_desc = "🔴 沽出開倉 (淡倉 / SHORT)"
+
+        # 4. 頂部標題與圖示
+        if is_closing:
+            if pnl is not None:
+                if pnl > 0.0:
+                    header_title = "💰 <b>【AutoTrade 交易成交通報 - 平倉 (獲利)】</b>"
+                elif pnl < 0.0:
+                    header_title = "🛑 <b>【AutoTrade 交易成交通報 - 平倉 (止損)】</b>"
+                else:
+                    header_title = "🛡️ <b>【AutoTrade 交易成交通報 - 平倉 (保本)】</b>"
+            elif any(k in exit_reason for k in ["止損", "止蝕", "SL", "SOFT_STOP"]):
+                header_title = "🛑 <b>【AutoTrade 交易成交通報 - 平倉 (止損)】</b>"
+            elif any(k in exit_reason for k in ["止盈", "TP", "RUNNER"]):
+                header_title = "💰 <b>【AutoTrade 交易成交通報 - 平倉 (獲利)】</b>"
+            elif any(k in exit_reason for k in ["保本", "平保", "BE", "BREAKEVEN"]):
+                header_title = "🛡️ <b>【AutoTrade 交易成交通報 - 平倉 (保本)】</b>"
+            elif "穿倉" in exit_reason:
+                header_title = "🚨 <b>【AutoTrade 交易成交通報 - 平倉 (防穿倉)】</b>"
+            else:
+                header_title = "🔔 <b>【AutoTrade 交易成交通報 - 平倉】</b>"
+        else:
+            if any(k in action_desc for k in ["買入", "好倉", "LONG"]):
+                header_title = "🟢 <b>【AutoTrade 交易成交通報 - 開倉 (好倉)】</b>"
+            else:
+                header_title = "🔴 <b>【AutoTrade 交易成交通報 - 開倉 (淡倉)】</b>"
+
+        # 5. 出場原因、盈虧與開倉保護目標組裝
+        exit_reason_block = ""
+        pnl_block = ""
+        comm_block = ""
+        bracket_block = ""
+
+        if is_closing:
+            clean_exit = exit_reason.strip()
+            if not clean_exit:
+                if reason and any(k in reason for k in ["TP", "SL", "止盈", "止蝕", "止損", "保本", "平保", "追蹤", "穿倉", "手動", "EOD"]):
+                    clean_exit = reason.strip()
+                elif pnl is not None:
+                    if pnl > 0.0:
+                        clean_exit = "🎯 策略目標止盈 (Take Profit)"
+                    elif pnl < 0.0:
+                        clean_exit = "🛑 原生止損 (Stop Loss)"
+                    else:
+                        clean_exit = "🛡️ 保本平倉 (Breakeven)"
+                else:
+                    clean_exit = "🔄 策略動態出場 (Dynamic Exit)"
+
+            exit_reason_block = f"\n🎯 <b>出場原因</b>: <b>{clean_exit}</b>"
+
+            if pnl is not None:
+                calc_pnl_hkd = pnl_hkd if pnl_hkd is not None else (pnl * fx_rate)
+                if pnl > 0.0:
+                    pnl_block = f"\n💵 <b>實現損益</b>: <b>+{pnl:,.2f} USD (+HK${calc_pnl_hkd:,.2f})</b> 🟢"
+                elif pnl < 0.0:
+                    pnl_block = f"\n💵 <b>實現損益</b>: <b>-{abs(pnl):,.2f} USD (-HK${abs(calc_pnl_hkd):,.2f})</b> 🔴"
+                else:
+                    pnl_block = f"\n💵 <b>實現損益</b>: <b>$0.00 USD (HK$0.00 保本)</b> ⚪"
+
+                if commission is not None and commission > 0.0:
+                    comm_hkd = commission * fx_rate
+                    net_usd = pnl - commission
+                    net_hkd = calc_pnl_hkd - comm_hkd
+                    net_sign = "+" if net_usd > 0 else ("-" if net_usd < 0 else "")
+                    comm_block = f"\n💸 <b>手續費佣金</b>: <code>{commission:,.2f} USD (HK${comm_hkd:,.2f})</code> | <b>淨損益</b>: <b>{net_sign}${abs(net_usd):,.2f} USD ({net_sign}HK${abs(net_hkd):,.2f})</b>"
+        else:
+            if tp_price and sl_price:
+                bracket_block = f"\n🎯 <b>止盈目標</b>: <code>{tp_price:,.2f} USD</code> | 🛑 <b>初始止損</b>: <code>{sl_price:,.2f} USD</code>"
+
+        logic_line = f"\n💡 <b>原開倉邏輯</b>: <b>{rule_logic}</b>" if is_closing else f"\n💡 <b>開倉邏輯</b>: <b>{rule_logic}</b>"
 
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        is_closing = "平倉" in action or pnl is not None
-        direction_icon = "🟢" if "買入" in action or "好倉" in action else "🔴"
-        if is_closing:
-            direction_icon = "💰" if (pnl or 0) >= 0 else "🛑"
-
-        pnl_text = ""
-        if pnl is not None:
-            pnl_sign = "+" if pnl > 0 else ""
-            pnl_text = f"\n💵 <b>實現損益</b>: <code>{pnl_sign}{pnl:,.2f} USD</code>"
-
-        bracket_text = ""
-        if tp_price and sl_price:
-            bracket_text = f"\n🎯 <b>止賺目標</b>: <code>{tp_price:,.2f}</code> | 🛑 <b>止蝕防護</b>: <code>{sl_price:,.2f}</code>"
 
         msg = (
-            f"{direction_icon} <b>【AutoTrade 交易成交通報】</b>\n"
+            f"{header_title}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"📊 <b>執行策略</b>: {strategy}\n"
             f"🎯 <b>標的合約</b>: {symbol} ({contract})\n"
-            f"⚡ <b>動作類型</b>: <b>{action}</b> ({int(quantity)} 口)\n"
+            f"⚡ <b>動作類型</b>: <b>{action_desc}</b> ({qty_str})\n"
             f"📈 <b>成交價格</b>: <code>{price:,.2f} USD</code> ({order_type})"
-            f"{pnl_text}"
-            f"{bracket_text}\n"
+            f"{exit_reason_block}"
+            f"{pnl_block}"
+            f"{comm_block}"
+            f"{bracket_block}"
+            f"{logic_line}\n"
             f"⏰ <b>成交時間</b>: {now_str}"
         )
-        if reason:
-            msg += f"\n💡 <b>觸發原因</b>: {reason}"
 
+        if sync:
+            return self.send_message_sync(msg)
         self.send_message_async(msg)
+        return True
 
     def notify_manual_flat(
         self,

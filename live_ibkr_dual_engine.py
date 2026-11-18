@@ -358,6 +358,11 @@ class LiveIBKRDualEngine:
         self._last_soft_stop_ts: Dict[str, float] = {}
         self._active_trade_meta: Dict[str, Dict[str, Any]] = {}
         self._last_sl_modify_ts: Dict[str, float] = {}
+        # 訂單元數據與成交通報追蹤字典 (支援 Telegram 推播顯示開平倉、規則邏輯、出場原因與 HKD 損益)
+        self._order_rules: Dict[int, str] = {}
+        self._order_exit_reasons: Dict[int, str] = {}
+        self._order_kinds: Dict[int, str] = {}  # "ENTRY" or "EXIT"
+        self._notified_exec_ids: Set[str] = set()
         self.status_message = "正在初始化雙引擎交易調度器..."
 
         # 自動重連與斷線守護狀態
@@ -460,46 +465,172 @@ class LiveIBKRDualEngine:
             return default
 
     def on_exec_details(self, trade: Any, fill: Any):
-        """官方即時成交流水回呼鉤子"""
+        """官方即時成交流水回呼鉤子 (升級版：支援開平倉標記、規則邏輯、出場原因與雙幣損益)"""
         try:
             sym = getattr(fill.contract, "symbol", "")
-            strat = "v9.1" if sym in ("MES", "MNQ") else "UNKNOWN"
+            strat = "v9.3" if sym in ("MES", "MNQ") else "UNKNOWN"
             report = getattr(fill, "commissionReport", None)
             comm = self._safe_float(getattr(report, "commission", 0.0)) if report else 0.0
             pnl = self._safe_float(getattr(report, "realizedPNL", 0.0)) if report else 0.0
+            exec_id = getattr(fill.execution, "execId", "")
+            order_id = int(getattr(fill.execution, "orderId", 0) or 0)
+            order_ref = str(getattr(fill.execution, "orderRef", "") or "")
+            side = getattr(fill.execution, "side", "")
+            shares = float(getattr(fill.execution, "shares", 0.0) or 0.0)
+            price = float(getattr(fill.execution, "price", 0.0) or 0.0)
+
             self.ledger_mgr.record_execution(
-                exec_id=fill.execution.execId,
+                exec_id=exec_id,
                 time_val=fill.execution.time,
                 symbol=sym,
-                side=fill.execution.side,
-                shares=fill.execution.shares,
-                price=fill.execution.price,
+                side=side,
+                shares=shares,
+                price=price,
                 realized_pnl=pnl,
                 commission=comm,
                 strategy=strat,
                 account_id=self.account_id,
-                order_id=fill.execution.orderId,
+                order_id=order_id,
                 client_id=fill.execution.clientId,
-                order_ref=getattr(fill.execution, "orderRef", "")
+                order_ref=order_ref
             )
 
-            # 方案 C：自動發送 Telegram 成交通知
+            # 方案 C：自動發送 Telegram 專業成交通知
+            if exec_id and hasattr(self, "_notified_exec_ids") and exec_id in self._notified_exec_ids:
+                return
+
             try:
                 from telegram_notifier import notifier
-                action_text = "買入 (好倉)" if fill.execution.side == "BOT" else "沽出 (淡倉/平倉)"
+
+                # 1. 判斷開倉 vs 平倉
+                is_closing = False
+                order_kind = self._order_kinds.get(order_id) if hasattr(self, "_order_kinds") else None
+                if order_kind == "ENTRY":
+                    is_closing = False
+                elif order_kind == "EXIT":
+                    is_closing = True
+                elif "_ENTRY_" in order_ref:
+                    is_closing = False
+                elif any(k in order_ref for k in ["_SL_", "_TP_", "GUARD_", "SOFT_STOP", "MANUAL", "FLAT"]):
+                    is_closing = True
+                elif pnl != 0.0:
+                    is_closing = True
+                else:
+                    meta = self._active_trade_meta.get(sym, {}) if hasattr(self, "_active_trade_meta") else {}
+                    pos_dir = meta.get("direction")
+                    if pos_dir == "LONG" and side == "SLD":
+                        is_closing = True
+                    elif pos_dir == "SHORT" and side == "BOT":
+                        is_closing = True
+                    else:
+                        is_closing = False
+
+                # 2. 開倉邏輯
+                entry_rule = ""
+                if hasattr(self, "_order_rules"):
+                    entry_rule = self._order_rules.get(order_id, "")
+                if not entry_rule and hasattr(self, "_active_trade_meta"):
+                    entry_rule = self._active_trade_meta.get(sym, {}).get("rule_desc", "")
+                if not entry_rule:
+                    if sym == "MNQ":
+                        entry_rule = "規則 2：極端邊界反彈 (頂 1 口)"
+                    elif side == "SLD" and not is_closing:
+                        entry_rule = "規則 3：微突破反轉 (頂 1 口)"
+                    else:
+                        entry_rule = "規則 1：順勢波 3 回踩"
+
+                # 3. 出場原因
+                exit_reason = ""
+                if is_closing:
+                    if hasattr(self, "_order_exit_reasons"):
+                        exit_reason = self._order_exit_reasons.get(order_id, "")
+                    if not exit_reason:
+                        if "_TP1" in order_ref:
+                            exit_reason = "🎯 第一止盈 (TP1 1.55R)"
+                        elif "_TP2" in order_ref:
+                            exit_reason = "🎯 第二止盈 (TP2 3.10R)"
+                        elif "RUNNER" in order_ref:
+                            exit_reason = "🚀 趨勢奔馳 (Runner 5.50R)"
+                        elif "_SL" in order_ref:
+                            meta = self._active_trade_meta.get(sym, {}) if hasattr(self, "_active_trade_meta") else {}
+                            if meta.get("trailing_active"):
+                                exit_reason = "⚡ 追蹤止盈 (Trailing Stop)"
+                            elif meta.get("be_active"):
+                                exit_reason = "🛡️ 保本平倉 (Breakeven)"
+                            else:
+                                exit_reason = "🛑 原生止損 (Stop Loss)"
+                        elif any(k in order_ref for k in ["SOFT_STOP", "7007", "GUARD"]):
+                            exit_reason = "🚨 軟體防穿倉 (Soft Stop 7007)"
+                        elif any(k in order_ref for k in ["MANUAL", "FLAT"]):
+                            exit_reason = "✋ 手動緊急平倉 (Manual Flat)"
+                        elif pnl > 0.0:
+                            exit_reason = "🎯 策略目標止盈 (Take Profit)"
+                        elif pnl < 0.0:
+                            exit_reason = "🛑 原生止損 (Stop Loss)"
+                        else:
+                            exit_reason = "🛡️ 保本平倉 (Breakeven)"
+
+                # 4. 動作描述
+                if not is_closing:
+                    action_text = "🟢 買入開倉 (好倉 / LONG)" if side == "BOT" else "🔴 沽出開倉 (淡倉 / SHORT)"
+                else:
+                    action_text = "買入平倉 (平淡倉 / BUY TO COVER)" if side == "BOT" else "沽出平倉 (平好倉 / SELL CLOSE)"
+
+                # 5. 實現損益 (USD + HKD)
+                fx_rate = float(getattr(self, "usd_hkd_rate", 7.78) or 7.78)
+                pnl_val = None
+                pnl_hkd_val = None
+
+                if is_closing:
+                    if pnl != 0.0:
+                        pnl_val = pnl
+                    else:
+                        meta = self._active_trade_meta.get(sym, {}) if hasattr(self, "_active_trade_meta") else {}
+                        entry_p = float(meta.get("entry") or 0.0)
+                        pos_dir = meta.get("direction", "LONG" if side == "SLD" else "SHORT")
+                        multiplier = 5.0 if sym == "MES" else 2.0
+                        if entry_p > 0:
+                            if pos_dir == "LONG" or side == "SLD":
+                                calc_pnl = (price - entry_p) * multiplier * shares
+                            else:
+                                calc_pnl = (entry_p - price) * multiplier * shares
+                            pnl_val = round(calc_pnl, 2)
+                        else:
+                            pnl_val = 0.0
+                    pnl_hkd_val = round(pnl_val * fx_rate, 2)
+
+                # 6. 開倉保護目標
+                tp_target = None
+                sl_target = None
+                if not is_closing and hasattr(self, "_active_trade_meta"):
+                    meta = self._active_trade_meta.get(sym, {})
+                    tp_target = meta.get("tp1") or meta.get("tp2")
+                    sl_target = meta.get("init_sl")
+
                 notifier.notify_trade(
-                    strategy=f"V9.1 旗艦版 ({sym})",
+                    strategy=f"V9.3 旗艦雙引擎 ({sym})",
                     symbol=sym,
                     contract=getattr(fill.contract, "localSymbol", sym),
                     action=action_text,
-                    quantity=fill.execution.shares,
-                    price=fill.execution.price,
+                    quantity=shares,
+                    price=price,
                     order_type="FILLED",
-                    pnl=pnl if pnl != 0.0 else None,
-                    reason=f"IBKR 官方成交回報 (ExecId: {fill.execution.execId[:12]}...)"
+                    tp_price=tp_target,
+                    sl_price=sl_target,
+                    pnl=pnl_val,
+                    pnl_hkd=pnl_hkd_val,
+                    commission=comm if comm > 0 else None,
+                    is_closing=is_closing,
+                    entry_rule=entry_rule,
+                    exit_reason=exit_reason,
+                    fx_rate=fx_rate
                 )
-            except Exception:
-                pass
+
+                if exec_id and hasattr(self, "_notified_exec_ids"):
+                    self._notified_exec_ids.add(exec_id)
+
+            except Exception as te:
+                logger.warning(f"Telegram 成交通報發送異常: {te}")
         except Exception as e:
             logger.error(f"處理成交流水回呼異常: {e}")
 
@@ -1238,6 +1369,21 @@ class LiveIBKRDualEngine:
         if cnt_a + cnt_b + cnt_c != qty:
             cnt_a, cnt_b, cnt_c = engine_inst.calculate_tranches(qty)
 
+        rule_code = getattr(signal, "rule_code", None)
+        if rule_code == "R1":
+            rule_desc = "規則 1：順勢波 3 回踩"
+        elif rule_code == "R2":
+            rule_desc = "規則 2：極端邊界反彈 (頂 1 口)"
+        elif rule_code == "R3":
+            rule_desc = "規則 3：微突破反轉 (頂 1 口)"
+        else:
+            if symbol == "MNQ":
+                rule_desc = "規則 2：極端邊界反彈 (頂 1 口)"
+            elif signal.direction == Direction.SHORT:
+                rule_desc = "規則 3：微突破反轉 (頂 1 口)"
+            else:
+                rule_desc = "規則 1：順勢波 3 回踩"
+
         if hasattr(self, "_active_trade_meta"):
             self._active_trade_meta[symbol] = {
                 "direction": "LONG" if signal.direction == Direction.LONG else "SHORT",
@@ -1250,11 +1396,12 @@ class LiveIBKRDualEngine:
                 "be_active": False,
                 "trailing_active": False,
                 "opened_at": time.time(),
+                "rule_desc": rule_desc,
             }
 
         prefix = f"V93_{symbol}"
         logger.info(
-            f"🚀 [{prefix} 旗艦開火] 送出 {symbol} 分梯獨立 Bracket: {direction_action} {qty} 口 @ LMT {entry_p:.2f} | "
+            f"🚀 [{prefix} 旗艦開火] 送出 {symbol} 分梯獨立 Bracket ({rule_desc}): {direction_action} {qty} 口 @ LMT {entry_p:.2f} | "
             f"止蝕: {sl_p:.2f} (0.82x ATR) | TP1(1.55R): {tp1_p:.2f} ({cnt_a}口) | TP2(3.10R): {tp2_p:.2f} ({cnt_b}口) | Runner(5.50R): {runner_p:.2f} ({cnt_c}口)"
         )
 
@@ -1281,7 +1428,29 @@ class LiveIBKRDualEngine:
                 order_ref_prefix=prefix,
                 tp_tag=t_tag
             )
-            parent_ids.append(bracket_orders[0].orderId)
+            parent_o, sl_o, tp_o = bracket_orders[0], bracket_orders[1], bracket_orders[2]
+            parent_ids.append(parent_o.orderId)
+
+            # 記錄訂單元數據供成交通報與維度分析使用
+            if hasattr(self, "_order_rules"):
+                self._order_rules[parent_o.orderId] = rule_desc
+                self._order_rules[sl_o.orderId] = rule_desc
+                self._order_rules[tp_o.orderId] = rule_desc
+
+            if hasattr(self, "_order_kinds"):
+                self._order_kinds[parent_o.orderId] = "ENTRY"
+                self._order_kinds[sl_o.orderId] = "EXIT"
+                self._order_kinds[tp_o.orderId] = "EXIT"
+
+            if hasattr(self, "_order_exit_reasons"):
+                self._order_exit_reasons[sl_o.orderId] = "🛑 原生止損 (Stop Loss)"
+                if t_tag == "TP1":
+                    self._order_exit_reasons[tp_o.orderId] = "🎯 第一止盈 (TP1 1.55R)"
+                elif t_tag == "RUNNER":
+                    self._order_exit_reasons[tp_o.orderId] = "🚀 趨勢奔馳 (Runner 5.50R)"
+                else:
+                    self._order_exit_reasons[tp_o.orderId] = "🎯 第二止盈 (TP2 3.10R)"
+
             for o in bracket_orders:
                 self.ib.placeOrder(target_contract, o)
 
@@ -1832,7 +2001,11 @@ class LiveIBKRDualEngine:
                 t.order.outsideRth = True
                 t.order.transmit = True
                 self.ib.placeOrder(contract, t.order)
-                modified_ids.append(getattr(t.order, "orderId", 0))
+                oid = getattr(t.order, "orderId", 0)
+                if oid:
+                    modified_ids.append(oid)
+                    if hasattr(self, "_order_exit_reasons"):
+                        self._order_exit_reasons[oid] = "⚡ 追蹤止盈 (Trailing Stop)" if tp2_hit else "🛡️ 保本平倉 (Breakeven)"
             except Exception as me:
                 logger.warning(f"移動 {symbol} 保本/追蹤止損失敗: {me}")
 
@@ -2105,7 +2278,20 @@ class LiveIBKRDualEngine:
                     mo = MarketOrder(flat_action, flat_qty)
                     mo.tif = "GTC"
                     mo.outsideRth = True
+                    is_soft = ("防穿倉" in reason or "7007" in reason)
+                    mo.orderRef = f"GUARD_{symbol}_SOFT_STOP" if is_soft else f"MANUAL_{symbol}_FLAT"
                     trade = self.ib.placeOrder(target_contract, mo)
+                    trade_order = getattr(trade, "order", None) if trade else None
+                    oid = getattr(mo, "orderId", None) or (getattr(trade_order, "orderId", None) if trade_order else None)
+                    if oid:
+                        if hasattr(self, "_order_kinds"):
+                            self._order_kinds[oid] = "EXIT"
+                        if hasattr(self, "_order_exit_reasons"):
+                            self._order_exit_reasons[oid] = "🚨 軟體防穿倉 (Soft Stop 7007)" if is_soft else "✋ 手動緊急平倉 (Manual Flat)"
+                        if hasattr(self, "_order_rules") and hasattr(self, "_active_trade_meta"):
+                            meta = self._active_trade_meta.get(symbol, {})
+                            if meta.get("rule_desc"):
+                                self._order_rules[oid] = meta["rule_desc"]
                     executed_flat = True
                     detail_str = f"{flat_action} {flat_qty} 口 {symbol} (原持倉: {p.position})"
                     flat_details.append(detail_str)
