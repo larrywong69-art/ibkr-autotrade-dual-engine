@@ -28,21 +28,60 @@ EXPORTS_DIR = os.path.join(REPORTS_DIR, "gdrive_exports")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(EXPORTS_DIR, exist_ok=True)
 
-# 嘗試載入 .env 環境變數
-ENV_FILE = os.path.join(CURRENT_DIR, ".env")
-if os.path.exists(ENV_FILE):
+logger = logging.getLogger("GoogleSheetsSync")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# 零外部相依載入 .env 環境變數 (支援多目錄搜尋與無 python-dotenv 環境)
+def _load_env_fallback():
+    candidate_paths = [
+        os.path.join(CURRENT_DIR, ".env"),
+        os.path.join(os.getcwd(), ".env"),
+        os.path.expanduser("~/.env"),
+        os.path.expanduser("~/ibkr_paper_trading/.env"),
+    ]
+    # 嘗試 python-dotenv (若有安裝)
     try:
         from dotenv import load_dotenv
-        load_dotenv(ENV_FILE)
+        for p in candidate_paths:
+            if os.path.isfile(p):
+                load_dotenv(p, override=False)
     except Exception:
         pass
+
+    # 原生無套件兜底解析 (逐行讀取 key=value，去除引號及空白)
+    loaded_files = []
+    for p in candidate_paths:
+        if not os.path.isfile(p):
+            continue
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip()
+                        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+                            v = v[1:-1]
+                        if k and (k not in os.environ or not os.environ[k]):
+                            os.environ[k] = v
+            if p not in loaded_files:
+                loaded_files.append(p)
+        except Exception:
+            pass
+
+    if os.getenv("GOOGLE_SHEETS_WEBHOOK_URL"):
+        logger.info("📡 已就緒 Google Sheets Webhook 雲端同步通道 (已從環境變數載入)")
+    else:
+        logger.debug(f"已檢查環境檔案: {loaded_files}，未設定 GOOGLE_SHEETS_WEBHOOK_URL")
+
+_load_env_fallback()
 
 # Google Drive 專屬「V9.3 累積表現」資料夾 ID
 V93_FOLDER_ID = "1jsWI6h1Kd634fmnp98PMs7IX-Yey_naX"
 SYNC_STATE_FILE = os.path.join(DATA_DIR, "v93_sheets_sync_state.json")
-
-logger = logging.getLogger("GoogleSheetsSync")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
 def style_header_cell(cell, fill_color="1E3A8A", font_color="FFFFFF"):
@@ -848,6 +887,19 @@ class GoogleSheetsSyncManager:
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="AutoTrade Google Sheets Sync Manager")
+    parser.add_argument("--webhook-url", "--url", dest="webhook_url", type=str, default=None, help="Google Apps Script Webhook URL")
+    args, unknown = parser.parse_known_args()
+
+    if args.webhook_url:
+        os.environ["GOOGLE_SHEETS_WEBHOOK_URL"] = args.webhook_url.strip()
+    elif unknown:
+        for arg in unknown:
+            if arg.startswith("http://") or arg.startswith("https://"):
+                os.environ["GOOGLE_SHEETS_WEBHOOK_URL"] = arg.strip()
+                break
+
     mgr = GoogleSheetsSyncManager()
     res = mgr.sync_all()
     print(json.dumps(res, indent=2, ensure_ascii=False))
