@@ -12,6 +12,7 @@ import csv
 import logging
 import subprocess
 import shutil
+import urllib.request
 from datetime import datetime, date, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -26,6 +27,15 @@ REPORTS_DIR = os.path.join(CURRENT_DIR, "reports")
 EXPORTS_DIR = os.path.join(REPORTS_DIR, "gdrive_exports")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(EXPORTS_DIR, exist_ok=True)
+
+# 嘗試載入 .env 環境變數
+ENV_FILE = os.path.join(CURRENT_DIR, ".env")
+if os.path.exists(ENV_FILE):
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(ENV_FILE)
+    except Exception:
+        pass
 
 # Google Drive 專屬「V9.3 累積表現」資料夾 ID
 V93_FOLDER_ID = "1jsWI6h1Kd634fmnp98PMs7IX-Yey_naX"
@@ -74,6 +84,53 @@ def style_data_cell(cell, is_even=False, align="center", is_bold=False, num_form
     cell.border = thin_border
     if num_format:
         cell.number_format = num_format
+
+
+def compute_trade_stats(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """計算所有交易紀錄的 KPI 指標彙總"""
+    total_trades = len(trades)
+    wins = [t for t in trades if float(t.get("net_pnl", 0.0)) > 0]
+    losses = [t for t in trades if float(t.get("net_pnl", 0.0)) < 0]
+    win_count = len(wins)
+    win_rate = (win_count / total_trades) if total_trades > 0 else 0.0
+
+    total_profit = sum(float(t.get("net_pnl", 0.0)) for t in wins)
+    total_loss = abs(sum(float(t.get("net_pnl", 0.0)) for t in losses))
+    profit_factor = (total_profit / total_loss) if total_loss > 0 else (99.9 if total_profit > 0 else 1.0)
+    net_realized_pnl = sum(float(t.get("net_pnl", 0.0)) for t in trades)
+    total_comm = sum(float(t.get("commission", 0.0)) for t in trades)
+    avg_trade = (net_realized_pnl / total_trades) if total_trades > 0 else 0.0
+    max_win = max([float(t.get("net_pnl", 0.0)) for t in trades] + [0.0])
+    max_loss = min([float(t.get("net_pnl", 0.0)) for t in trades] + [0.0])
+
+    v43_trades = [t for t in trades if "4.3" in str(t.get("strategy", ""))]
+    v43_wins = len([t for t in v43_trades if float(t.get("net_pnl", 0.0)) > 0])
+    v43_wr = (v43_wins / len(v43_trades) * 100) if v43_trades else 0.0
+    v43_pnl = sum(float(t.get("net_pnl", 0.0)) for t in v43_trades)
+
+    v50_trades = [t for t in trades if "5.0" in str(t.get("strategy", ""))]
+    v50_wins = len([t for t in v50_trades if float(t.get("net_pnl", 0.0)) > 0])
+    v50_wr = (v50_wins / len(v50_trades) * 100) if v50_trades else 0.0
+    v50_pnl = sum(float(t.get("net_pnl", 0.0)) for t in v50_trades)
+
+    return {
+        "total_trades": total_trades,
+        "win_count": win_count,
+        "loss_count": len(losses),
+        "win_rate_pct": round(win_rate * 100, 1),
+        "profit_factor": round(profit_factor, 2),
+        "total_net_pnl": round(net_realized_pnl, 2),
+        "avg_trade": round(avg_trade, 2),
+        "max_win": round(max_win, 2),
+        "max_loss": round(max_loss, 2),
+        "total_comm": round(total_comm, 2),
+        "v43_trades": len(v43_trades),
+        "v43_win_rate_pct": round(v43_wr, 1),
+        "v43_net_pnl": round(v43_pnl, 2),
+        "v50_trades": len(v50_trades),
+        "v50_win_rate_pct": round(v50_wr, 1),
+        "v50_net_pnl": round(v50_pnl, 2),
+    }
 
 
 class GoogleSheetsSyncManager:
@@ -347,7 +404,7 @@ class GoogleSheetsSyncManager:
     # ==========================================================================
     # 2. 建立【交易紀錄與分析總表】 (分頁一：分析報告(含圖表) / 分頁二：詳細交易紀錄)
     # ==========================================================================
-    def build_trade_ledger_workbook(self, trades: List[Dict[str, Any]]) -> str:
+    def build_trade_ledger_workbook(self, trades: List[Dict[str, Any]], stats: Optional[Dict[str, Any]] = None) -> str:
         wb = openpyxl.Workbook()
 
         # 分頁一：【分析報告】
@@ -369,20 +426,17 @@ class GoogleSheetsSyncManager:
         t2.alignment = Alignment(horizontal="center", vertical="center")
         ws1.row_dimensions[2].height = 20
 
-        total_trades = len(trades)
-        wins = [t for t in trades if float(t.get("net_pnl", 0.0)) > 0]
-        losses = [t for t in trades if float(t.get("net_pnl", 0.0)) < 0]
-        win_count = len(wins)
-        win_rate = (win_count / total_trades) if total_trades > 0 else 0.0
+        if not stats:
+            stats = compute_trade_stats(trades)
 
-        total_profit = sum(float(t.get("net_pnl", 0.0)) for t in wins)
-        total_loss = abs(sum(float(t.get("net_pnl", 0.0)) for t in losses))
-        profit_factor = (total_profit / total_loss) if total_loss > 0 else (99.9 if total_profit > 0 else 1.0)
-        net_realized_pnl = sum(float(t.get("net_pnl", 0.0)) for t in trades)
-        total_comm = sum(float(t.get("commission", 0.0)) for t in trades)
-        avg_trade = (net_realized_pnl / total_trades) if total_trades > 0 else 0.0
-        max_win = max([float(t.get("net_pnl", 0.0)) for t in trades] + [0.0])
-        max_loss = min([float(t.get("net_pnl", 0.0)) for t in trades] + [0.0])
+        total_trades = stats["total_trades"]
+        win_rate = stats["win_rate_pct"] / 100.0
+        profit_factor = stats["profit_factor"]
+        net_realized_pnl = stats["total_net_pnl"]
+        total_comm = stats["total_comm"]
+        avg_trade = stats["avg_trade"]
+        max_win = stats["max_win"]
+        max_loss = stats["max_loss"]
 
         kpi_cards = [
             ("A4", "B5", "總交易筆數", f"{total_trades} 筆", "1E3A8A", "0F172A"),
@@ -652,11 +706,62 @@ class GoogleSheetsSyncManager:
         p = subprocess.run(cmd, capture_output=True, text=True)
         return p.returncode, p.stdout.strip(), p.stderr.strip()
 
-    def sync_file_to_gdrive(self, local_path: str, file_id: str, file_name: str) -> str:
-        """更新已存在的 Google Sheet 或上傳新檔"""
+    def sync_via_webhook(
+        self,
+        balances: List[Dict[str, Any]],
+        trades: List[Dict[str, Any]],
+        stats: Dict[str, Any]
+    ) -> bool:
+        """
+        透過 Google Apps Script Webhook 雲端推送數據 (免 CLI、免 GCP 服務帳戶)
+        需在 .env 設定 GOOGLE_SHEETS_WEBHOOK_URL
+        """
+        webhook_url = os.getenv("GOOGLE_SHEETS_WEBHOOK_URL", "").strip()
+        if not webhook_url:
+            return False
+
+        logger.info("🌐 正在透過 Google Apps Script Webhook 雲端秒級更新 Google Sheets 雙表...")
+        payload = {
+            "balance_sheet_id": self.state.get("balance_sheet_id", "1aVh_vFGwxrcXckr4LNh-AWxwGzzav1KuY7uXCLqpFXI"),
+            "trade_ledger_sheet_id": self.state.get("trade_ledger_sheet_id", "139yDV3lOdbF5fK4C00MQYh4MHG-gscBMx_f0RVu853c"),
+            "balances": balances,
+            "trades": trades,
+            "stats": stats,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+        try:
+            data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(
+                webhook_url,
+                data=data_bytes,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                res_body = resp.read().decode("utf-8")
+                res_json = json.loads(res_body) if res_body else {}
+                if res_json.get("status") == "ok":
+                    logger.info(
+                        f"✅ Webhook 同步成功！已更新結餘行數: {res_json.get('balances_synced', len(balances))}, "
+                        f"成交分錄數: {res_json.get('trades_synced', len(trades))}"
+                    )
+                    return True
+                else:
+                    logger.warning(f"Webhook 回傳非預期狀態: {res_body}")
+        except Exception as e:
+            logger.warning(f"Webhook 連線推送失敗: {e}")
+        return False
+
+    def sync_file_to_gdrive(self, local_path: str, file_id: str, file_name: str, webhook_used: bool = False) -> str:
+        """更新已存在的 Google Sheet 或上傳新檔 (支援 gdrive CLI)"""
         gdrive_bin = shutil.which("gdrive")
         if not gdrive_bin:
-            logger.warning("未找到 gdrive CLI，跳過雲端上傳")
+            if not webhook_used:
+                logger.warning(
+                    f"未找到 gdrive CLI 且未啟用 Webhook，跳過 {file_name} 雲端上傳。"
+                    "💡 提示：在無人值守雲端主機，建議於 .env 設定 GOOGLE_SHEETS_WEBHOOK_URL（詳見 google_apps_script_sync.js）"
+                )
             return file_id
 
         # 優先嘗試 update 既有 ID (網址永遠不變)
@@ -693,25 +798,31 @@ class GoogleSheetsSyncManager:
         return file_id
 
     def sync_all(self) -> Dict[str, Any]:
-        """執行全量生成並自動更新 Google Sheets"""
+        """執行全量生成並自動更新 Google Sheets (支援 Webhook 及 gdrive CLI 雙通道)"""
         logger.info("🚀 開始執行 V9.3 累積表現 Google Sheets 雙表全量同步...")
         trades = self.load_all_trades()
         balances = self.load_daily_balance_records()
+        stats = compute_trade_stats(trades)
 
         # 1. 建立 Excel 檔
         bal_xlsx = self.build_balance_workbook(balances)
-        ledger_xlsx = self.build_trade_ledger_workbook(trades)
+        ledger_xlsx = self.build_trade_ledger_workbook(trades, stats=stats)
 
-        # 2. 雲端同步
+        # 2. 優先嘗試 Google Apps Script Webhook 雲端推送
+        webhook_ok = self.sync_via_webhook(balances, trades, stats)
+
+        # 3. 嘗試 gdrive CLI 本地就地更新 (若本機安裝有 gdrive)
         bal_id = self.sync_file_to_gdrive(
             bal_xlsx,
             self.state.get("balance_sheet_id", "1aVh_vFGwxrcXckr4LNh-AWxwGzzav1KuY7uXCLqpFXI"),
-            "AutoTrade_帳戶結餘表"
+            "AutoTrade_帳戶結餘表",
+            webhook_used=webhook_ok
         )
         ledger_id = self.sync_file_to_gdrive(
             ledger_xlsx,
             self.state.get("trade_ledger_sheet_id", "139yDV3lOdbF5fK4C00MQYh4MHG-gscBMx_f0RVu853c"),
-            "AutoTrade_交易紀錄與分析總表"
+            "AutoTrade_交易紀錄與分析總表",
+            webhook_used=webhook_ok
         )
 
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -726,6 +837,7 @@ class GoogleSheetsSyncManager:
 
         return {
             "status": "ok",
+            "webhook_synced": webhook_ok,
             "folder_url": self.state["folder_url"],
             "balance_url": self.state["balance_sheet_url"],
             "trade_ledger_url": self.state["trade_ledger_sheet_url"],
