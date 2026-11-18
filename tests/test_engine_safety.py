@@ -1063,6 +1063,90 @@ class TestDailyAutoAuditFixer(unittest.TestCase):
                 rim.INCIDENTS_JSONL = orig_jsonl
                 rim.INCIDENTS_LOG = orig_log
 
+    def test_hmds_prolonged_failure_triggers_reconnect_and_5m_scan_logs(self):
+        import types
+        import pandas as pd
+        import live_ibkr_dual_engine as eng_mod
+
+        eng = eng_mod.LiveIBKRDualEngine.__new__(eng_mod.LiveIBKRDualEngine)
+        eng._hist_fail_streak = {}
+        eng._last_hist_fail_ts = {}
+        eng._last_eval_bar_ts = {}
+        eng._last_eval_bucket = {}
+        eng._last_hmds_recovery_ts = 0.0
+        eng._last_scan_log_ts = {}
+        eng.market_data_status = "REAL_TIME"
+        eng.net_liquidation = 1000000.0
+        eng.is_connected = True
+        eng.is_reconnecting = False
+        disconnected = {"called": 0}
+        eng.ib = types.SimpleNamespace(
+            isConnected=lambda: True,
+            disconnect=lambda: disconnected.__setitem__("called", disconnected["called"] + 1),
+        )
+
+        t0 = 1_700_000_000.0
+        for _ in range(3):
+            eng._record_hist_failure("MES", t0)
+            eng._record_hist_failure("MNQ", t0)
+        self.assertEqual(disconnected["called"], 0)
+
+        eng._record_hist_failure("MES", t0 + 10.0)
+        self.assertEqual(disconnected["called"], 0)
+        eng._record_hist_failure("MNQ", t0 + 10.0)
+        self.assertEqual(disconnected["called"], 1)
+        self.assertFalse(eng.is_connected)
+        self.assertTrue(eng.is_reconnecting)
+
+        # Verify _evaluate_symbol_bar triggers real V9.3 R1 SHORT signal when bar pulls back to 5m EMA20,
+        # and logs diagnostic blocker summary when no signal triggers
+        dates = pd.date_range("2026-11-18 00:00", periods=60, freq="5min", tz="UTC")
+        closes = [7450.0 - i * 1.0 for i in range(60)]
+        bars_no_sig = [
+            {"date": d, "open": c + 0.5, "high": c + 0.75, "low": c - 0.5, "close": c, "volume": 100}
+            for d, c in zip(dates, closes)
+        ]
+        # Downtrend where price never pulls up to ema20 -> no R1 short, ADX 44.2 > 30 blocks R2
+        placed = []
+        eng.is_connected = True
+        eng.ib = types.SimpleNamespace(
+            isConnected=lambda: True,
+            reqHistoricalData=lambda *a, **kw: bars_no_sig,
+        )
+        eng.get_4h_macro_regime = lambda *a, **kw: {
+            "long": False, "short": True, "e20": 7467.0, "e50": 7525.0, "e200": 7635.0, "c": 7412.5, "adx_1h": 44.2
+        }
+        eng.place_v93_bracket_order = lambda sym, sig: placed.append((sym, sig))
+        v93 = eng_mod.StrategyEngineV93(eng_mod.CONFIG_V93)
+
+        with unittest.mock.patch.object(eng_mod, "calculate_atr", wraps=eng_mod.calculate_atr), \
+                self.assertLogs("DualEngineLive", level="INFO") as cm:
+            eng._can_query_hist_bar = lambda sym, ts: True
+            eng._evaluate_symbol_bar("MES", object(), v93, 60000.0, 4.5, None, [])
+        self.assertEqual(len(placed), 0)
+        self.assertTrue(any("5m掃描" in line and "1H_ADX(44.2)>30禁R2逆勢" in line for line in cm.output))
+
+        # Now make bar[-2] cleanly pull back up to 5m EMA20 and close bearish below EMA20 -> must fire R1 SHORT
+        bars_r1_short = list(bars_no_sig)
+        last_close = bars_r1_short[-2]["close"]
+        bars_r1_short[-2] = {
+            "date": dates[-2],
+            "open": last_close + 15.0,
+            "high": last_close + 25.0,
+            "low": last_close - 1.0,
+            "close": last_close,
+            "volume": 200,
+        }
+        eng._last_eval_bar_ts = {}
+        eng.ib = types.SimpleNamespace(
+            isConnected=lambda: True,
+            reqHistoricalData=lambda *a, **kw: bars_r1_short,
+        )
+        eng._evaluate_symbol_bar("MES", object(), v93, 60000.0, 4.5, None, [])
+        self.assertEqual(len(placed), 1)
+        self.assertEqual(placed[0][0], "MES")
+        self.assertEqual(str(placed[0][1].direction).upper().endswith("SHORT"), True)
+
 
 if __name__ == "__main__":
     unittest.main()

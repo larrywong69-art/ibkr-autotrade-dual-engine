@@ -350,6 +350,8 @@ class LiveIBKRDualEngine:
         self._hist_fail_streak: Dict[str, int] = {}
         self._last_macro_fail_ts: Dict[str, float] = {}
         self._last_162_log_ts: float = 0.0
+        self._last_hmds_recovery_ts: float = 0.0
+        self._last_scan_log_ts: Dict[str, float] = {}
         self._warned_uncancellable_ids: set = set()
         self._cancel_attempt_ts: Dict[int, float] = {}
         self._stop_breach_first_seen: Dict[str, float] = {}
@@ -1874,7 +1876,75 @@ class LiveIBKRDualEngine:
         streak = int(streak_map.get(symbol, 0)) + 1
         streak_map[symbol] = streak
         fail_ts_map[symbol] = now_ts
-        return min(300.0, 60.0 * (2 ** (streak - 1)))
+        cooldown = min(300.0, 60.0 * (2 ** (streak - 1)))
+
+        if (
+            int(streak_map.get("MES", 0)) >= 4
+            and int(streak_map.get("MNQ", 0)) >= 4
+            and getattr(self, "market_data_status", "REAL_TIME") != "COMPETING_SESSION"
+            and (now_ts - getattr(self, "_last_hmds_recovery_ts", 0.0)) >= 1800.0
+        ):
+            self._last_hmds_recovery_ts = now_ts
+            streak_map["MES"] = 0
+            streak_map["MNQ"] = 0
+            logger.warning(
+                "🔄 [HMDS 長期假死自癒] MES/MNQ 連續多次歷史數據逾時 (ushmds 未響應)，主動重連 IB Gateway 刷新數據農場連線..."
+            )
+            try:
+                if getattr(self, "ib", None) and self.ib.isConnected():
+                    self.ib.disconnect()
+            except Exception:
+                pass
+            self.is_connected = False
+            self.is_reconnecting = True
+
+        return cooldown
+
+    def _log_bar_scan_diagnostics(self, symbol: str, df: pd.DataFrame, last_idx: int, macro: Dict[str, Any], now_ts: float):
+        """每 15 分鐘輸出一次 5m 策略掃描摘要，讓診斷日誌明確呈現評估狀態與未開倉原因"""
+        log_map = getattr(self, "_last_scan_log_ts", None)
+        if log_map is None:
+            self._last_scan_log_ts = {}
+            log_map = self._last_scan_log_ts
+        if now_ts - log_map.get(symbol, 0.0) < 890.0:
+            return
+        log_map[symbol] = now_ts
+
+        row = df.iloc[last_idx]
+        c = float(row.get("close", 0.0) or 0.0)
+        o = float(row.get("open", 0.0) or 0.0)
+        h = float(row.get("high", 0.0) or 0.0)
+        l = float(row.get("low", 0.0) or 0.0)
+        e20 = float(row.get("ema20", c) or c)
+        e50 = float(row.get("ema50", c) or c)
+        atr = max(1.0, float(row.get("atr", 1.0) or 1.0))
+        adx_1h = float(row.get("adx_1h", macro.get("adx_1h", 20.0)) or 20.0)
+        m_long = bool(macro.get("long", True))
+        m_short = bool(macro.get("short", True))
+
+        reasons = []
+        if e20 > e50 and not m_long:
+            reasons.append("5m均線多頭但4H僅准做空")
+        elif e20 < e50 and not m_short:
+            reasons.append("5m均線空頭但4H僅准做多")
+        elif m_long and e20 > e50:
+            if l > e20 + 0.25 * atr:
+                reasons.append("未回踩5mEMA20多頭支撐帶")
+            elif not (c > o and c > e20):
+                reasons.append("回踩尚未收陽站上EMA20")
+        elif m_short and e20 < e50:
+            if h < e20 - 0.25 * atr:
+                reasons.append("未回彈至5mEMA20空頭壓力帶")
+            elif not (c < o and c < e20):
+                reasons.append("回彈尚未收陰跌破EMA20")
+
+        if adx_1h > 30.0:
+            reasons.append(f"1H_ADX({adx_1h:.1f})>30禁R2逆勢")
+        reason_txt = " / ".join(reasons) if reasons else "未符合R1/R2進場條件"
+        logger.info(
+            f"🔎 [V9.3 {symbol} 5m掃描] Bar={df.index[last_idx]} | 收盤 {c:.2f} | "
+            f"5mEMA20 {e20:.2f} vs EMA50 {e50:.2f} | 4H多:{m_long} 空:{m_short} | {reason_txt}"
+        )
 
     def _evaluate_symbol_bar(
         self,
@@ -1955,6 +2025,8 @@ class LiveIBKRDualEngine:
             if target_sig:
                 engine_inst.pending_limit_order = None
                 self.place_v93_bracket_order(symbol, target_sig)
+            else:
+                self._log_bar_scan_diagnostics(symbol, df, last_idx, macro, now_ts)
         except Exception as e:
             self._record_hist_failure(symbol, now_ts)
             logger.warning(f"V9.3 {symbol} K 棒評估異常: {e}")
