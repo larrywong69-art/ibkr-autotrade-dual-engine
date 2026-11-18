@@ -19,7 +19,8 @@ from typing import Dict, Any, List, Optional, Tuple
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from openpyxl.chart import LineChart, Reference
+from openpyxl.chart import LineChart, BarChart, PieChart, Reference
+from openpyxl.chart.series import SeriesLabel
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(CURRENT_DIR, "data")
@@ -125,50 +126,257 @@ def style_data_cell(cell, is_even=False, align="center", is_bold=False, num_form
         cell.number_format = num_format
 
 
-def compute_trade_stats(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """計算所有交易紀錄的 KPI 指標彙總"""
+# 匯率換算設定 (預設 1 USD = 7.78 HKD)
+def get_usd_hkd_rate() -> float:
+    fx = os.getenv("USD_HKD_FX_RATE")
+    if fx:
+        try:
+            return float(fx)
+        except Exception:
+            pass
+    status_file = os.path.join(CURRENT_DIR, "trade_status.json")
+    if os.path.exists(status_file):
+        try:
+            with open(status_file, "r", encoding="utf-8") as f:
+                d = json.load(f)
+                r = d.get("usd_hkd_rate") or d.get("fx_rate")
+                if r:
+                    return float(r)
+        except Exception:
+            pass
+    return 7.78
+
+
+def classify_trade_exit_reason(trade: Dict[str, Any]) -> str:
+    """精準分類出場原因 (Exit Reason)"""
+    reason = str(trade.get("reason") or "").upper()
+    order_ref = str(trade.get("order_ref") or "").upper()
+    action = str(trade.get("action") or "").upper()
+    pnl = float(trade.get("net_pnl", 0.0) or trade.get("realized_pnl", 0.0) or 0.0)
+    combined = f"{reason} {order_ref}"
+
+    if "TP1" in combined or "_TP_TP1" in combined or "第一止盈" in combined:
+        return "🎯 第一止盈 (TP1 1.55R)"
+    if "TP2" in combined or "_TP_TP2" in combined or "第二止盈" in combined:
+        return "🎯 第二止盈 (TP2 3.10R)"
+    if "RUNNER" in combined or "_RUNNER" in combined or "奔馳" in combined or "趨勢" in combined:
+        return "🚀 趨勢奔馳 (Runner 5.50R)"
+    if "BE" in combined or "BREAKEVEN" in combined or "保本" in combined or "平保" in combined:
+        return "🛡️ 保本平倉 (Breakeven)"
+    if "TRAIL" in combined or "追蹤" in combined:
+        return "⚡ 追蹤止盈 (Trailing Stop)"
+    if any(k in combined for k in ["STOP_LOSS", "STOPLOSS", "HARD_SL", "_SL", "SL_", "STP", "止蝕", "止損"]):
+        return "🛑 原生止損 (Stop Loss)"
+    if any(k in combined for k in ["SOFT_STOP", "7007", "防穿倉", "軟體止蝕"]):
+        return "🚨 軟體防穿倉 (Soft Stop)"
+    if any(k in combined for k in ["EOD", "MARKET_CLOSE", "週末", "休市", "盤尾"]):
+        return "🕒 盤尾/週末清倉 (EOD Close)"
+    if any(k in combined for k in ["MANUAL", "手動", "一鍵平倉"]):
+        return "✋ 手動平倉 (Manual Flat)"
+    if any(k in combined for k in ["FIB", "BREAKOUT", "REVERSE", "反手", "反轉"]):
+        return "🔄 策略動態出場 (Dynamic Exit)"
+
+    if action in ["ENTRY", "開倉", "BOT"] and pnl == 0.0:
+        return "進場開倉 (Entry)"
+
+    if pnl > 0.0:
+        return "🎯 策略目標止盈 (Take Profit)"
+    elif pnl < 0.0:
+        return "🛑 原生止損 (Stop Loss)"
+    else:
+        return "🛡️ 保本平倉 (Breakeven)"
+
+
+def classify_trade_strategy_rule(trade: Dict[str, Any]) -> str:
+    """分類進場策略規則 (符合用戶截圖格式)"""
+    symbol = str(trade.get("symbol", "")).upper()
+    strat = str(trade.get("strategy", "")).upper()
+    reason = str(trade.get("reason", "")).upper()
+    ref = str(trade.get("order_ref", "")).upper()
+    combined = f"{strat} {reason} {ref} {symbol}"
+
+    if any(k in combined for k in ["破位", "做空", "反轉", "RULE_3", "RULE 3", "SHORT", "SLD"]):
+        return "規則 3：做空破位反轉 (頂 1 口)"
+    elif any(k in combined for k in ["5.0", "MNQ", "極端", "邊界", "動量", "RULE_2", "RULE 2", "BOUNCE", "EXTREME"]):
+        return "規則 2：極端邊界反彈 (頂 1 口)"
+    else:
+        return "規則 1：順勢波 3 回踩"
+
+
+def classify_trading_session(timestamp_str: str) -> str:
+    """分類所屬交易時段 (美盤 RTH / 歐盤倫敦 / 亞盤盤前)"""
+    if not timestamp_str:
+        return "🕒 美盤 RTH (09:30-16:00 ET)"
+    try:
+        t_clean = timestamp_str.replace("T", " ")[:19]
+        dt = datetime.strptime(t_clean, "%Y-%m-%d %H:%M:%S")
+        hkt_hour = dt.hour + dt.minute / 60.0
+        # HKT 是 UTC+8，美東冬令時是 UTC-5 (相差 13 小時)
+        et_hour = (hkt_hour - 13.0) % 24.0
+
+        if 9.5 <= et_hour < 16.0:
+            return "🕒 美盤 RTH (09:30-16:00 ET)"
+        elif 2.0 <= et_hour < 9.5:
+            return "🕒 歐盤倫敦 (02:00-09:30 ET)"
+        else:
+            return "🕒 亞盤盤前 (18:00-02:00 ET)"
+    except Exception:
+        return "🕒 美盤 RTH (09:30-16:00 ET)"
+
+
+def compute_multidimensional_stats(trades: List[Dict[str, Any]], fx_rate: float = 7.78) -> Dict[str, Any]:
+    """計算符合用戶指定格式的多維度統計 (進場規則、出場原因、交易時段)"""
+    standard_rules = [
+        "規則 1：順勢波 3 回踩",
+        "規則 2：極端邊界反彈 (頂 1 口)",
+        "規則 3：做空破位反轉 (頂 1 口)",
+    ]
+    standard_exit_reasons = [
+        "🎯 第一止盈 (TP1 1.55R)",
+        "🎯 第二止盈 (TP2 3.10R)",
+        "🚀 趨勢奔馳 (Runner 5.50R)",
+        "🛡️ 保本平倉 (Breakeven)",
+        "⚡ 追蹤止盈 (Trailing Stop)",
+        "🛑 原生止損 (Stop Loss)",
+        "🚨 軟體防穿倉 (Soft Stop)",
+        "🕒 盤尾/週末清倉 (EOD Close)",
+        "✋ 手動平倉 (Manual Flat)",
+        "🔄 策略動態出場 (Dynamic Exit)",
+    ]
+    standard_sessions = [
+        "🕒 美盤 RTH (09:30-16:00 ET)",
+        "🕒 歐盤倫敦 (02:00-09:30 ET)",
+        "🕒 亞盤盤前 (18:00-02:00 ET)",
+    ]
+
+    dim_buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for r in standard_rules + standard_exit_reasons + standard_sessions:
+        dim_buckets[r] = []
+
+    for t in trades:
+        # 1. 規則維度
+        r_name = classify_trade_strategy_rule(t)
+        dim_buckets.setdefault(r_name, []).append(t)
+
+        # 2. 出場原因維度 (僅對出場或有損益之平倉單分類)
+        e_name = classify_trade_exit_reason(t)
+        if e_name != "進場開倉 (Entry)":
+            dim_buckets.setdefault(e_name, []).append(t)
+
+        # 3. 時段維度
+        s_name = classify_trading_session(t.get("timestamp", ""))
+        dim_buckets.setdefault(s_name, []).append(t)
+
+    def _calc_dim(dim_name: str, cat_type: str):
+        bucket = dim_buckets.get(dim_name, [])
+        cnt = len(bucket)
+        wins = [x for x in bucket if float(x.get("net_pnl", 0.0)) > 0]
+        losses = [x for x in bucket if float(x.get("net_pnl", 0.0)) < 0]
+        wr = (len(wins) / cnt * 100.0) if cnt > 0 else 0.0
+        tot_net_usd = sum(float(x.get("net_pnl", 0.0)) for x in bucket)
+        tot_net_hkd = tot_net_usd * fx_rate
+        return {
+            "dimension": dim_name,
+            "category": cat_type,
+            "count": cnt,
+            "win_count": len(wins),
+            "loss_count": len(losses),
+            "win_rate_pct": round(wr, 1),
+            "net_pnl_hkd": round(tot_net_hkd, 2),
+            "net_pnl_usd": round(tot_net_usd, 2)
+        }
+
+    dynamic_exit_reasons = list(standard_exit_reasons)
+    for k in dim_buckets.keys():
+        if k not in standard_rules and k not in standard_sessions and k not in dynamic_exit_reasons and k != "進場開倉 (Entry)":
+            dynamic_exit_reasons.append(k)
+
+    rule_items = [_calc_dim(r, "RULE") for r in standard_rules]
+    exit_items = [_calc_dim(e, "EXIT") for e in dynamic_exit_reasons]
+    session_items = [_calc_dim(s, "SESSION") for s in standard_sessions]
+
+    table_rows = []
+    table_rows.extend(rule_items)
+    table_rows.extend(exit_items)
+    table_rows.extend(session_items)
+
+    return {
+        "rules": rule_items,
+        "exit_reasons": exit_items,
+        "sessions": session_items,
+        "table_rows": table_rows
+    }
+
+
+def compute_trade_stats(trades: List[Dict[str, Any]], fx_rate: Optional[float] = None) -> Dict[str, Any]:
+    """計算所有交易紀錄的 KPI 指標彙總 (全面支援 HKD 計價)"""
+    if fx_rate is None:
+        fx_rate = get_usd_hkd_rate()
+
     total_trades = len(trades)
     wins = [t for t in trades if float(t.get("net_pnl", 0.0)) > 0]
     losses = [t for t in trades if float(t.get("net_pnl", 0.0)) < 0]
     win_count = len(wins)
     win_rate = (win_count / total_trades) if total_trades > 0 else 0.0
 
-    total_profit = sum(float(t.get("net_pnl", 0.0)) for t in wins)
-    total_loss = abs(sum(float(t.get("net_pnl", 0.0)) for t in losses))
-    profit_factor = (total_profit / total_loss) if total_loss > 0 else (99.9 if total_profit > 0 else 1.0)
-    net_realized_pnl = sum(float(t.get("net_pnl", 0.0)) for t in trades)
-    total_comm = sum(float(t.get("commission", 0.0)) for t in trades)
-    avg_trade = (net_realized_pnl / total_trades) if total_trades > 0 else 0.0
-    max_win = max([float(t.get("net_pnl", 0.0)) for t in trades] + [0.0])
-    max_loss = min([float(t.get("net_pnl", 0.0)) for t in trades] + [0.0])
+    total_profit_usd = sum(float(t.get("net_pnl", 0.0)) for t in wins)
+    total_loss_usd = abs(sum(float(t.get("net_pnl", 0.0)) for t in losses))
+    profit_factor = (total_profit_usd / total_loss_usd) if total_loss_usd > 0 else (99.9 if total_profit_usd > 0 else 1.0)
+    net_realized_pnl_usd = sum(float(t.get("net_pnl", 0.0)) for t in trades)
+    total_comm_usd = sum(float(t.get("commission", 0.0)) for t in trades)
+    avg_trade_usd = (net_realized_pnl_usd / total_trades) if total_trades > 0 else 0.0
+    max_win_usd = max([float(t.get("net_pnl", 0.0)) for t in trades] + [0.0])
+    max_loss_usd = min([float(t.get("net_pnl", 0.0)) for t in trades] + [0.0])
 
-    v43_trades = [t for t in trades if "4.3" in str(t.get("strategy", ""))]
+    # 換算為 HKD 核心指標
+    net_realized_pnl_hkd = net_realized_pnl_usd * fx_rate
+    avg_trade_hkd = avg_trade_usd * fx_rate
+    max_win_hkd = max_win_usd * fx_rate
+    max_loss_hkd = max_loss_usd * fx_rate
+    total_comm_hkd = total_comm_usd * fx_rate
+
+    v43_trades = [t for t in trades if "4.3" in str(t.get("strategy", "")) or "MES" in str(t.get("symbol", ""))]
     v43_wins = len([t for t in v43_trades if float(t.get("net_pnl", 0.0)) > 0])
     v43_wr = (v43_wins / len(v43_trades) * 100) if v43_trades else 0.0
-    v43_pnl = sum(float(t.get("net_pnl", 0.0)) for t in v43_trades)
+    v43_pnl_usd = sum(float(t.get("net_pnl", 0.0)) for t in v43_trades)
 
-    v50_trades = [t for t in trades if "5.0" in str(t.get("strategy", ""))]
+    v50_trades = [t for t in trades if "5.0" in str(t.get("strategy", "")) or "MNQ" in str(t.get("symbol", ""))]
     v50_wins = len([t for t in v50_trades if float(t.get("net_pnl", 0.0)) > 0])
     v50_wr = (v50_wins / len(v50_trades) * 100) if v50_trades else 0.0
-    v50_pnl = sum(float(t.get("net_pnl", 0.0)) for t in v50_trades)
+    v50_pnl_usd = sum(float(t.get("net_pnl", 0.0)) for t in v50_trades)
+
+    # 計算多維度剖析統計 (進場規則 / 出場原因 / 交易時段)
+    multi_stats = compute_multidimensional_stats(trades, fx_rate=fx_rate)
 
     return {
+        "fx_rate": fx_rate,
         "total_trades": total_trades,
         "win_count": win_count,
         "loss_count": len(losses),
         "win_rate_pct": round(win_rate * 100, 1),
         "profit_factor": round(profit_factor, 2),
-        "total_net_pnl": round(net_realized_pnl, 2),
-        "avg_trade": round(avg_trade, 2),
-        "max_win": round(max_win, 2),
-        "max_loss": round(max_loss, 2),
-        "total_comm": round(total_comm, 2),
+        # HKD 數據
+        "total_net_pnl_hkd": round(net_realized_pnl_hkd, 2),
+        "avg_trade_hkd": round(avg_trade_hkd, 2),
+        "max_win_hkd": round(max_win_hkd, 2),
+        "max_loss_hkd": round(max_loss_hkd, 2),
+        "total_comm_hkd": round(total_comm_hkd, 2),
+        "v43_net_pnl_hkd": round(v43_pnl_usd * fx_rate, 2),
+        "v50_net_pnl_hkd": round(v50_pnl_usd * fx_rate, 2),
+        # USD 數據相容欄位
+        "total_net_pnl": round(net_realized_pnl_usd, 2),
+        "avg_trade": round(avg_trade_usd, 2),
+        "max_win": round(max_win_usd, 2),
+        "max_loss": round(max_loss_usd, 2),
+        "total_comm": round(total_comm_usd, 2),
         "v43_trades": len(v43_trades),
         "v43_win_rate_pct": round(v43_wr, 1),
-        "v43_net_pnl": round(v43_pnl, 2),
+        "v43_net_pnl": round(v43_pnl_usd, 2),
         "v50_trades": len(v50_trades),
         "v50_win_rate_pct": round(v50_wr, 1),
-        "v50_net_pnl": round(v50_pnl, 2),
+        "v50_net_pnl": round(v50_pnl_usd, 2),
+        # 多維度剖析結構
+        "multidimensional": multi_stats,
     }
 
 
@@ -269,8 +477,9 @@ class GoogleSheetsSyncManager:
         return trades
 
     def load_daily_balance_records(self) -> List[Dict[str, Any]]:
-        """載入每日結餘紀錄 (master_performance_tracker.csv + 歷史淨值)"""
+        """載入每日結餘紀錄 (master_performance_tracker.csv + 歷史淨值，全面以 HKD 計價)"""
         records: List[Dict[str, Any]] = []
+        fx = get_usd_hkd_rate()
         tracker_file = os.path.join(DATA_DIR, "master_performance_tracker.csv")
         if os.path.exists(tracker_file):
             try:
@@ -280,17 +489,20 @@ class GoogleSheetsSyncManager:
                         d_str = row.get("日期", "")
                         if not d_str:
                             continue
+                        mes_usd = float(row.get("V4.3淨損益(USD)", 0.0) or 0.0)
+                        mnq_usd = float(row.get("V5.0淨損益(USD)", 0.0) or 0.0)
+                        comm_usd = float(row.get("總佣金(USD)", 0.0) or 0.0)
                         records.append({
                             "date": d_str,
                             "account_id": os.getenv("IB_ACCOUNT_ID", "DUR340589"),
-                            "currency": row.get("帳戶幣種", "HKD"),
+                            "currency": "HKD",
                             "start_equity": float(row.get("期初淨值", 0.0) or 0.0),
                             "end_equity": float(row.get("期末淨值", 0.0) or 0.0),
                             "daily_pnl": float(row.get("當日淨損益", 0.0) or 0.0),
                             "daily_return": float(str(row.get("當日收益率(%)", "0")).replace("%", "") or 0.0) / 100.0,
-                            "mes_pnl": float(row.get("V4.3淨損益(USD)", 0.0) or 0.0),
-                            "mnq_pnl": float(row.get("V5.0淨損益(USD)", 0.0) or 0.0),
-                            "commission": float(row.get("總佣金(USD)", 0.0) or 0.0),
+                            "mes_pnl": round(mes_usd * fx, 2),
+                            "mnq_pnl": round(mnq_usd * fx, 2),
+                            "commission": round(comm_usd * fx, 2),
                             "drawdown": 0.0,
                             "status": "🟢 正常運行"
                         })
@@ -304,12 +516,12 @@ class GoogleSheetsSyncManager:
                 "account_id": os.getenv("IB_ACCOUNT_ID", "DUR340589"),
                 "currency": "HKD",
                 "start_equity": 958000.0,
-                "end_equity": 958063.17,
-                "daily_pnl": 63.17,
+                "end_equity": 958000.0 + round(63.17 * fx, 2),
+                "daily_pnl": round(63.17 * fx, 2),
                 "daily_return": 0.0001,
-                "mes_pnl": 63.17,
+                "mes_pnl": round(63.17 * fx, 2),
                 "mnq_pnl": 0.0,
-                "commission": 0.61,
+                "commission": round(0.61 * fx, 2),
                 "drawdown": 0.0,
                 "status": "🟢 正常運行"
             })
@@ -336,7 +548,7 @@ class GoogleSheetsSyncManager:
 
         ws.merge_cells("A2:N2")
         sub_cell = ws["A2"]
-        sub_cell.value = f"追蹤目錄：V9.3 累積表現 | 數據源：Interactive Brokers (IBKR) | 更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        sub_cell.value = f"追蹤目錄：V9.3 累積表現 | 數據源：Interactive Brokers (IBKR) | 全面以港幣 (HKD) 計價 | 更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         sub_cell.font = Font(name="Microsoft JhengHei", size=9, italic=True, color="64748B")
         sub_cell.alignment = Alignment(horizontal="center", vertical="center")
         ws.row_dimensions[2].height = 20
@@ -346,15 +558,15 @@ class GoogleSheetsSyncManager:
             ("A3", "交易日期\n(Date)", 14),
             ("B3", "帳戶代號\n(Account)", 13),
             ("C3", "幣別\n(Currency)", 10),
-            ("D3", "期初結餘\n(Start Equity)", 16),
-            ("E3", "期末結餘\n(End Equity)", 16),
-            ("F3", "當日淨損益\n(Daily Net PnL)", 16),
+            ("D3", "期初結餘 (HKD)\n(Start Equity)", 18),
+            ("E3", "期末結餘 (HKD)\n(End Equity)", 18),
+            ("F3", "當日淨損益 (HKD)\n(Daily Net PnL)", 18),
             ("G3", "當日收益率\n(Daily Return)", 14),
-            ("H3", "累積總損益\n(Cum PnL)", 16),
+            ("H3", "累積總損益 (HKD)\n(Cum PnL)", 18),
             ("I3", "累積收益率\n(Cum Return)", 14),
-            ("J3", "MES 損益\n(V4.3 60%)", 15),
-            ("K3", "MNQ 損益\n(V5.0 40%)", 15),
-            ("L3", "手續費佣金\n(Commission)", 14),
+            ("J3", "MES 損益 (HKD)\n(V4.3 60%)", 16),
+            ("K3", "MNQ 損益 (HKD)\n(V5.0 40%)", 16),
+            ("L3", "手續費佣金 (HKD)\n(Commission)", 16),
             ("M3", "日內最大回撤\n(Intraday DD)", 14),
             ("N3", "系統運作狀態\n(Status)", 16)
         ]
@@ -395,13 +607,13 @@ class GoogleSheetsSyncManager:
             style_data_cell(c_curr, is_even, align="center")
 
             c_st = ws.cell(row=r, column=4, value=st_eq)
-            style_data_cell(c_st, is_even, align="right", num_format="$#,##0.00")
+            style_data_cell(c_st, is_even, align="right", num_format="HK$#,##0.00")
 
             c_end = ws.cell(row=r, column=5, value=end_eq)
-            style_data_cell(c_end, is_even, align="right", is_bold=True, num_format="$#,##0.00")
+            style_data_cell(c_end, is_even, align="right", is_bold=True, num_format="HK$#,##0.00")
 
             c_pnl = ws.cell(row=r, column=6, value=f"=E{r}-D{r}")
-            style_data_cell(c_pnl, is_even, align="right", is_bold=True, num_format="$#,##0.00;[Red]($#,##0.00);\"$0.00\"", pnl_val=d_pnl)
+            style_data_cell(c_pnl, is_even, align="right", is_bold=True, num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=d_pnl)
 
             c_ret = ws.cell(row=r, column=7, value=f"=F{r}/D{r}")
             style_data_cell(c_ret, is_even, align="right", num_format="+0.00%;-0.00%;0.00%", pnl_val=d_pnl)
@@ -410,22 +622,22 @@ class GoogleSheetsSyncManager:
                 c_cpnl = ws.cell(row=r, column=8, value=f"=F{r}")
             else:
                 c_cpnl = ws.cell(row=r, column=8, value=f"=H{r-1}+F{r}")
-            style_data_cell(c_cpnl, is_even, align="right", is_bold=True, num_format="$#,##0.00;[Red]($#,##0.00);\"$0.00\"", pnl_val=cum_pnl)
+            style_data_cell(c_cpnl, is_even, align="right", is_bold=True, num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=cum_pnl)
 
             c_cret = ws.cell(row=r, column=9, value=f"=H{r}/$D$4")
             style_data_cell(c_cret, is_even, align="right", is_bold=True, num_format="+0.00%;-0.00%;0.00%", pnl_val=cum_pnl)
 
             mes_p = float(rec.get("mes_pnl", 0.0))
             c_mes = ws.cell(row=r, column=10, value=mes_p)
-            style_data_cell(c_mes, is_even, align="right", num_format="$#,##0.00;[Red]($#,##0.00);\"$0.00\"", pnl_val=mes_p)
+            style_data_cell(c_mes, is_even, align="right", num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=mes_p)
 
             mnq_p = float(rec.get("mnq_pnl", 0.0))
             c_mnq = ws.cell(row=r, column=11, value=mnq_p)
-            style_data_cell(c_mnq, is_even, align="right", num_format="$#,##0.00;[Red]($#,##0.00);\"$0.00\"", pnl_val=mnq_p)
+            style_data_cell(c_mnq, is_even, align="right", num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=mnq_p)
 
             comm = float(rec.get("commission", 0.0))
             c_comm = ws.cell(row=r, column=12, value=comm)
-            style_data_cell(c_comm, is_even, align="right", num_format="$#,##0.00")
+            style_data_cell(c_comm, is_even, align="right", num_format="HK$#,##0.00")
 
             dd = float(rec.get("drawdown", 0.0))
             c_dd = ws.cell(row=r, column=13, value=dd)
@@ -446,41 +658,47 @@ class GoogleSheetsSyncManager:
     def build_trade_ledger_workbook(self, trades: List[Dict[str, Any]], stats: Optional[Dict[str, Any]] = None) -> str:
         wb = openpyxl.Workbook()
 
+        if not stats:
+            stats = compute_trade_stats(trades)
+
+        fx_rate = stats.get("fx_rate") or get_usd_hkd_rate()
+        multi_stats = stats.get("multidimensional") or compute_multidimensional_stats(trades, fx_rate=fx_rate)
+
+        # ----------------------------------------------------------------------
         # 分頁一：【分析報告】
+        # ----------------------------------------------------------------------
         ws1 = wb.active
         ws1.title = "分析報告"
         ws1.views.sheetView[0].showGridLines = True
 
         ws1.merge_cells("A1:H1")
         t1 = ws1["A1"]
-        t1.value = "📊 AutoTrade 策略分析與累積績效報告"
+        t1.value = "📊 AutoTrade 策略分析與累積績效報告 (全面以 HKD 計價)"
         t1.font = Font(name="Microsoft JhengHei", size=16, bold=True, color="1E3A8A")
         t1.alignment = Alignment(horizontal="center", vertical="center")
         ws1.row_dimensions[1].height = 40
 
         ws1.merge_cells("A2:H2")
         t2 = ws1["A2"]
-        t2.value = f"雙策略分配：V4.3 MES (60%) + V5.0 MNQ (40%) | 統計更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        t2.value = f"雙策略分配：V4.3 MES (60%) + V5.0 MNQ (40%) | 基礎匯率：1 USD = {fx_rate:.2f} HKD | 統計更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         t2.font = Font(name="Microsoft JhengHei", size=9, italic=True, color="64748B")
         t2.alignment = Alignment(horizontal="center", vertical="center")
         ws1.row_dimensions[2].height = 20
 
-        if not stats:
-            stats = compute_trade_stats(trades)
-
         total_trades = stats["total_trades"]
         win_rate = stats["win_rate_pct"] / 100.0
         profit_factor = stats["profit_factor"]
-        net_realized_pnl = stats["total_net_pnl"]
-        total_comm = stats["total_comm"]
-        avg_trade = stats["avg_trade"]
-        max_win = stats["max_win"]
-        max_loss = stats["max_loss"]
+        net_realized_pnl_hkd = stats.get("total_net_pnl_hkd", stats.get("total_net_pnl", 0.0) * fx_rate)
+        total_comm_hkd = stats.get("total_comm_hkd", stats.get("total_comm", 0.0) * fx_rate)
+        avg_trade_hkd = stats.get("avg_trade_hkd", stats.get("avg_trade", 0.0) * fx_rate)
+        max_win_hkd = stats.get("max_win_hkd", stats.get("max_win", 0.0) * fx_rate)
+        max_loss_hkd = stats.get("max_loss_hkd", stats.get("max_loss", 0.0) * fx_rate)
 
+        # 8 大 KPI 卡片 (全面以 HKD 呈現)
         kpi_cards = [
             ("A4", "B5", "總交易筆數", f"{total_trades} 筆", "1E3A8A", "0F172A"),
             ("C4", "D5", "整體勝率", f"{win_rate*100:.1f}%", "2563EB", "2563EB"),
-            ("E4", "F5", "累計淨損益 (USD)", f"${net_realized_pnl:+,.2f}", "16A34A" if net_realized_pnl >= 0 else "DC2626", "16A34A" if net_realized_pnl >= 0 else "DC2626"),
+            ("E4", "F5", "累計淨損益 (HKD)", f"HK${net_realized_pnl_hkd:+,.2f}", "16A34A" if net_realized_pnl_hkd >= 0 else "DC2626", "16A34A" if net_realized_pnl_hkd >= 0 else "DC2626"),
             ("G4", "H5", "獲利因子 (Profit Factor)", f"{profit_factor:.2f}", "D97706", "D97706"),
         ]
 
@@ -503,10 +721,10 @@ class GoogleSheetsSyncManager:
         ws1.row_dimensions[7].height = 20
         ws1.row_dimensions[8].height = 30
         kpi_cards_2 = [
-            ("A7", "B8", "平均每筆損益", f"${avg_trade:+,.2f}", "0F172A", "16A34A" if avg_trade >= 0 else "DC2626"),
-            ("C7", "D8", "最大單筆獲利", f"${max_win:+,.2f}", "16A34A", "16A34A"),
-            ("E7", "F8", "最大單筆虧損", f"${max_loss:+,.2f}", "DC2626", "DC2626"),
-            ("G7", "H8", "累積手續費佣金", f"${total_comm:,.2f}", "64748B", "64748B"),
+            ("A7", "B8", "平均每筆損益 (HKD)", f"HK${avg_trade_hkd:+,.2f}", "0F172A", "16A34A" if avg_trade_hkd >= 0 else "DC2626"),
+            ("C7", "D8", "最大單筆獲利 (HKD)", f"HK${max_win_hkd:+,.2f}", "16A34A", "16A34A"),
+            ("E7", "F8", "最大單筆虧損 (HKD)", f"HK${max_loss_hkd:+,.2f}", "DC2626", "DC2626"),
+            ("G7", "H8", "累積手續費佣金 (HKD)", f"HK${total_comm_hkd:,.2f}", "64748B", "64748B"),
         ]
         for top_l, bot_r, title, val, b_color, v_color in kpi_cards_2:
             c_top = ws1[top_l]
@@ -522,10 +740,12 @@ class GoogleSheetsSyncManager:
             c_val.alignment = Alignment(horizontal="center", vertical="center")
             c_val.fill = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
 
-        # 策略對比表 (Row 10)
+        # ----------------------------------------------------------------------
+        # 區域 1：策略對比表 (Row 10 - 13)
+        # ----------------------------------------------------------------------
         ws1.merge_cells("A10:H10")
         strat_title = ws1["A10"]
-        strat_title.value = "🏛️ 策略模組表現對比 (Strategy Breakdown)"
+        strat_title.value = "🏛️ 策略模組表現對比 (Strategy Breakdown - HKD)"
         strat_title.font = Font(name="Microsoft JhengHei", size=12, bold=True, color="1E3A8A")
         ws1.row_dimensions[10].height = 26
 
@@ -535,9 +755,9 @@ class GoogleSheetsSyncManager:
             ("C11", "資金配額", 14),
             ("D11", "交易筆數", 12),
             ("E11", "勝率", 12),
-            ("F11", "實現損益 (USD)", 16),
-            ("G11", "手續費 (USD)", 14),
-            ("H11", "淨損益 (USD)", 16)
+            ("F11", "實現損益 (HKD)", 18),
+            ("G11", "手續費 (HKD)", 16),
+            ("H11", "淨損益 (HKD)", 18)
         ]
         ws1.row_dimensions[11].height = 24
         for coord, text, width in strat_headers:
@@ -560,9 +780,9 @@ class GoogleSheetsSyncManager:
             s_tot = len(s_list)
             s_wins = len([t for t in s_list if float(t.get("net_pnl", 0.0)) > 0])
             s_wr = (s_wins / s_tot) if s_tot > 0 else 0.0
-            s_gross = sum(float(t.get("realized_pnl", 0.0)) for t in s_list)
-            s_comm = sum(float(t.get("commission", 0.0)) for t in s_list)
-            s_net = sum(float(t.get("net_pnl", 0.0)) for t in s_list)
+            s_gross = sum(float(t.get("realized_pnl", 0.0)) for t in s_list) * fx_rate
+            s_comm = sum(float(t.get("commission", 0.0)) for t in s_list) * fx_rate
+            s_net = sum(float(t.get("net_pnl", 0.0)) for t in s_list) * fx_rate
 
             ws1.cell(row=r, column=1, value=s_name)
             style_data_cell(ws1.cell(row=r, column=1), is_even=(s_idx==1), align="left", is_bold=True)
@@ -580,38 +800,102 @@ class GoogleSheetsSyncManager:
             style_data_cell(ws1.cell(row=r, column=5), is_even=(s_idx==1), align="right", num_format="0.0%")
 
             ws1.cell(row=r, column=6, value=s_gross)
-            style_data_cell(ws1.cell(row=r, column=6), is_even=(s_idx==1), align="right", num_format="$#,##0.00;[Red]($#,##0.00);\"$0.00\"", pnl_val=s_gross)
+            style_data_cell(ws1.cell(row=r, column=6), is_even=(s_idx==1), align="right", num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=s_gross)
 
             ws1.cell(row=r, column=7, value=s_comm)
-            style_data_cell(ws1.cell(row=r, column=7), is_even=(s_idx==1), align="right", num_format="$#,##0.00")
+            style_data_cell(ws1.cell(row=r, column=7), is_even=(s_idx==1), align="right", num_format="HK$#,##0.00")
 
             ws1.cell(row=r, column=8, value=s_net)
-            style_data_cell(ws1.cell(row=r, column=8), is_even=(s_idx==1), align="right", is_bold=True, num_format="$#,##0.00;[Red]($#,##0.00);\"$0.00\"", pnl_val=s_net)
+            style_data_cell(ws1.cell(row=r, column=8), is_even=(s_idx==1), align="right", is_bold=True, num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=s_net)
 
-        # 走勢圖數據源表 (Row 15 - 30)
-        ws1.merge_cells("A15:H15")
-        chart_title = ws1["A15"]
-        chart_title.value = "📈 累計損益走勢圖表 (Performance Curve)"
-        chart_title.font = Font(name="Microsoft JhengHei", size=12, bold=True, color="1E3A8A")
+        # ----------------------------------------------------------------------
+        # 區域 2：【規則進場原因與時段表現】 (精確符合用戶範例截圖格式，新增 exit_reason 統計)
+        # ----------------------------------------------------------------------
+        ws1.merge_cells("A15:D15")
+        dim_title = ws1["A15"]
+        dim_title.value = "🎨 規則進場原因與時段表現 (含 Exit Reason 出場維度)"
+        dim_title.font = Font(name="Microsoft JhengHei", size=12, bold=True, color="1E3A8A")
         ws1.row_dimensions[15].height = 26
 
-        ws1.cell(row=16, column=1, value="序號")
-        ws1.cell(row=16, column=2, value="日期/時間")
-        ws1.cell(row=16, column=3, value="當筆淨損益(USD)")
-        ws1.cell(row=16, column=4, value="累計損益(USD)")
-        style_header_cell(ws1.cell(row=16, column=1), fill_color="475569")
-        style_header_cell(ws1.cell(row=16, column=2), fill_color="475569")
-        style_header_cell(ws1.cell(row=16, column=3), fill_color="475569")
-        style_header_cell(ws1.cell(row=16, column=4), fill_color="475569")
-        ws1.row_dimensions[16].height = 20
+        dim_headers = [
+            ("A16", "分析維度", 34),
+            ("B16", "成交筆數", 14),
+            ("C16", "勝率 (Win%)", 14),
+            ("D16", "累計貢獻淨利", 22)
+        ]
+        ws1.row_dimensions[16].height = 26
+        for coord, text, width in dim_headers:
+            cell = ws1[coord]
+            cell.value = text
+            style_header_cell(cell, fill_color="1E293B", font_color="FFFFFF")
+            ws1.column_dimensions[coord[0]].width = width
 
-        data_trades = trades[-30:] if len(trades) > 30 else trades
+        table_rows = multi_stats.get("table_rows", [])
+        exit_start_row = None
+        exit_end_row = None
+
+        for idx, row_item in enumerate(table_rows):
+            r = 17 + idx
+            ws1.row_dimensions[r].height = 22
+            is_even = (idx % 2 == 1)
+
+            cat = row_item.get("category", "")
+            if cat == "EXIT":
+                if exit_start_row is None:
+                    exit_start_row = r
+                exit_end_row = r
+
+            c_dim = ws1.cell(row=r, column=1, value=row_item.get("dimension", ""))
+            style_data_cell(c_dim, is_even, align="left", is_bold=(cat in ["RULE", "SESSION"]))
+
+            cnt = int(row_item.get("count", 0))
+            c_cnt = ws1.cell(row=r, column=2, value=f"{cnt} 筆")
+            style_data_cell(c_cnt, is_even, align="center")
+
+            wr = float(row_item.get("win_rate_pct", 0.0)) / 100.0
+            c_wr = ws1.cell(row=r, column=3, value=wr)
+            style_data_cell(c_wr, is_even, align="right", num_format="0.0%")
+
+            net_pnl = float(row_item.get("net_pnl_hkd", 0.0))
+            c_pnl = ws1.cell(row=r, column=4, value=net_pnl)
+            # 格式：+HK$#,##0.00;-HK$#,##0.00;HK$0.00
+            style_data_cell(
+                c_pnl, is_even, align="right", is_bold=True,
+                num_format="+HK$#,##0.00;-HK$#,##0.00;HK$0.00",
+                pnl_val=net_pnl
+            )
+
+        dim_end_row = 16 + len(table_rows)
+
+        # ----------------------------------------------------------------------
+        # 區域 3：【數據分析可視化】 (LineChart + BarChart + PieChart)
+        # ----------------------------------------------------------------------
+        # 3.1 累計損益走勢圖數據源表 (置於分析維度表下方)
+        curve_start_row = dim_end_row + 2
+        ws1.merge_cells(f"A{curve_start_row}:D{curve_start_row}")
+        curve_title = ws1[f"A{curve_start_row}"]
+        curve_title.value = "📈 逐筆成交累計損益數據 (Cumulative PnL Tracker - HKD)"
+        curve_title.font = Font(name="Microsoft JhengHei", size=11, bold=True, color="1E3A8A")
+        ws1.row_dimensions[curve_start_row].height = 24
+
+        h_row = curve_start_row + 1
+        ws1.cell(row=h_row, column=1, value="序號")
+        ws1.cell(row=h_row, column=2, value="成交時間")
+        ws1.cell(row=h_row, column=3, value="當筆淨損益 (HKD)")
+        ws1.cell(row=h_row, column=4, value="累計損益 (HKD)")
+        for col_idx in range(1, 5):
+            style_header_cell(ws1.cell(row=h_row, column=col_idx), fill_color="475569")
+        ws1.row_dimensions[h_row].height = 20
+
+        data_trades = trades[-35:] if len(trades) > 35 else trades
         c_pnl_val = 0.0
+        data_first_row = h_row + 1
         for t_i, tr in enumerate(data_trades):
-            r = 17 + t_i
+            r = data_first_row + t_i
             ws1.row_dimensions[r].height = 18
-            t_net = float(tr.get("net_pnl", 0.0))
-            c_pnl_val += t_net
+            t_net_usd = float(tr.get("net_pnl", 0.0))
+            t_net_hkd = t_net_usd * fx_rate
+            c_pnl_val += t_net_hkd
 
             ws1.cell(row=r, column=1, value=t_i + 1)
             style_data_cell(ws1.cell(row=r, column=1), align="center")
@@ -619,41 +903,80 @@ class GoogleSheetsSyncManager:
             ws1.cell(row=r, column=2, value=str(tr.get("timestamp", ""))[:16])
             style_data_cell(ws1.cell(row=r, column=2), align="center")
 
-            ws1.cell(row=r, column=3, value=t_net)
-            style_data_cell(ws1.cell(row=r, column=3), align="right", num_format="$#,##0.00;[Red]($#,##0.00);\"$0.00\"", pnl_val=t_net)
+            ws1.cell(row=r, column=3, value=t_net_hkd)
+            style_data_cell(ws1.cell(row=r, column=3), align="right", num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=t_net_hkd)
 
             ws1.cell(row=r, column=4, value=c_pnl_val)
-            style_data_cell(ws1.cell(row=r, column=4), align="right", is_bold=True, num_format="$#,##0.00;[Red]($#,##0.00);\"$0.00\"", pnl_val=c_pnl_val)
+            style_data_cell(ws1.cell(row=r, column=4), align="right", is_bold=True, num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=c_pnl_val)
 
+        data_last_row = data_first_row + len(data_trades) - 1
+
+        # 圖表 1：累計損益走勢圖 (LineChart) -> 錨定於 F16
         if len(data_trades) >= 2:
-            chart = LineChart()
-            chart.title = "累計淨損益走勢圖 (Cumulative PnL)"
-            chart.style = 13
-            chart.y_axis.title = "金額 (USD)"
-            chart.x_axis.title = "成交序號"
-            chart.width = 16
-            chart.height = 10
+            line_chart = LineChart()
+            line_chart.title = "📈 逐筆成交累計淨損益走勢 (Cumulative HKD PnL)"
+            line_chart.style = 13
+            line_chart.y_axis.title = "港幣金額 (HKD)"
+            line_chart.x_axis.title = "成交序號"
+            line_chart.width = 17
+            line_chart.height = 11
 
-            data_ref = Reference(ws1, min_col=4, min_row=16, max_row=16 + len(data_trades))
-            cats_ref = Reference(ws1, min_col=1, min_row=17, max_row=16 + len(data_trades))
-            chart.add_data(data_ref, titles_from_data=True)
-            chart.set_categories(cats_ref)
-            ws1.add_chart(chart, "E17")
+            pnl_ref = Reference(ws1, min_col=4, min_row=h_row, max_row=data_last_row)
+            cats_ref = Reference(ws1, min_col=1, min_row=data_first_row, max_row=data_last_row)
+            line_chart.add_data(pnl_ref, titles_from_data=True)
+            line_chart.set_categories(cats_ref)
+            ws1.add_chart(line_chart, "F16")
 
-        # 分頁二：【詳細交易紀錄】
+        # 圖表 2：出場原因累計淨利貢獻柱狀圖 (BarChart) -> 錨定於 F32
+        if exit_start_row and exit_end_row and exit_end_row >= exit_start_row:
+            bar_chart = BarChart()
+            bar_chart.type = "col"
+            bar_chart.title = "🎯 出場原因累計貢獻淨利 (HKD Net PnL by Exit Reason)"
+            bar_chart.style = 10
+            bar_chart.y_axis.title = "貢獻淨利 (HKD)"
+            bar_chart.x_axis.title = "出場維度"
+            bar_chart.width = 17
+            bar_chart.height = 12
+
+            bar_data = Reference(ws1, min_col=4, min_row=exit_start_row, max_row=exit_end_row)
+            bar_cats = Reference(ws1, min_col=1, min_row=exit_start_row, max_row=exit_end_row)
+            bar_chart.add_data(bar_data, titles_from_data=False)
+            bar_chart.set_categories(bar_cats)
+            if bar_chart.series:
+                bar_chart.series[0].title = SeriesLabel(v="累計貢獻淨利 (HKD)")
+            ws1.add_chart(bar_chart, "F32")
+
+            # 圖表 3：出場原因成交筆數分佈圓餅圖 (PieChart) -> 錨定於 N16
+            pie_chart = PieChart()
+            pie_chart.title = "🥧 出場原因成交分佈佔比 (Exit Breakdown)"
+            pie_chart.width = 14
+            pie_chart.height = 11
+
+            # 引用數值與標籤
+            pie_data = Reference(ws1, min_col=2, min_row=exit_start_row, max_row=exit_end_row)
+            pie_cats = Reference(ws1, min_col=1, min_row=exit_start_row, max_row=exit_end_row)
+            pie_chart.add_data(pie_data, titles_from_data=False)
+            pie_chart.set_categories(pie_cats)
+            if pie_chart.series:
+                pie_chart.series[0].title = SeriesLabel(v="成交筆數")
+            ws1.add_chart(pie_chart, "N16")
+
+        # ----------------------------------------------------------------------
+        # 分頁二：【詳細交易紀錄】 (14 欄精準審計流水，全面支援 HKD 計價與出場原因)
+        # ----------------------------------------------------------------------
         ws2 = wb.create_sheet(title="詳細交易紀錄")
         ws2.views.sheetView[0].showGridLines = True
 
-        ws2.merge_cells("A1:L1")
+        ws2.merge_cells("A1:N1")
         t_ledger = ws2["A1"]
-        t_ledger.value = "📜 AutoTrade 逐筆官方成交審計分錄 (Execution Ledger)"
+        t_ledger.value = "📜 AutoTrade 逐筆官方成交審計分錄 (Execution Ledger - HKD)"
         t_ledger.font = Font(name="Microsoft JhengHei", size=15, bold=True, color="1E3A8A")
         t_ledger.alignment = Alignment(horizontal="center", vertical="center")
         ws2.row_dimensions[1].height = 36
 
-        ws2.merge_cells("A2:L2")
+        ws2.merge_cells("A2:N2")
         sub_ledger = ws2["A2"]
-        sub_ledger.value = f"按時間順序排序 | 包含開平倉、成交價位、手續費、損益與官方 Exec ID | 更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        sub_ledger.value = f"按時間順序排序 | 包含開平倉、成交價位、以港幣 (HKD) 計算之損益與佣金、出場原因及交易時段 | 更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         sub_ledger.font = Font(name="Microsoft JhengHei", size=9, italic=True, color="64748B")
         sub_ledger.alignment = Alignment(horizontal="center", vertical="center")
         ws2.row_dimensions[2].height = 20
@@ -661,16 +984,18 @@ class GoogleSheetsSyncManager:
         ledger_headers = [
             ("A3", "成交時間\n(Timestamp)", 20),
             ("B3", "標的合約\n(Symbol)", 12),
-            ("C3", "策略版本\n(Strategy)", 16),
+            ("C3", "策略版本\n(Strategy)", 14),
             ("D3", "買賣方向\n(Side)", 14),
             ("E3", "動作類型\n(Action)", 14),
             ("F3", "成交口數\n(Contracts)", 13),
             ("G3", "成交價\n(Price USD)", 14),
-            ("H3", "實現損益\n(Gross PnL)", 16),
-            ("I3", "手續費佣金\n(Commission)", 14),
-            ("J3", "淨損益\n(Net PnL)", 16),
+            ("H3", "實現損益 (HKD)\n(Gross PnL)", 18),
+            ("I3", "手續費佣金 (HKD)\n(Commission)", 16),
+            ("J3", "淨損益 (HKD)\n(Net PnL)", 18),
             ("K3", "官方成交編號\n(Execution ID)", 26),
-            ("L3", "出場信號/備註\n(Reason / Notes)", 22),
+            ("L3", "出場原因/維度\n(Exit Reason)", 26),
+            ("M3", "所屬交易時段\n(Session)", 22),
+            ("N3", "備註信號\n(Order Ref / Notes)", 22),
         ]
         ws2.row_dimensions[3].height = 32
         for coord, text, width in ledger_headers:
@@ -685,9 +1010,14 @@ class GoogleSheetsSyncManager:
             ws2.row_dimensions[r].height = 22
             is_even = (idx % 2 == 1)
 
-            pnl_val = float(tr.get("net_pnl", 0.0))
-            gross_pnl = float(tr.get("realized_pnl", 0.0))
-            comm_val = float(tr.get("commission", 0.0))
+            pnl_usd = float(tr.get("net_pnl", 0.0))
+            gross_usd = float(tr.get("realized_pnl", 0.0))
+            comm_usd = float(tr.get("commission", 0.0))
+
+            gross_hkd = gross_usd * fx_rate
+            comm_hkd = comm_usd * fx_rate
+            net_hkd = pnl_usd * fx_rate
+
             shares = float(tr.get("shares", 0.0) or tr.get("contracts", 1.0))
             price = float(tr.get("price", 0.0) or tr.get("entry_price", 0.0) or tr.get("exit_price", 0.0))
 
@@ -696,6 +1026,9 @@ class GoogleSheetsSyncManager:
             if not side and action:
                 side = "BOT" if "LONG" in tr.get("direction", "") else "SLD"
             side_text = "買入 (BOT)" if side == "BOT" else "賣出 (SLD)" if side == "SLD" else side
+
+            exit_reason = classify_trade_exit_reason(tr)
+            session_str = classify_trading_session(tr.get("timestamp", ""))
 
             c_time = ws2.cell(row=r, column=1, value=str(tr.get("timestamp", "")))
             style_data_cell(c_time, is_even, align="center")
@@ -709,7 +1042,7 @@ class GoogleSheetsSyncManager:
             c_side = ws2.cell(row=r, column=4, value=side_text)
             style_data_cell(c_side, is_even, align="center", is_bold=True)
 
-            c_act = ws2.cell(row=r, column=5, value=str(action or ("平倉" if pnl_val != 0 else "開倉")))
+            c_act = ws2.cell(row=r, column=5, value=str(action or ("平倉" if pnl_usd != 0 else "開倉")))
             style_data_cell(c_act, is_even, align="center")
 
             c_sh = ws2.cell(row=r, column=6, value=shares)
@@ -718,19 +1051,25 @@ class GoogleSheetsSyncManager:
             c_pr = ws2.cell(row=r, column=7, value=price)
             style_data_cell(c_pr, is_even, align="right", num_format="$#,##0.00")
 
-            c_gp = ws2.cell(row=r, column=8, value=gross_pnl)
-            style_data_cell(c_gp, is_even, align="right", num_format="$#,##0.00;[Red]($#,##0.00);\"$0.00\"", pnl_val=gross_pnl)
+            c_gp = ws2.cell(row=r, column=8, value=gross_hkd)
+            style_data_cell(c_gp, is_even, align="right", num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=gross_hkd)
 
-            c_cm = ws2.cell(row=r, column=9, value=comm_val)
-            style_data_cell(c_cm, is_even, align="right", num_format="$#,##0.00")
+            c_cm = ws2.cell(row=r, column=9, value=comm_hkd)
+            style_data_cell(c_cm, is_even, align="right", num_format="HK$#,##0.00")
 
-            c_np = ws2.cell(row=r, column=10, value=pnl_val)
-            style_data_cell(c_np, is_even, align="right", is_bold=True, num_format="$#,##0.00;[Red]($#,##0.00);\"$0.00\"", pnl_val=pnl_val)
+            c_np = ws2.cell(row=r, column=10, value=net_hkd)
+            style_data_cell(c_np, is_even, align="right", is_bold=True, num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=net_hkd)
 
             c_ex = ws2.cell(row=r, column=11, value=str(tr.get("exec_id", tr.get("trade_id", ""))))
             style_data_cell(c_ex, is_even, align="center")
 
-            c_rs = ws2.cell(row=r, column=12, value=str(tr.get("reason", tr.get("order_ref", ""))))
+            c_exit = ws2.cell(row=r, column=12, value=exit_reason)
+            style_data_cell(c_exit, is_even, align="left")
+
+            c_sess = ws2.cell(row=r, column=13, value=session_str)
+            style_data_cell(c_sess, is_even, align="center")
+
+            c_rs = ws2.cell(row=r, column=14, value=str(tr.get("reason", tr.get("order_ref", ""))))
             style_data_cell(c_rs, is_even, align="left")
 
         out_path = os.path.join(EXPORTS_DIR, "AutoTrade_交易紀錄與分析總表.xlsx")
@@ -760,14 +1099,55 @@ class GoogleSheetsSyncManager:
             return False
 
         logger.info("🌐 正在透過 Google Apps Script Webhook 雲端秒級更新 Google Sheets 雙表...")
+        fx_rate = stats.get("fx_rate") or get_usd_hkd_rate()
+
+        # 豐富化交易記錄：加入 HKD 損益、exit_reason、session 與 rule
+        enriched_trades = []
+        for t in trades:
+            t_copy = dict(t)
+            gross_usd = float(t.get("realized_pnl", 0.0))
+            comm_usd = float(t.get("commission", 0.0))
+            net_usd = float(t.get("net_pnl", 0.0))
+            t_copy["gross_pnl_hkd"] = round(gross_usd * fx_rate, 2)
+            t_copy["commission_hkd"] = round(comm_usd * fx_rate, 2)
+            t_copy["net_pnl_hkd"] = round(net_usd * fx_rate, 2)
+            t_copy["exit_reason"] = classify_trade_exit_reason(t)
+            t_copy["session"] = classify_trading_session(t.get("timestamp", ""))
+            t_copy["rule"] = classify_trade_strategy_rule(t)
+            enriched_trades.append(t_copy)
+
         payload = {
             "balance_sheet_id": self.state.get("balance_sheet_id", "1aVh_vFGwxrcXckr4LNh-AWxwGzzav1KuY7uXCLqpFXI"),
             "trade_ledger_sheet_id": self.state.get("trade_ledger_sheet_id", "139yDV3lOdbF5fK4C00MQYh4MHG-gscBMx_f0RVu853c"),
             "balances": balances,
-            "trades": trades,
+            "trades": enriched_trades,
             "stats": stats,
+            "fx_rate": fx_rate,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
+
+        try:
+            data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(
+                webhook_url,
+                data=data_bytes,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                res_body = resp.read().decode("utf-8")
+                res_json = json.loads(res_body) if res_body else {}
+                if res_json.get("status") == "ok":
+                    logger.info(
+                        f"✅ Webhook 同步成功！已更新結餘行數: {res_json.get('balances_synced', len(balances))}, "
+                        f"成交分錄數: {res_json.get('trades_synced', len(trades))}"
+                    )
+                    return True
+                else:
+                    logger.warning(f"Webhook 回傳非預期狀態: {res_body}")
+        except Exception as e:
+            logger.warning(f"Webhook 連線推送失敗: {e}")
+        return False
 
         try:
             data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
