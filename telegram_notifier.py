@@ -350,11 +350,20 @@ class TelegramNotifier:
 
         gdrive_docs = ""
         gdrive_sheets = ""
+        v93_balance = ""
+        v93_ledger = ""
+        v93_folder = ""
         if gdrive_urls:
             if gdrive_urls.get("docs_url"):
                 gdrive_docs = f"\n📄 <b>Google Docs 報告</b>: <a href=\"{gdrive_urls['docs_url']}\">點擊開啟文件</a>"
             if gdrive_urls.get("sheets_url"):
                 gdrive_sheets = f"\n📊 <b>Google Sheets 試算表</b>: <a href=\"{gdrive_urls['sheets_url']}\">點擊開啟試算表</a>"
+            if gdrive_urls.get("balance_url"):
+                v93_balance = f"\n💰 <b>V9.3 帳戶結餘表</b>: <a href=\"{gdrive_urls['balance_url']}\">點擊查看結餘</a>"
+            if gdrive_urls.get("ledger_url"):
+                v93_ledger = f"\n📜 <b>V9.3 交易紀錄分析表</b>: <a href=\"{gdrive_urls['ledger_url']}\">點擊查看圖表與流水</a>"
+            if gdrive_urls.get("folder_url"):
+                v93_folder = f"\n📁 <b>V9.3 累積表現目錄</b>: <a href=\"{gdrive_urls['folder_url']}\">點擊進入資料夾</a>"
 
         pnl_sign = "+" if realized >= 0 else ""
         msg = (
@@ -365,7 +374,10 @@ class TelegramNotifier:
             f"🎯 <b>當日勝率</b>: {win_rate:.1f}%\n"
             f"💼 <b>期末帳戶淨值</b>: <code>${summary.get('ending_equity_usd', 0.0):,.2f} USD</code>"
             f"{gdrive_docs}"
-            f"{gdrive_sheets}\n"
+            f"{gdrive_sheets}"
+            f"{v93_balance}"
+            f"{v93_ledger}"
+            f"{v93_folder}\n"
             f"⏰ <b>結算時間</b>: 每日清晨 06:00 (香港時間)"
         )
         self.send_message_async(msg)

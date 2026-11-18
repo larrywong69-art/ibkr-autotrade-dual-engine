@@ -864,6 +864,17 @@ class DailyReportGenerator:
             except Exception as e:
                 logger.warning(f"Google Drive 推播異常: {e}")
 
+        # 7b. 自動同步 Google Sheets「V9.3 累積表現」雙表 (帳戶結餘表 + 交易紀錄與分析總表)
+        try:
+            from google_sheets_sync_manager import GoogleSheetsSyncManager
+            sheets_mgr = GoogleSheetsSyncManager()
+            sheets_res = sheets_mgr.sync_all()
+            if sheets_res.get("status") == "ok":
+                report_data["v93_sheets_sync"] = sheets_res
+                logger.info(f"📊 [V9.3 累積表現 Sheets 同步完成] 結餘表: {sheets_res.get('balance_url')}")
+        except Exception as e:
+            logger.warning(f"V9.3 累積表現 Sheets 同步跳過或異常: {e}")
+
         logger.info(f"✅ [報告生成完畢] Markdown: {md_file} | JSON: {json_file}")
 
         # 方案 C：自動發送 Telegram 每日結算通報
@@ -873,6 +884,10 @@ class DailyReportGenerator:
             if "gdrive_sync" in report_data and report_data["gdrive_sync"].get("status") == "ok":
                 gdrive_urls["docs_url"] = report_data["gdrive_sync"].get("doc_url")
                 gdrive_urls["sheets_url"] = report_data["gdrive_sync"].get("sheet_url")
+            if "v93_sheets_sync" in report_data and report_data["v93_sheets_sync"].get("status") == "ok":
+                gdrive_urls["balance_url"] = report_data["v93_sheets_sync"].get("balance_url")
+                gdrive_urls["ledger_url"] = report_data["v93_sheets_sync"].get("trade_ledger_url")
+                gdrive_urls["folder_url"] = report_data["v93_sheets_sync"].get("folder_url")
             notifier.notify_daily_report(report_data, gdrive_urls=gdrive_urls)
         except Exception as e:
             logger.warning(f"Telegram 每日報告通報失敗: {e}")
