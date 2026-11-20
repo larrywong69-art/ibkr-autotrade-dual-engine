@@ -37,8 +37,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(REPORTS_DIR, exist_ok=True)
 os.makedirs(GDRIVE_TEMP_DIR, exist_ok=True)
 
-# Google Drive 專屬資料夾 ID (可透過環境變數 GDRIVE_FOLDER_ID 設定)
-DEFAULT_GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID", "1HJvzwWJrGl087cOSgwJYvx0usSE-wazl").strip()
+# Google Drive 專屬資料夾 ID (V9.3 累積表現資料夾 ID: 1jsWI6h1Kd634fmnp98PMs7IX-Yey_naX，可透過環境變數 GDRIVE_FOLDER_ID 覆寫)
+DEFAULT_GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID", "1jsWI6h1Kd634fmnp98PMs7IX-Yey_naX").strip()
 DEFAULT_GDRIVE_FOLDER_URL = f"https://drive.google.com/drive/folders/{DEFAULT_GDRIVE_FOLDER_ID}" if DEFAULT_GDRIVE_FOLDER_ID else ""
 
 
