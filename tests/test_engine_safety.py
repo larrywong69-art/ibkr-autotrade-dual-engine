@@ -1257,6 +1257,7 @@ class TestProductionOptimizationsP0P2(unittest.TestCase):
         eng.ib.isConnected = lambda: True
         eng.incident_mgr = MagicMock()
         eng.emergency_flat_symbol = MagicMock()
+        eng._trim_position_to_one = MagicMock()
         eng._get_symbol_open_trades = lambda sym: []
         eng._eod_squared_today = False
 
@@ -1264,28 +1265,44 @@ class TestProductionOptimizationsP0P2(unittest.TestCase):
         from zoneinfo import ZoneInfo
         from unittest.mock import patch
 
-        # Wednesday 16:52 ET -> should square off
+        # 1. Wednesday 16:52 ET -> 週一至週四不強制清倉，部位繼續運行原生硬止損
         fake_wed_1652 = datetime(2026, 11, 18, 16, 52, 0, tzinfo=ZoneInfo("America/New_York"))
-        eng.get_real_positions = lambda: ({"contracts": 2}, {"contracts": 1})
+        eng.get_real_positions = lambda: ({"contracts": 2, "unrealized_pnl": 150.0}, {"contracts": 2, "unrealized_pnl": -80.0})
 
         with patch("live_ibkr_dual_engine.datetime") as mock_dt:
             mock_dt.now.return_value = fake_wed_1652
             eng.check_eod_square_off()
 
-        self.assertEqual(eng.emergency_flat_symbol.call_count, 2)
-        flat_syms = [c[0][0] for c in eng.emergency_flat_symbol.call_args_list]
-        self.assertIn("MES", flat_syms)
-        self.assertIn("MNQ", flat_syms)
+        self.assertEqual(eng.emergency_flat_symbol.call_count, 0)
+        self.assertEqual(eng._trim_position_to_one.call_count, 0)
+        self.assertFalse(eng._eod_squared_today)
+
+        # 2. Friday 16:52 ET -> 週五收市保護：
+        #    MES 浮盈 2 口 -> 減倉 1 口 (保留 1 口底倉過週末)
+        #    MNQ 浮虧 2 口 -> 市價全平清倉防週末跳空
+        fake_fri_1652 = datetime(2026, 11, 20, 16, 52, 0, tzinfo=ZoneInfo("America/New_York"))
+        with patch("live_ibkr_dual_engine.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_fri_1652
+            eng.check_eod_square_off()
+
+        self.assertEqual(eng._trim_position_to_one.call_count, 1)
+        self.assertEqual(eng._trim_position_to_one.call_args[0][0], "MES")
+        self.assertEqual(eng._trim_position_to_one.call_args[0][2], 1)
+
+        self.assertEqual(eng.emergency_flat_symbol.call_count, 1)
+        self.assertEqual(eng.emergency_flat_symbol.call_args[0][0], "MNQ")
         self.assertTrue(eng._eod_squared_today)
 
         # Outside square off window (e.g. 15:00 ET) -> does not trigger
         eng.emergency_flat_symbol.reset_mock()
+        eng._trim_position_to_one.reset_mock()
         eng._eod_squared_today = False
-        fake_wed_1500 = datetime(2026, 11, 18, 15, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+        fake_fri_1500 = datetime(2026, 11, 20, 15, 0, 0, tzinfo=ZoneInfo("America/New_York"))
         with patch("live_ibkr_dual_engine.datetime") as mock_dt:
-            mock_dt.now.return_value = fake_wed_1500
+            mock_dt.now.return_value = fake_fri_1500
             eng.check_eod_square_off()
         self.assertEqual(eng.emergency_flat_symbol.call_count, 0)
+        self.assertEqual(eng._trim_position_to_one.call_count, 0)
 
     def test_p1_us_open_shock_absorber(self):
         eng = object.__new__(LiveIBKRDualEngine)
@@ -1293,18 +1310,43 @@ class TestProductionOptimizationsP0P2(unittest.TestCase):
         eng.market_data_status = "REAL_TIME"
         eng.ib = MagicMock()
         eng._can_query_hist_bar = lambda sym, ts: True
+        eng._open_orders = {}
 
         from datetime import datetime
         from zoneinfo import ZoneInfo
         from unittest.mock import patch
 
-        # 09:35 ET -> within shock absorber window (09:25 - 10:10 ET)
+        # 1. 09:28 ET -> 盤前競價時段 (09:25 - 09:30 ET) 凍結開倉
+        fake_pre_open = datetime(2026, 11, 18, 9, 28, 0, tzinfo=ZoneInfo("America/New_York"))
+        with patch("live_ibkr_dual_engine.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_pre_open
+            eng._evaluate_symbol_bar("MES", None, None, 60000.0, 4.5, None, [])
+
+        self.assertEqual(eng.ib.reqHistoricalData.call_count, 0)
+
+        # 2. 09:35 ET -> 開市頭 15 分鐘 (09:30 - 09:45 ET)：
+        # a) 空倉狀態下允許評估 K 棒
         fake_open_time = datetime(2026, 11, 18, 9, 35, 0, tzinfo=ZoneInfo("America/New_York"))
         with patch("live_ibkr_dual_engine.datetime") as mock_dt:
             mock_dt.now.return_value = fake_open_time
             eng._evaluate_symbol_bar("MES", None, None, 60000.0, 4.5, None, [])
+        self.assertEqual(eng.ib.reqHistoricalData.call_count, 1)
 
+        # b) 持有浮虧部位 (u_pnl <= 0) 嚴禁加倉
+        eng.ib.reqHistoricalData.reset_mock()
+        losing_pos = {"contracts": 1, "direction": "LONG", "unrealized_pnl": -50.0}
+        with patch("live_ibkr_dual_engine.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_open_time
+            eng._evaluate_symbol_bar("MES", None, None, 60000.0, 4.5, losing_pos, [])
         self.assertEqual(eng.ib.reqHistoricalData.call_count, 0)
+
+        # c) 持有浮盈部位 (u_pnl > 0) 允許順勢加倉評估
+        eng.ib.reqHistoricalData.reset_mock()
+        winning_pos = {"contracts": 1, "direction": "LONG", "unrealized_pnl": 120.0}
+        with patch("live_ibkr_dual_engine.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_open_time
+            eng._evaluate_symbol_bar("MES", None, None, 60000.0, 4.5, winning_pos, [])
+        self.assertEqual(eng.ib.reqHistoricalData.call_count, 1)
 
     def test_p1_consecutive_loss_circuit_breaker(self):
         eng = object.__new__(LiveIBKRDualEngine)

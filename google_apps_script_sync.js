@@ -10,7 +10,7 @@
  * 
  * 🎨 V9.3 特色功能更新：
  * 1. 支援 Exit Reason（10大出場原因：TP1, TP2, Runner, Breakeven, Trailing, Stop Loss, Soft Stop, EOD, Manual, Dynamic Exit）維度統計。
- * 2. 嚴格依照用戶範例截圖排版（「🥩 規則進場原因與時段表現」4 欄結構：分析維度 | 成交筆數 | 勝率 (Win%) | 累計貢獻淨利）。
+ * 2. 嚴格依照用戶範例截圖排版（「🎯 規則進場原因與時段表現」4 欄結構：分析維度 | 成交筆數 | 勝率 (Win%) | 累計貢獻淨利）。
  * 3. 數據可視化增強：自動建立原生柱狀圖與分佈圖。
  * 4. 全面以港幣 (HKD) 計價與展示（以 7.78 基準匯率轉換損益與佣金）。
  * 
@@ -270,13 +270,13 @@ function doPost(e) {
             // 標題行 (Row 15)
             rSheet.getRange("A15:D15").merge();
             var tCell = rSheet.getRange("A15");
-            tCell.setValue("🥩 規則進場原因與時段表現 (含 Exit Reason 出場維度)");
+            tCell.setValue("🎯 規則進場原因與時段表現");
             tCell.setFontSize(12).setFontWeight("bold").setFontColor("#1E3A8A");
 
-            // 表頭 (Row 16) - 深藍背景 #1E293B，白字置中粗體
+            // 表頭 (Row 16) - 深藍背景 #1C2D42，白字置中粗體
             var headRange = rSheet.getRange("A16:D16");
-            headRange.setValues([["分析維度", "成交筆數", "勝率(Win%)", "累計折算淨利"]]);
-            headRange.setBackground("#1E293B").setFontColor("#FFFFFF").setFontWeight("bold").setHorizontalAlignment("center");
+            headRange.setValues([["分析維度", "成交筆數", "勝率 (Win%)", "累計貢獻淨利"]]);
+            headRange.setBackground("#1C2D42").setFontColor("#FFFFFF").setFontWeight("bold").setHorizontalAlignment("center");
 
             // 清除舊資料行 (Row 17 至 Row 50)
             var lastPRow = rSheet.getLastRow();

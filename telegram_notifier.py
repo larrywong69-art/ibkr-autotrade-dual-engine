@@ -210,9 +210,9 @@ class TelegramNotifier:
             if reason and any(k in reason for k in ["規則", "回踩", "回調", "反彈", "破位", "波 3", "PULLBACK", "BOUNCE"]):
                 rule_logic = reason.strip()
             elif "MNQ" in symbol.upper():
-                rule_logic = "規則 2：箱體邊界反彈 (頂 1 口)"
+                rule_logic = "規則 2：箱體邊界反彈 (頂1口)"
             elif ("做空" in action or "淡倉" in action or "SHORT" in action.upper() or "SLD" in action.upper()) and not is_closing:
-                rule_logic = "規則 3：假突破反轉 (頂 1 口)"
+                rule_logic = "規則 3：假突破反轉 (頂1口)"
             else:
                 rule_logic = "規則 1：順勢波 3 回踩"
 

@@ -188,7 +188,7 @@ def classify_trade_exit_reason(trade: Dict[str, Any]) -> str:
 
 
 def classify_trade_strategy_rule(trade: Dict[str, Any]) -> str:
-    """分類進場策略規則 (符合用戶截圖格式)"""
+    """分類進場策略規則 (精確符合用戶回測/實盤報告截圖標準格式)"""
     symbol = str(trade.get("symbol", "")).upper()
     strat = str(trade.get("strategy", "")).upper()
     reason = str(trade.get("reason", "")).upper()
@@ -196,15 +196,15 @@ def classify_trade_strategy_rule(trade: Dict[str, Any]) -> str:
     combined = f"{strat} {reason} {ref} {symbol}"
 
     if any(k in combined for k in ["假突破", "微突破", "破位", "做空", "反轉", "RULE_3", "RULE 3", "SHORT", "SLD"]):
-        return "規則 3：微突破反轉 (頂 1 口)"
+        return "規則 3：假突破反轉 (頂1口)"
     elif any(k in combined for k in ["箱體", "5.0", "MNQ", "極端", "邊界", "動量", "RULE_2", "RULE 2", "BOUNCE", "EXTREME"]):
-        return "規則 2：極端邊界反彈 (頂 1 口)"
+        return "規則 2：箱體邊界反彈 (頂1口)"
     else:
-        return "規則 1：順勢浪 3 回踩"
+        return "規則 1：順勢波 3 回踩"
 
 
 def classify_trading_session(timestamp_str: str) -> str:
-    """分類所屬交易時段 (美盤 RTH / 歐盤倫敦 / 亞盤雪梨 - 精確匹配回測報表截圖格式)"""
+    """分類所屬交易時段 (美盤 RTH / 歐盤倫敦 / 亞盤盤前 - 精確匹配回測報表截圖格式)"""
     if not timestamp_str:
         return "🇺🇸 美盤 RTH (09:30-16:00 ET)"
     try:
@@ -219,7 +219,7 @@ def classify_trading_session(timestamp_str: str) -> str:
         elif 2.0 <= et_hour < 9.5:
             return "🇪🇺 歐盤倫敦 (02:00-09:30 ET)"
         else:
-            return "🇦🇺 亞盤雪梨 (18:00-02:00 ET)"
+            return "🌏 亞盤盤前 (18:00-02:00 ET)"
     except Exception:
         return "🇺🇸 美盤 RTH (09:30-16:00 ET)"
 
@@ -227,9 +227,9 @@ def classify_trading_session(timestamp_str: str) -> str:
 def compute_multidimensional_stats(trades: List[Dict[str, Any]], fx_rate: float = 7.78) -> Dict[str, Any]:
     """計算符合用戶指定格式的多維度統計 (進場規則、出場原因、交易時段)"""
     standard_rules = [
-        "規則 1：順勢浪 3 回踩",
-        "規則 2：極端邊界反彈 (頂 1 口)",
-        "規則 3：微突破反轉 (頂 1 口)",
+        "規則 1：順勢波 3 回踩",
+        "規則 2：箱體邊界反彈 (頂1口)",
+        "規則 3：假突破反轉 (頂1口)",
     ]
     standard_exit_reasons = [
         "🎯 第一止盈 (TP1 1.55R)",
@@ -246,7 +246,7 @@ def compute_multidimensional_stats(trades: List[Dict[str, Any]], fx_rate: float 
     standard_sessions = [
         "🇺🇸 美盤 RTH (09:30-16:00 ET)",
         "🇪🇺 歐盤倫敦 (02:00-09:30 ET)",
-        "🇦🇺 亞盤雪梨 (18:00-02:00 ET)",
+        "🌏 亞盤盤前 (18:00-02:00 ET)",
     ]
 
     dim_buckets: Dict[str, List[Dict[str, Any]]] = {}
@@ -809,25 +809,25 @@ class GoogleSheetsSyncManager:
             style_data_cell(ws1.cell(row=r, column=8), is_even=(s_idx==1), align="right", is_bold=True, num_format="\"HK$\"#,##0.00;[Red](\"HK$\"#,##0.00);\"HK$0.00\"", pnl_val=s_net)
 
         # ----------------------------------------------------------------------
-        # 區域 2：【規則進場原因與時段表現】 (精確符合用戶範例截圖格式，新增 exit_reason 統計)
+        # 區域 2：【規則進場原因與時段表現】 (精確符合用戶範例截圖格式，含 Exit Reason 出場維度)
         # ----------------------------------------------------------------------
         ws1.merge_cells("A15:D15")
         dim_title = ws1["A15"]
-        dim_title.value = "🥩 規則進場原因與時段表現 (含 Exit Reason 出場維度)"
+        dim_title.value = "🎯 規則進場原因與時段表現"
         dim_title.font = Font(name="Microsoft JhengHei", size=12, bold=True, color="1E3A8A")
         ws1.row_dimensions[15].height = 26
 
         dim_headers = [
             ("A16", "分析維度", 34),
             ("B16", "成交筆數", 14),
-            ("C16", "勝率(Win%)", 14),
-            ("D16", "累計折算淨利", 22)
+            ("C16", "勝率 (Win%)", 14),
+            ("D16", "累計貢獻淨利", 22)
         ]
         ws1.row_dimensions[16].height = 26
         for coord, text, width in dim_headers:
             cell = ws1[coord]
             cell.value = text
-            style_header_cell(cell, fill_color="1E293B", font_color="FFFFFF")
+            style_header_cell(cell, fill_color="1C2D42", font_color="FFFFFF")
             ws1.column_dimensions[coord[0]].width = width
 
         table_rows = multi_stats.get("table_rows", [])

@@ -548,11 +548,11 @@ class LiveIBKRDualEngine:
                     entry_rule = self._active_trade_meta.get(sym, {}).get("rule_desc", "")
                 if not entry_rule:
                     if sym == "MNQ":
-                        entry_rule = "規則 2：極端邊界反彈 (頂 1 口)"
+                        entry_rule = "規則 2：箱體邊界反彈 (頂1口)"
                     elif side == "SLD" and not is_closing:
-                        entry_rule = "規則 3：微突破反轉 (頂 1 口)"
+                        entry_rule = "規則 3：假突破反轉 (頂1口)"
                     else:
-                        entry_rule = "規則 1：順勢浪 3 回踩"
+                        entry_rule = "規則 1：順勢波 3 回踩"
 
                 # 3. 出場原因
                 exit_reason = ""
@@ -1411,6 +1411,19 @@ class LiveIBKRDualEngine:
         if qty <= 0:
             return
 
+        # 美盤開市頭 15 分鐘 (09:30–09:45 ET) 避震保護：強制限制下注為 1 張
+        try:
+            et_now = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            et_now = datetime.now()
+        cur_et_time = et_now.time()
+        if dt_time(9, 30) <= cur_et_time < dt_time(9, 45):
+            if qty > 1:
+                logger.info(f"🛡️ [美盤開市避震落注限制] {symbol} 開市頭 15 分鐘落注限 1 張 (原 {qty} 口已限制為 1 口)")
+                qty = 1
+                signal.contracts = 1
+                signal.split_lots = (0, 1, 0)
+
         entry_p = self._round_to_tick(signal.entry_price, 0.25)
         raw_sl_p = self._round_to_tick(signal.sl_price, 0.25)
 
@@ -1439,18 +1452,18 @@ class LiveIBKRDualEngine:
 
         rule_code = getattr(signal, "rule_code", None)
         if rule_code == "R1":
-            rule_desc = "規則 1：順勢浪 3 回踩"
+            rule_desc = "規則 1：順勢波 3 回踩"
         elif rule_code == "R2":
-            rule_desc = "規則 2：極端邊界反彈 (頂 1 口)"
+            rule_desc = "規則 2：箱體邊界反彈 (頂1口)"
         elif rule_code == "R3":
-            rule_desc = "規則 3：微突破反轉 (頂 1 口)"
+            rule_desc = "規則 3：假突破反轉 (頂1口)"
         else:
             if symbol == "MNQ":
-                rule_desc = "規則 2：極端邊界反彈 (頂 1 口)"
+                rule_desc = "規則 2：箱體邊界反彈 (頂1口)"
             elif signal.direction == Direction.SHORT:
-                rule_desc = "規則 3：微突破反轉 (頂 1 口)"
+                rule_desc = "規則 3：假突破反轉 (頂1口)"
             else:
-                rule_desc = "規則 1：順勢浪 3 回踩"
+                rule_desc = "規則 1：順勢波 3 回踩"
 
         if hasattr(self, "_active_trade_meta"):
             self._active_trade_meta[symbol] = {
@@ -1696,6 +1709,44 @@ class LiveIBKRDualEngine:
 
             direction = pos.get("direction", "LONG")
             exit_action = "SELL" if direction == "LONG" else "BUY"
+
+            # -----------------------------------------------------------------
+            # B-0. 美盤開市頭 15 分鐘 (09:30–09:45 ET) 虧損部位限 1 張保護
+            # 若開市前或開市初期持有多張部位且處於浮虧狀態，強制減倉至 1 口以防絞肉虧損擴大
+            # -----------------------------------------------------------------
+            try:
+                et_now = datetime.now(ZoneInfo("America/New_York"))
+            except Exception:
+                et_now = datetime.now()
+            cur_et_time = et_now.time()
+            if dt_time(9, 30) <= cur_et_time < dt_time(9, 45):
+                u_pnl = float(pos.get("unrealized_pnl", 0.0) or 0.0)
+                if u_pnl <= 0 and qty > 1:
+                    last_trim = getattr(self, "_last_open_shock_trim_ts", {}).get(symbol, 0.0)
+                    if now_ts - last_trim > 30.0:
+                        if not hasattr(self, "_last_open_shock_trim_ts"):
+                            self._last_open_shock_trim_ts = {}
+                        self._last_open_shock_trim_ts[symbol] = now_ts
+                        trim_cnt = qty - 1
+                        logger.warning(
+                            f"🛡️ [開市避震保護] {symbol} 開市頭 15 分鐘持倉浮虧 USD ${u_pnl:.2f} 且持倉 {qty} 口，"
+                            f"強制減倉 {trim_cnt} 口 (保留 1 口) 防範絞肉虧損擴大"
+                        )
+                        self._trim_position_to_one(symbol, pos, trim_cnt, reason="美盤開市頭15分鐘虧損限1張保護")
+                        if hasattr(self, "incident_mgr") and self.incident_mgr:
+                            self.incident_mgr.record_incident(
+                                severity="WARNING",
+                                category="TRADING",
+                                code=7014,
+                                message=f"美盤開市頭15分鐘避震保護：{symbol} 處於浮虧 USD ${u_pnl:.2f}，持倉 {qty} 口已減倉至 1 口",
+                                details={"symbol": symbol, "retained_contracts": 1, "trimmed_contracts": trim_cnt, "unrealized_pnl": u_pnl},
+                                source="SHOCK_ABSORBER"
+                            )
+                        # 減倉後重新抓取最新持倉快照與掛單
+                        pos_v43, pos_v50 = self.get_real_positions()
+                        pos = pos_v43 if symbol == "MES" else pos_v50
+                        qty = int(pos.get("contracts", 0)) if pos else 0
+                        sym_trades = self._get_symbol_open_trades(symbol)
 
             # -----------------------------------------------------------------
             # B. 有持倉檢查：撤銷錯誤方向掛單，對進行中的分梯 _ENTRY_ 父單保留 15 秒成交寬限期
@@ -2268,8 +2319,6 @@ class LiveIBKRDualEngine:
         orders: List[Dict[str, Any]]
     ):
         """共用 K 棒策略評估器：強制僅評估已收盤 5m K 棒 (len-2)，且每 5 分鐘週期最多評估一次"""
-        if pos is not None or len(orders) > 0:
-            return
         if float(getattr(self, "net_liquidation", 0.0) or 0.0) <= 0 or float(pool_usd or 0.0) <= 0:
             return
         if getattr(self, "market_data_status", "REAL_TIME") == "COMPETING_SESSION":
@@ -2303,21 +2352,48 @@ class LiveIBKRDualEngine:
             return
 
         # -----------------------------------------------------------------
-        # 2. 美盤開市避震鎖 (09:25–10:10 ET，自動處理夏令/冬令時)
-        # 美盤開市頭 40 分鐘為劇烈絞肉機洗盤時段，暫停新開倉以防秒斬
+        # 2. 美盤開市避震鎖 (09:25–09:45 ET，自動處理夏令/冬令時)
+        # - 09:25–09:30 ET：開市前競價洗盤期，暫停新開倉防滑價與秒斬
+        # - 09:30–09:45 ET (開市頭 15 分鐘)：落注限 1 張；如有盈利則可加倉；虧損則限 1 張 / 清倉
         # -----------------------------------------------------------------
         cur_et_time = et_now.time()
-        if dt_time(9, 25) <= cur_et_time <= dt_time(10, 10):
+        is_pre_open_freeze = dt_time(9, 25) <= cur_et_time < dt_time(9, 30)
+        is_us_open_15m = dt_time(9, 30) <= cur_et_time < dt_time(9, 45)
+
+        if is_pre_open_freeze:
             last_shock_log = getattr(self, "_last_shock_absorber_log_ts", {}).get(symbol, 0.0)
             if now_ts - last_shock_log > 300.0:
                 if not hasattr(self, "_last_shock_absorber_log_ts"):
                     self._last_shock_absorber_log_ts = {}
                 self._last_shock_absorber_log_ts[symbol] = now_ts
                 logger.info(
-                    f"🛡️ [美盤開市避震鎖] {symbol} 當前 ET 時間 {et_now.strftime('%H:%M:%S')} 處於美盤開市絞肉期 (09:25–10:10 ET)，"
-                    f"暫停新開倉以防秒斬磨損"
+                    f"🛡️ [美盤開市避震鎖] {symbol} 當前 ET 時間 {et_now.strftime('%H:%M:%S')} 處於美盤開市前競價期 (09:25–09:30 ET)，"
+                    f"暫停新進場以防滑價與秒斬"
                 )
             return
+
+        has_pos = pos is not None and int(pos.get("contracts", 0)) > 0
+        has_pending_entry = any(
+            int(getattr(o, "parentId", 0) or (o.get("parentId", 0) if isinstance(o, dict) else 0) or 0) == 0
+            for o in orders
+        )
+
+        if is_us_open_15m:
+            if has_pending_entry:
+                return
+            if has_pos:
+                u_pnl = float(pos.get("unrealized_pnl", 0.0) or 0.0)
+                if u_pnl <= 0:
+                    # 虧損時嚴禁加倉 (虧損限 1 張 / 清倉)
+                    return
+                # 持倉浮盈時 (u_pnl > 0)：允許評估 K 棒加倉
+            else:
+                # 無持倉：允許評估 K 棒進場，下單時限制為 1 張
+                pass
+        else:
+            # 常規時段：維持單部位防重複進場機制
+            if has_pos or len(orders) > 0:
+                return
 
         if not self._can_query_hist_bar(symbol, now_ts):
             return
@@ -2378,6 +2454,19 @@ class LiveIBKRDualEngine:
             sig, pending = engine_inst.evaluate_bar(last_idx, df, pool_usd, 0.5)
             target_sig = sig or (pending.signal if pending else None)
             if target_sig:
+                if is_us_open_15m:
+                    if has_pos:
+                        pos_dir = pos.get("direction", "LONG")
+                        sig_dir = "LONG" if target_sig.direction == Direction.LONG else "SHORT"
+                        if pos_dir != sig_dir:
+                            logger.info(f"⏸️ [美盤開市避震] {symbol} 訊號方向 {sig_dir} 與現有持倉 {pos_dir} 相反，開市頭 15 分鐘不予逆向加倉")
+                            return
+                        logger.info(f"🚀 [美盤開市加倉] {symbol} 持倉浮盈 USD ${pos.get('unrealized_pnl', 0.0):.2f}，觸發順勢加倉 1 口")
+                    else:
+                        logger.info(f"🛡️ [美盤開市避震] {symbol} 開市頭 15 分鐘初次落注限制為 1 張")
+                    target_sig.contracts = 1
+                    target_sig.split_lots = (0, 1, 0)
+
                 engine_inst.pending_limit_order = None
                 self.place_v93_bracket_order(symbol, target_sig)
             else:
@@ -2418,6 +2507,46 @@ class LiveIBKRDualEngine:
         _, orders_v50 = self.get_real_open_orders()
         self._evaluate_symbol_bar("MNQ", self.contract_mnq, self.engine_v93_mnq, self.pool_v50_usd, 12.0, pos_v50, orders_v50)
 
+    def _trim_position_to_one(self, symbol: str, pos: Dict[str, Any], trim_qty: int, reason: str = "週五收市盈利減倉") -> bool:
+        """
+        將持倉口數減去 trim_qty 口 (使部位降至目標口數，如 1 口)，並自動重整掛單
+        """
+        if not self.ib or not self.ib.isConnected() or trim_qty <= 0:
+            return False
+
+        contract = getattr(self, "contract_mes", None) if symbol == "MES" else getattr(self, "contract_mnq", None)
+        if not contract:
+            logger.warning(f"無法減倉 {symbol}: 合約尚未鎖定")
+            return False
+
+        direction = pos.get("direction", "LONG")
+        flat_action = "SELL" if direction == "LONG" else "BUY"
+        order = MarketOrder(flat_action, trim_qty)
+        order.tif = "GTC"
+        order.outsideRth = True
+        order.orderRef = f"TRIM_{symbol}_{trim_qty}"
+
+        logger.info(f"🛡️ [{reason}] 發送市價單 {flat_action} {symbol} {trim_qty} 口 (持倉原 {pos.get('contracts')} 口)...")
+        try:
+            trade = self.ib.placeOrder(contract, order)
+            trade_order = getattr(trade, "order", None) if trade else None
+            oid = getattr(order, "orderId", None) or (getattr(trade_order, "orderId", None) if trade_order else None)
+            if oid and hasattr(self, "_order_exit_reasons"):
+                exit_label = "🛡️ CME 週五收市盈利減倉 (Trim to 1)" if "週五" in reason else "🛡️ 開市避震虧損減倉 (Trim to 1)"
+                self._order_exit_reasons[oid] = exit_label
+                if hasattr(self, "_order_kinds"):
+                    self._order_kinds[oid] = "EXIT"
+
+            if hasattr(self.ib, "sleep"):
+                self.ib.sleep(0.5)
+
+            # 自動重整並裁撤超額止損/止盈單
+            self.ensure_position_protection()
+            return True
+        except Exception as e:
+            logger.error(f"[{reason}] 市價減倉失敗: {e}")
+            return False
+
     def emergency_flat_symbol(self, symbol: str, reason: str = "手動平倉") -> Dict[str, Any]:
         """一鍵平倉指定標的 (MES 或 MNQ) 並撤銷其所有掛單，附帶審計與日誌記錄"""
         if not self.ib or not self.ib.isConnected():
@@ -2425,7 +2554,7 @@ class LiveIBKRDualEngine:
             return {"status": "error", "message": "尚未連線至 IBKR"}
 
         try:
-            target_contract = self.contract_mes if symbol == "MES" else self.contract_mnq
+            target_contract = getattr(self, "contract_mes", None) if symbol == "MES" else getattr(self, "contract_mnq", None)
             if not target_contract:
                 logger.warning(f"無法平倉 {symbol}: 合約尚未鎖定")
                 return {"status": "error", "message": f"{symbol} 合約尚未就緒"}
@@ -2461,7 +2590,14 @@ class LiveIBKRDualEngine:
                     mo.tif = "GTC"
                     mo.outsideRth = True
                     is_soft = ("防穿倉" in reason or "7007" in reason)
-                    mo.orderRef = f"GUARD_{symbol}_SOFT_STOP" if is_soft else f"MANUAL_{symbol}_FLAT"
+                    is_eod = ("週五收市" in reason or "EOD" in reason or "收市前" in reason)
+                    if is_soft:
+                        mo.orderRef = f"GUARD_{symbol}_SOFT_STOP"
+                    elif is_eod:
+                        mo.orderRef = f"EOD_{symbol}_FLAT"
+                    else:
+                        mo.orderRef = f"MANUAL_{symbol}_FLAT"
+
                     trade = self.ib.placeOrder(target_contract, mo)
                     trade_order = getattr(trade, "order", None) if trade else None
                     oid = getattr(mo, "orderId", None) or (getattr(trade_order, "orderId", None) if trade_order else None)
@@ -2469,7 +2605,12 @@ class LiveIBKRDualEngine:
                         if hasattr(self, "_order_kinds"):
                             self._order_kinds[oid] = "EXIT"
                         if hasattr(self, "_order_exit_reasons"):
-                            self._order_exit_reasons[oid] = "🚨 軟體防穿倉 (Soft Stop 7007)" if is_soft else "✋ 手動緊急平倉 (Manual Flat)"
+                            if is_soft:
+                                self._order_exit_reasons[oid] = "🚨 軟體防穿倉 (Soft Stop 7007)"
+                            elif is_eod:
+                                self._order_exit_reasons[oid] = "🛑 CME 週五收市虧損清倉 (Friday EOD Flat)"
+                            else:
+                                self._order_exit_reasons[oid] = "✋ 手動緊急平倉 (Manual Flat)"
                         if hasattr(self, "_order_rules") and hasattr(self, "_active_trade_meta"):
                             meta = self._active_trade_meta.get(symbol, {})
                             if meta.get("rule_desc"):
@@ -2844,11 +2985,15 @@ class LiveIBKRDualEngine:
 
     def check_eod_square_off(self):
         """
-        CME 收市前自動清倉保護 (EOD Auto Square-Off)
-        - 平日 (週一至週四) 16:50 ET，週五 16:45 ET：
-        - 自動撤銷所有未成交之進場單 (防收市撮合殘單)
-        - 檢查是否有持倉 (MES / MNQ)，如有立即執行市價全平倉 (emergency_flat_symbol)
-        - 徹底根除收盤前斷線或休市導致之留倉過夜保證金暴增 (如 4 口凍結 14.4 萬 HKD) 及跳空開盤風險
+        CME 週五收市前自動保護機制 (Friday EOD Auto Square-Off & Profit Trimming)
+        - 僅於星期五 (weekday == 4) 16:45–17:00 ET 執行；週一至週四不強制清倉，讓部位自然運行。
+        - 1. 自動撤銷所有未成交之進場單 (防收市撮合殘單)
+        - 2. 檢查持倉盈虧狀態：
+             - 若該持倉有盈利 (unrealized_pnl > 0)：
+               * 若持倉 > 1 張：減倉至持 1 張 (平倉多餘張數，保留 1 口底倉過週末)
+               * 若持倉剛好 1 張：維持持倉 1 口過週末
+             - 若該持倉處於虧損 (unrealized_pnl <= 0)：
+               * 立即執行市價全平清倉 (emergency_flat_symbol)，徹底根除週末 48 小時跳空擴大虧損與保證金暴增
         """
         if not self.ib or not self.ib.isConnected():
             return
@@ -2861,25 +3006,22 @@ class LiveIBKRDualEngine:
         weekday = now_et.weekday()  # 0=Mon ... 4=Fri, 5=Sat, 6=Sun
         cur_time = now_et.time()
 
-        # 平日 16:50-17:00 ET，週五 16:45-17:00 ET
-        is_square_off_window = False
-        if weekday in (0, 1, 2, 3):
-            if dt_time(16, 50) <= cur_time < dt_time(17, 0):
-                is_square_off_window = True
-        elif weekday == 4:  # 週五提前至 16:45 避開週末閉市前流動性枯竭
-            if dt_time(16, 45) <= cur_time < dt_time(17, 0):
-                is_square_off_window = True
+        # 每日 18:00 開盤後重置清倉保護旗標
+        if getattr(self, "_eod_squared_today", False) and cur_time >= dt_time(18, 0):
+            self._eod_squared_today = False
 
-        if not is_square_off_window:
-            # 每日 18:00 開盤後重置清倉保護旗標
-            if getattr(self, "_eod_squared_today", False) and cur_time >= dt_time(18, 0):
-                self._eod_squared_today = False
+        # 用戶明確指示：只應用於星期 5 (weekday == 4)
+        if weekday != 4:
+            return
+
+        # 週五 16:45-17:00 ET 執行 (避開週末閉市前流動性枯竭)
+        if not (dt_time(16, 45) <= cur_time < dt_time(17, 0)):
             return
 
         if getattr(self, "_eod_squared_today", False):
             return
 
-        logger.info(f"🛡️ [CME 收市前清倉保護] 觸發收市前保護機制 (當前 ET: {now_et.strftime('%H:%M:%S')})，開始撤單與全平倉...")
+        logger.info(f"🛡️ [CME 週五收市前保護] 觸發週五收市前保護機制 (當前 ET: {now_et.strftime('%H:%M:%S')})，檢查未成交單與持倉盈虧...")
 
         # 1. 撤銷所有未成交進場單
         for sym in ("MES", "MNQ"):
@@ -2889,32 +3031,96 @@ class LiveIBKRDualEngine:
                 oref = str(getattr(t.order, "orderRef", "") or "")
                 otype = getattr(t.order, "orderType", "")
                 if pid == 0 and ("_ENTRY_" in oref or otype == "LMT"):
-                    self._cancel_trade_safely(t, sym, 7009, "CME 收市前自動撤銷未成交進場單")
+                    self._cancel_trade_safely(t, sym, 7009, "CME 週五收市前自動撤銷未成交進場單")
 
-        # 2. 檢查持倉並市價全平
+        # 2. 檢查持倉並依盈虧執行「盈利減至 1 張，虧損清倉」
         pos_mes, pos_mnq = self.get_real_positions()
-        did_flat = False
-        if pos_mes and int(pos_mes.get("contracts", 0)) > 0:
-            logger.warning(f"🛡️ [CME 收市前清倉] 平倉 MES {pos_mes.get('contracts')} 口")
-            self.emergency_flat_symbol("MES", reason="CME 收市前自動清倉保護 (防過夜跳空與保證金暴增)")
-            did_flat = True
+        targets = [("MES", pos_mes), ("MNQ", pos_mnq)]
 
-        if pos_mnq and int(pos_mnq.get("contracts", 0)) > 0:
-            logger.warning(f"🛡️ [CME 收市前清倉] 平倉 MNQ {pos_mnq.get('contracts')} 口")
-            self.emergency_flat_symbol("MNQ", reason="CME 收市前自動清倉保護 (防過夜跳空與保證金暴增)")
-            did_flat = True
+        for sym, pos in targets:
+            if not pos:
+                continue
+            qty = int(pos.get("contracts", 0))
+            if qty <= 0:
+                continue
+
+            u_pnl = float(pos.get("unrealized_pnl", 0.0) or 0.0)
+            direction = pos.get("direction", "LONG")
+
+            if u_pnl > 0:
+                # 盈利部位：減至持 1 張 (若 > 1 則減倉，若 == 1 則保留)
+                if qty > 1:
+                    trim_lots = qty - 1
+                    logger.info(f"🛡️ [CME 週五盈利減倉] {sym} 浮盈 USD ${u_pnl:.2f}，現有 {qty} 口，減倉 {trim_lots} 口保留 1 口過週末")
+                    self._trim_position_to_one(sym, pos, trim_lots, reason="CME 週五收市盈利減倉 (保留 1 口)")
+                    if hasattr(self, "incident_mgr") and self.incident_mgr:
+                        self.incident_mgr.record_incident(
+                            severity="INFO",
+                            category="TRADING",
+                            code=7012,
+                            message=f"CME 週五收市盈利部位減倉：{sym} 浮盈 USD ${u_pnl:.2f}，已平倉 {trim_lots} 口，保留 1 口過週末",
+                            details={"symbol": sym, "retained_contracts": 1, "trimmed_contracts": trim_lots, "unrealized_pnl": u_pnl},
+                            source="EOD_GUARDIAN"
+                        )
+                    try:
+                        from telegram_notifier import notifier
+                        notifier.send_message_async(
+                            f"🛡️ <b>【CME 週五收市盈利減倉】</b>\n"
+                            f"標的: <b>{sym}</b> ({direction})\n"
+                            f"原持倉: {qty} 口 ➡️ <b>已平倉 {trim_lots} 口 (保留 1 口過週末)</b>\n"
+                            f"浮動盈虧: <b>+USD ${u_pnl:.2f}</b>\n"
+                            f"機制: 週五收市前鎖定大部盈利，保留單口趨勢底倉"
+                        )
+                    except Exception:
+                        pass
+                else:
+                    logger.info(f"🛡️ [CME 週五盈利留倉] {sym} 浮盈 USD ${u_pnl:.2f} 且持倉已為 1 口，維持持倉留倉過週末")
+                    if hasattr(self, "incident_mgr") and self.incident_mgr:
+                        self.incident_mgr.record_incident(
+                            severity="INFO",
+                            category="TRADING",
+                            code=7013,
+                            message=f"CME 週五收市盈利部位維持 1 口留倉過週末：{sym} 浮盈 USD ${u_pnl:.2f}",
+                            details={"symbol": sym, "contracts": 1, "unrealized_pnl": u_pnl},
+                            source="EOD_GUARDIAN"
+                        )
+                    try:
+                        from telegram_notifier import notifier
+                        notifier.send_message_async(
+                            f"🛡️ <b>【CME 週五收市盈利留倉】</b>\n"
+                            f"標的: <b>{sym}</b> ({direction})\n"
+                            f"持倉口數: <b>1 口 (維持留倉)</b>\n"
+                            f"浮動盈虧: <b>+USD ${u_pnl:.2f}</b>\n"
+                            f"機制: 持倉處於盈利狀態且僅持 1 口，符合週末留倉標準"
+                        )
+                    except Exception:
+                        pass
+            else:
+                # 虧損部位 (u_pnl <= 0)：全平清倉避免週末跳空
+                logger.warning(f"🛑 [CME 週五虧損清倉] {sym} 浮虧 USD ${u_pnl:.2f} (持倉 {qty} 口)，執行週五市價清倉保護")
+                self.emergency_flat_symbol(sym, reason=f"CME 週五收市前虧損清倉保護 (浮虧 USD ${u_pnl:.2f})")
+                if hasattr(self, "incident_mgr") and self.incident_mgr:
+                    self.incident_mgr.record_incident(
+                        severity="WARNING",
+                        category="TRADING",
+                        code=7010,
+                        message=f"CME 週五收市前虧損清倉保護：{sym} 浮虧 USD ${u_pnl:.2f}，已市價全平清倉避免週末跳空與保證金暴增",
+                        details={"symbol": sym, "closed_contracts": qty, "unrealized_pnl": u_pnl},
+                        source="EOD_GUARDIAN"
+                    )
+                try:
+                    from telegram_notifier import notifier
+                    notifier.send_message_async(
+                        f"🛑 <b>【CME 週五收市前虧損清倉】</b>\n"
+                        f"標的: <b>{sym}</b> ({direction})\n"
+                        f"平倉口數: <b>{qty} 口全平</b>\n"
+                        f"浮動損益: <b>USD ${u_pnl:.2f}</b>\n"
+                        f"機制: 週五收市前持倉未處於盈利狀態，強制清倉防範週末 48 小時跳空風險"
+                    )
+                except Exception:
+                    pass
 
         self._eod_squared_today = True
-
-        if did_flat:
-            self.incident_mgr.record_incident(
-                severity="WARNING",
-                category="TRADING",
-                code=7010,
-                message="CME 收市前自動清倉保護已執行，已市價平倉所有隔夜部位避免跳空與保證金激增",
-                details={"time_et": now_et.strftime("%Y-%m-%d %H:%M:%S")},
-                source="EOD_GUARDIAN"
-            )
 
     def run_loop(self):
         """雙引擎主輪詢循環，具備 CME 休市自動暫停/開市自動連線與斷線重連守護"""
