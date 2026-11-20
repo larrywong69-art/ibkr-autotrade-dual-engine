@@ -131,6 +131,11 @@ class GoogleDriveReportManager:
         """
         將結構化報告轉為 Google Docs 完美渲染之高雅視覺化 HTML
         """
+        if isinstance(report_data, str):
+            report_data = {"report_date": report_data}
+        elif not isinstance(report_data, dict):
+            report_data = {}
+
         date_str = report_data.get("report_date", datetime.now().strftime("%Y-%m-%d"))
         gen_time = report_data.get("generated_at", "")
         currency = report_data.get("account_currency", "HKD")
@@ -730,6 +735,11 @@ table.data-table tr:nth-child(even) {{
            避免資料夾產生冗餘 Google Doc 與額外追蹤表。
         3. 同步觸發 GoogleSheetsSyncManager 自動更新「AutoTrade_交易紀錄與分析總表」與「AutoTrade_帳戶結餘表」。
         """
+        if isinstance(report_data, str):
+            report_data = {"report_date": report_data}
+        elif not isinstance(report_data, dict):
+            report_data = {}
+
         date_str = report_data.get("report_date", datetime.now().strftime("%Y-%m-%d"))
 
         # 檢查是否已上傳且無需強制覆蓋
