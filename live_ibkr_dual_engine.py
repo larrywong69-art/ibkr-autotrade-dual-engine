@@ -465,6 +465,8 @@ class LiveIBKRDualEngine:
             # 撤銷幽靈單自癒：經紀商確認 OrderId 已不存在/已撤銷/已終止
             # 自動標記為死單並更新本地狀態，徹底根除 30 秒重複撤銷與洗版死循環
             target_oid = int(req_id or 0)
+            if not hasattr(self, "_dead_order_ids"):
+                self._dead_order_ids = set()
             if target_oid > 0:
                 self._dead_order_ids.add(target_oid)
                 self._cancel_attempt_ts[target_oid] = time.time() + 86400.0  # 凍結後續重試
@@ -1590,12 +1592,13 @@ class LiveIBKRDualEngine:
         if not self.ib or not self.ib.isConnected():
             return []
         active = []
+        dead_ids = getattr(self, "_dead_order_ids", set())
         for t in self.ib.openTrades():
             if getattr(t.contract, "symbol", "") != symbol:
                 continue
             oid = int(getattr(t.order, "orderId", 0) or 0)
             perm_id = int(getattr(t.order, "permId", 0) or 0)
-            if oid in self._dead_order_ids or perm_id in self._dead_order_ids:
+            if oid in dead_ids or perm_id in dead_ids:
                 continue
             status_str = getattr(getattr(t, "orderStatus", None), "status", "") or ""
             if status_str in ("Cancelled", "ApiCancelled", "Filled", "Inactive"):
@@ -1609,7 +1612,8 @@ class LiveIBKRDualEngine:
         perm_id = int(getattr(trade.order, "permId", 0) or 0)
         cid = int(getattr(trade.order, "clientId", 0) or 0)
         cancel_key = oid if oid > 0 else perm_id
-        if cancel_key in self._dead_order_ids or oid in self._dead_order_ids or perm_id in self._dead_order_ids:
+        dead_ids = getattr(self, "_dead_order_ids", set())
+        if cancel_key in dead_ids or oid in dead_ids or perm_id in dead_ids:
             return False
         now_ts = time.time()
         if cancel_key > 0 and (now_ts - self._cancel_attempt_ts.get(cancel_key, 0.0) < 30.0):
