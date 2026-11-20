@@ -74,10 +74,12 @@
       <!-- 右側：連線狀態與全域啟停/平倉控制 -->
       <div class="flex flex-col sm:flex-row items-start sm:items-center gap-3 w-full lg:w-auto justify-between lg:justify-end border-t lg:border-t-0 border-[var(--border)] pt-3 lg:pt-0">
         <div class="text-left sm:text-right">
-          <div class="flex items-center gap-1.5 sm:justify-end">
+          <div class="flex items-center gap-1.5 sm:justify-end flex-wrap">
             <span class="w-2 h-2 rounded-full bg-emerald-500" id="conn-indicator"></span>
             <span class="text-xs font-bold text-emerald-500" id="conn-status">正在連線 IBKR 模擬盤...</span>
             <span id="mkt-data-badge" class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">CME 報價檢測中</span>
+            <span id="golden-window-badge" class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/25">時段檢測中</span>
+            <span id="consec-loss-badge" class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">連輸風控: 0/3</span>
           </div>
           <div class="text-xs text-[var(--muted-foreground)]" id="last-updated">更新於: 剛才</div>
         </div>
@@ -1312,6 +1314,35 @@
             mktBadge.className = 'px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25';
           } else {
             mktBadge.className = 'px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/25';
+          }
+        }
+
+        // 美股黃金窗口徽章更新 (22:30–04:00 HKT)
+        const gwBadge = document.getElementById('golden-window-badge');
+        if (gwBadge) {
+          if (data.market_window_desc) {
+            gwBadge.innerText = data.market_window_desc;
+          }
+          if (data.is_golden_window) {
+            gwBadge.className = 'px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse shadow-sm';
+          } else {
+            gwBadge.className = 'px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-500/15 text-slate-400 border border-slate-500/25';
+          }
+        }
+
+        // 連輸階梯風控徽章更新 (連輸3次減半，連輸5次限制1張)
+        const clBadge = document.getElementById('consec-loss-badge');
+        if (clBadge) {
+          if (data.consecutive_loss_status) {
+            clBadge.innerText = data.consecutive_loss_status;
+          }
+          const cl = Number(data.consecutive_losses_today) || 0;
+          if (cl >= 5) {
+            clBadge.className = 'px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse';
+          } else if (cl >= 3) {
+            clBadge.className = 'px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40';
+          } else {
+            clBadge.className = 'px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25';
           }
         }
 

@@ -116,10 +116,11 @@ class StrategyEngineV93:
         session: Optional[str] = None,
         timestamp: Any = None,
         margin_per_contract: float = 2400.0,
-        max_contracts_cap: int = 12
+        max_contracts_cap: int = 12,
+        consecutive_losses: int = 0
     ) -> Tuple[int, Tuple[int, int, int]]:
         """
-        根據當前淨值、規則類型與交易時段，精確計算整數口數與 (q1, q2, q3) 拆單分配
+        根據當前淨值、規則類型與交易時段 (美股黃金窗口 22:30–04:00 HKT) 與連輸風控次數，精確計算整數口數與 (q1, q2, q3) 拆單分配
         """
         return get_live_order_lots(
             rule_type=rule_type,
@@ -128,7 +129,8 @@ class StrategyEngineV93:
             current_equity=current_equity,
             margin_per_contract=margin_per_contract,
             max_contracts_cap=max_contracts_cap,
-            timestamp=timestamp
+            timestamp=timestamp,
+            consecutive_losses=consecutive_losses
         )
 
     def calculate_tranches(self, total_contracts: int) -> Tuple[int, int, int]:
@@ -156,7 +158,8 @@ class StrategyEngineV93:
         current_equity: float,
         rolling_sortino: float = 0.5,
         df_4h: Optional[pd.DataFrame] = None,
-        df_1h: Optional[pd.DataFrame] = None
+        df_1h: Optional[pd.DataFrame] = None,
+        consecutive_losses: int = 0
     ) -> Tuple[Optional[TradeSignal], Optional[PendingLimitOrder]]:
         """
         評估單根 K 棒，執行 4H 宏觀濾網 + 1H ADX 強趨勢保護 + 浪3回踩 + 箱體信號辨識
@@ -305,7 +308,8 @@ class StrategyEngineV93:
             rule_type=rule_code,
             direction=direction,
             session=session_name,
-            timestamp=ts
+            timestamp=ts,
+            consecutive_losses=consecutive_losses
         )
 
         if total_lots <= 0:

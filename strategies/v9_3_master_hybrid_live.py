@@ -22,6 +22,8 @@
 """
 
 from typing import Dict, Any, Tuple, Optional
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import pandas as pd
 
 CONFIG: Dict[str, Any] = {
@@ -58,6 +60,54 @@ CONFIG: Dict[str, Any] = {
         12: (5, 5, 2),  # 12口單：TP1 平 5 口，TP2 平 5 口，Runner 留 2 口 (41.7% / 41.7% / 16.7%)
     }
 }
+
+
+def is_us_golden_window_hkt(dt: Any = None) -> bool:
+    """
+    判斷是否處於美股黃金窗口（22:30–04:00 HKT，美股常規流動性最佳黃金時段）：
+    - 22:30 至 23:59:59 HKT
+    - 00:00 至 04:00:00 HKT
+    - 歐盤 (14:00-21:00 HKT)、美股開市前 (21:00-22:30 HKT)、美股尾盤 (04:00-05:00 HKT) 及亞盤皆屬於非黃金窗口，限制注碼減半防重倉。
+    """
+    if dt is None:
+        try:
+            dt = datetime.now(ZoneInfo("Asia/Hong_Kong"))
+        except Exception:
+            dt = datetime.now()
+    elif isinstance(dt, (int, float)):
+        try:
+            dt = datetime.fromtimestamp(dt, tz=ZoneInfo("Asia/Hong_Kong"))
+        except Exception:
+            dt = datetime.fromtimestamp(dt)
+    elif isinstance(dt, str):
+        try:
+            dt = pd.to_datetime(dt)
+        except Exception:
+            try:
+                dt = datetime.now(ZoneInfo("Asia/Hong_Kong"))
+            except Exception:
+                dt = datetime.now()
+
+    if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
+        try:
+            dt_hkt = pd.Timestamp(dt).tz_convert("Asia/Hong_Kong")
+        except Exception:
+            dt_hkt = dt
+    else:
+        try:
+            dt_hkt = pd.Timestamp(dt).tz_localize("America/New_York").tz_convert("Asia/Hong_Kong")
+        except Exception:
+            dt_hkt = dt
+
+    try:
+        h = dt_hkt.hour
+        m = dt_hkt.minute
+    except Exception:
+        return True
+
+    hm = h * 60 + m
+    # 22:30 HKT = 1350, 04:00 HKT = 240
+    return (hm >= 1350 or hm < 240)
 
 
 def detect_market_session(dt: Any) -> str:
@@ -107,10 +157,15 @@ def get_live_order_lots(
     current_equity: float = 30000.0,
     margin_per_contract: float = 2400.0,
     max_contracts_cap: int = 12,
-    timestamp: Any = None
+    timestamp: Any = None,
+    consecutive_losses: int = 0
 ) -> Tuple[int, Tuple[int, int, int]]:
     """
-    根據當前淨值、規則類型與交易時段，計算實盤應下總口數與 (TP1口數, TP2口數, Runner口數)。
+    根據當前淨值、規則類型、交易時段 (美股黃金窗口 22:30–04:00 HKT) 與連輸風控次數，
+    精確計算實盤應下總口數與 (TP1口數, TP2口數, Runner口數)。
+    - 黃金窗口：22:30–04:00 HKT 集中火力打常規/完整注碼
+    - 非黃金窗口 (歐盤、尾盤、亞盤等)：注碼強制減半 (max(1, lots // 2))
+    - 連輸風控階梯：連輸 >= 3 次注碼減半；連輸 >= 5 次限制 1 張；止盈獲利平倉則重設為 0
     全部回傳正整數口數，可直接送入 IBKR API 建立 Bracket / OCA 訂單。
     """
     dir_str = _normalize_direction(direction)
@@ -119,6 +174,7 @@ def get_live_order_lots(
         session = detect_market_session(timestamp)
     session_str = str(session or "美盤")
 
+    # 1. 基礎淨值分檔口數
     if rule_type in ("R1", "R1_WAVE3_TREND"):
         if current_equity < 45000:
             total_lots = 2
@@ -144,6 +200,19 @@ def get_live_order_lots(
             total_lots = 3
     else:
         return 0, (0, 0, 0)
+
+    # 2. 時段過濾：集中火力打美股黃金窗口（22:30–04:00 HKT），暫停歐盤及尾盤重倉，其他時間段限制注碼減半
+    in_golden_window = is_us_golden_window_hkt(timestamp)
+    if not in_golden_window:
+        if total_lots > 1:
+            total_lots = max(1, total_lots // 2)
+
+    # 3. 連輸風控階梯：取消連續止蝕停止限制，改為連輸3次減半注碼，連輸5次限制1張，止盈則重算
+    if consecutive_losses >= 5:
+        total_lots = 1
+    elif consecutive_losses >= 3:
+        if total_lots > 1:
+            total_lots = max(1, total_lots // 2)
 
     # IBKR 保證金安全限制 (最高動用 65% 淨值作為初始保證金)
     max_by_margin = max(1, int((current_equity * 0.65) // max(500.0, margin_per_contract)))

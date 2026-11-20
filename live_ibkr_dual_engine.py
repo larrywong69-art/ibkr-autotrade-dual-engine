@@ -652,32 +652,30 @@ class LiveIBKRDualEngine:
                                 f"⚠️ [連輸風控計數] 今日連續虧損: {self._consecutive_losses_today} 回合 (本次結算: USD ${pnl_val:.2f})"
                             )
                             if self._consecutive_losses_today >= 5:
-                                self._daily_trading_halted = True
-                                circuit_msg = f"🚨 [連輸當日熔斷 5002] 今日連續虧損達到 {self._consecutive_losses_today} 回合，啟動當日全面暫停開倉保護！"
-                                logger.critical(circuit_msg)
+                                circuit_msg = f"⚠️ [連輸5次風控 5002] 今日連續虧損達到 {self._consecutive_losses_today} 回合，已取消全面停開，改為後續開倉強制限制為 1 張！"
+                                logger.warning(circuit_msg)
                                 self.incident_mgr.record_incident(
-                                    severity="CRITICAL",
+                                    severity="WARNING",
                                     category="RISK",
                                     code=5002,
                                     message=circuit_msg,
-                                    details={"consecutive_losses": self._consecutive_losses_today, "last_pnl": pnl_val},
-                                    source="CIRCUIT_BREAKER"
+                                    details={"consecutive_losses": self._consecutive_losses_today, "last_pnl": pnl_val, "action": "LIMIT_1_CONTRACT"},
+                                    source="CONSECUTIVE_LOSS_GUARD"
                                 )
                             elif self._consecutive_losses_today >= 3:
-                                self._daily_loss_circuit_until = now_exec_ts + 3600.0
-                                circuit_msg = f"⏸️ [連輸避震冷卻 5001] 今日連續虧損達到 {self._consecutive_losses_today} 回合，啟動 60 分鐘暫停開倉冷卻保護！"
+                                circuit_msg = f"⚠️ [連輸3次風控 5001] 今日連續虧損達到 {self._consecutive_losses_today} 回合，已取消冷卻停開，改為後續開倉注碼強制減半！"
                                 logger.warning(circuit_msg)
                                 self.incident_mgr.record_incident(
                                     severity="WARNING",
                                     category="RISK",
                                     code=5001,
                                     message=circuit_msg,
-                                    details={"consecutive_losses": self._consecutive_losses_today, "cooldown_sec": 3600.0, "last_pnl": pnl_val},
-                                    source="CIRCUIT_BREAKER"
+                                    details={"consecutive_losses": self._consecutive_losses_today, "last_pnl": pnl_val, "action": "HALVE_POSITION_SIZE"},
+                                    source="CONSECUTIVE_LOSS_GUARD"
                                 )
                     elif pnl_val > 0.01:
                         if getattr(self, "_consecutive_losses_today", 0) > 0:
-                            logger.info(f"🟢 [連輸歸零] 獲利平倉 (+USD ${pnl_val:.2f})，今日連續虧損計數重設為 0")
+                            logger.info(f"🟢 [連輸歸零/止盈重算] 獲利平倉 (+USD ${pnl_val:.2f})，今日連續虧損計數重設為 0，恢復常規注碼")
                             self._consecutive_losses_today = 0
                             self._daily_loss_circuit_until = 0.0
 
@@ -1443,7 +1441,58 @@ class LiveIBKRDualEngine:
         if qty <= 0:
             return
 
-        # 美盤開市頭 15 分鐘 (09:30–09:45 ET) 避震保護：強制限制下注為 1 張
+        # -------------------------------------------------------------
+        # 1. 美股黃金窗口 (22:30–04:00 HKT) vs 其他時段 (暫停歐盤/尾盤重倉，注碼強制減半)
+        # -------------------------------------------------------------
+        try:
+            hkt_now = datetime.now(ZoneInfo("Asia/Hong_Kong"))
+        except Exception:
+            hkt_now = datetime.now()
+
+        hm_hkt = hkt_now.hour * 60 + hkt_now.minute
+        is_golden_window = (hm_hkt >= 1350 or hm_hkt < 240)
+
+        if not is_golden_window:
+            if qty > 1:
+                halved_qty = max(1, qty // 2)
+                logger.info(
+                    f"🛡️ [非黃金窗口注碼減半] {symbol} 當前 HKT 時間 {hkt_now.strftime('%H:%M:%S')} 處於非黃金窗口 (暫停歐盤/尾盤重倉)，"
+                    f"注碼限制減半: {qty} 口 -> {halved_qty} 口"
+                )
+                qty = halved_qty
+            else:
+                logger.info(
+                    f"🛡️ [非黃金窗口注碼限制] {symbol} 當前 HKT 時間 {hkt_now.strftime('%H:%M:%S')} 處於非黃金窗口，維持基礎注碼 1 口"
+                )
+        else:
+            logger.info(
+                f"🔥 [美股黃金窗口集中火力] {symbol} 當前 HKT 時間 {hkt_now.strftime('%H:%M:%S')} 處於美股黃金窗口 (22:30–04:00 HKT)，"
+                f"常規全額注碼: {qty} 口"
+            )
+
+        # -------------------------------------------------------------
+        # 2. 連輸風控動態階梯注碼 (連輸3次減半注碼，連輸5次限制1張，止盈則重算)
+        # -------------------------------------------------------------
+        consec_losses = getattr(self, "_consecutive_losses_today", 0)
+        if consec_losses >= 5:
+            if qty > 1:
+                logger.warning(
+                    f"⚠️ [連輸5次強制限1張] {symbol} 今日連輸 {consec_losses} 次 (>=5)，注碼強制限制為 1 張 (原 {qty} 口 -> 1 口)"
+                )
+                qty = 1
+            else:
+                logger.info(f"⚠️ [連輸5次限制] {symbol} 今日連輸 {consec_losses} 次 (>=5)，維持注碼 1 口")
+        elif consec_losses >= 3:
+            if qty > 1:
+                halved_loss_qty = max(1, qty // 2)
+                logger.warning(
+                    f"⚠️ [連輸3次注碼減半] {symbol} 今日連輸 {consec_losses} 次 (>=3)，注碼強制減半 (原 {qty} 口 -> {halved_loss_qty} 口)"
+                )
+                qty = halved_loss_qty
+
+        # -------------------------------------------------------------
+        # 3. 美盤開市頭 15 分鐘 (09:30–09:45 ET) 避震保護：強制限制下注為 1 張
+        # -------------------------------------------------------------
         try:
             et_now = datetime.now(ZoneInfo("America/New_York"))
         except Exception:
@@ -1453,8 +1502,13 @@ class LiveIBKRDualEngine:
             if qty > 1:
                 logger.info(f"🛡️ [美盤開市避震落注限制] {symbol} 開市頭 15 分鐘落注限 1 張 (原 {qty} 口已限制為 1 口)")
                 qty = 1
-                signal.contracts = 1
-                signal.split_lots = (0, 1, 0)
+
+        signal.contracts = qty
+        if qty == 1:
+            signal.split_lots = (0, 1, 0)
+        else:
+            engine_inst = self.engine_v93_mes if symbol == "MES" else self.engine_v93_mnq
+            signal.split_lots = engine_inst.calculate_tranches(qty)
 
         entry_p = self._round_to_tick(signal.entry_price, 0.25)
         raw_sl_p = self._round_to_tick(signal.sl_price, 0.25)
@@ -2491,7 +2545,10 @@ class LiveIBKRDualEngine:
                 self._last_eval_bucket[symbol] = cur_bucket
 
             engine_inst.pending_limit_order = None
-            sig, pending = engine_inst.evaluate_bar(last_idx, df, pool_usd, 0.5)
+            consec_losses = getattr(self, "_consecutive_losses_today", 0)
+            sig, pending = engine_inst.evaluate_bar(
+                last_idx, df, pool_usd, 0.5, consecutive_losses=consec_losses
+            )
             target_sig = sig or (pending.signal if pending else None)
             if target_sig:
                 if is_us_open_15m:
@@ -2872,6 +2929,14 @@ class LiveIBKRDualEngine:
         merged_for_pairing = self._merge_with_historical_trades(all_recent_trades)
         paired_trades = pair_executions_fifo(merged_for_pairing, fx_rate=fx)[:60]
 
+        try:
+            hkt_now_st = datetime.now(ZoneInfo("Asia/Hong_Kong"))
+        except Exception:
+            hkt_now_st = datetime.now()
+        hm_hkt_st = hkt_now_st.hour * 60 + hkt_now_st.minute
+        is_gw_st = (hm_hkt_st >= 1350 or hm_hkt_st < 240)
+        consec_losses_st = getattr(self, "_consecutive_losses_today", 0)
+
         status = {
             "mode": "DUAL_ENGINE_PARALLEL",
             "version": "v9.3 旗艦雙引擎整數自適應實盤版 (MES 60% + MNQ 40%)",
@@ -2888,6 +2953,20 @@ class LiveIBKRDualEngine:
             "market_schedule_open": not getattr(self, "market_paused", False),
             "market_schedule_status": "CLOSED" if getattr(self, "market_paused", False) else "OPEN",
             "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+
+            # 美股黃金窗口 (22:30–04:00 HKT) 與連輸風控狀態
+            "consecutive_losses_today": consec_losses_st,
+            "is_golden_window": is_gw_st,
+            "market_window_desc": (
+                "🔥 美股黃金窗口 (22:30–04:00 HKT - 集中火力常規注碼)"
+                if is_gw_st
+                else "🛡️ 非黃金窗口 (暫停歐盤/尾盤重倉 - 注碼減半)"
+            ),
+            "consecutive_loss_status": (
+                "⚠️ 連輸 >= 5 次 (強制限制 1 張)"
+                if consec_losses_st >= 5
+                else ("⚠️ 連輸 >= 3 次 (注碼強制減半)" if consec_losses_st >= 3 else "🟢 連輸風控正常 (常規注碼)")
+            ),
 
             # 市場行情數據流狀態
             "market_data_type": self.market_data_type,

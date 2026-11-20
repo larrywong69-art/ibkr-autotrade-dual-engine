@@ -529,10 +529,19 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
         if is_proxied:
             return False
 
-        # 6. 若來自純本機內部調用 (127.0.0.1 Direct)，自動信任放行
+        # 6. 安全內網與專用私網放行 (本機 127.0.0.1、Tailscale 100.64.0.0/10、LAN 192.168/10/172)
         client_ip = self.client_address[0]
-        if client_ip in ("127.0.0.1", "::1"):
+        if client_ip in ("127.0.0.1", "::1", "localhost"):
             return True
+        try:
+            import ipaddress
+            ip_obj = ipaddress.ip_address(client_ip)
+            # 信任 Tailscale CGNAT 私網 (100.64.0.0/10) 與 RFC1918 局域網
+            tailscale_net = ipaddress.ip_network("100.64.0.0/10")
+            if ip_obj in tailscale_net or ip_obj.is_private or ip_obj.is_loopback:
+                return True
+        except Exception:
+            pass
 
         return False
 

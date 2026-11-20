@@ -1394,15 +1394,15 @@ class TestProductionOptimizationsP0P2(unittest.TestCase):
         eng.on_exec_details(t, f)
         self.assertEqual(eng._consecutive_losses_today, 2)
 
-        # 3rd loss -> 60m cooldown
+        # 3rd loss -> 取消冷卻停開，保持 _daily_loss_circuit_until == 0.0，改為注碼減半
         eng._last_loss_event_ts = time.time() - 10.0
         t, f = _make_fill("e3", -40.0)
         eng.on_exec_details(t, f)
         self.assertEqual(eng._consecutive_losses_today, 3)
-        self.assertGreater(eng._daily_loss_circuit_until, time.time())
+        self.assertEqual(eng._daily_loss_circuit_until, 0.0)
         self.assertFalse(eng._daily_trading_halted)
 
-        # 4th and 5th loss -> daily halt
+        # 4th and 5th loss -> 取消當日停開限制，保持 _daily_trading_halted == False，連輸5次限制1張
         eng._last_loss_event_ts = time.time() - 10.0
         t, f = _make_fill("e4", -20.0)
         eng.on_exec_details(t, f)
@@ -1410,9 +1410,22 @@ class TestProductionOptimizationsP0P2(unittest.TestCase):
         t, f = _make_fill("e5", -25.0)
         eng.on_exec_details(t, f)
         self.assertEqual(eng._consecutive_losses_today, 5)
-        self.assertTrue(eng._daily_trading_halted)
+        self.assertFalse(eng._daily_trading_halted)
 
-        # Winning fill -> reset
+        # 驗證注碼規則：連輸 3 次減半、連輸 5 次限 1 張
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from strategies.v9_3_master_hybrid_live import get_live_order_lots
+        hkt_golden = datetime(2026, 11, 20, 23, 0, 0, tzinfo=ZoneInfo("Asia/Hong_Kong"))
+        # 基準：100000 淨值常規注碼為 7 口 (MES R1 階梯: 2/5/7/9)
+        lots_base, _ = get_live_order_lots("R1", "LONG", current_equity=100000.0, consecutive_losses=0, timestamp=hkt_golden)
+        lots_3loss, _ = get_live_order_lots("R1", "LONG", current_equity=100000.0, consecutive_losses=3, timestamp=hkt_golden)
+        lots_5loss, _ = get_live_order_lots("R1", "LONG", current_equity=100000.0, consecutive_losses=5, timestamp=hkt_golden)
+        self.assertEqual(lots_base, 7)
+        self.assertEqual(lots_3loss, 3)  # 7 // 2 = 3 口
+        self.assertEqual(lots_5loss, 1)  # 強制 1 張
+
+        # Winning fill -> 止盈則重算歸零
         t, f = _make_fill("e6", 100.0)
         eng.on_exec_details(t, f)
         self.assertEqual(eng._consecutive_losses_today, 0)
