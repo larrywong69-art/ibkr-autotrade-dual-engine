@@ -742,6 +742,16 @@ table.data-table tr:nth-child(even) {{
 
         date_str = report_data.get("report_date", datetime.now().strftime("%Y-%m-%d"))
 
+        # 若未提供完整的成交分錄，自動透過 DailyReportGenerator 補全當日數據
+        if not report_data.get("executions"):
+            try:
+                from report_and_incident_manager import DailyReportGenerator
+                _, _, full_report = DailyReportGenerator().generate_report(date_str, push_to_gdrive=False)
+                if full_report and isinstance(full_report, dict):
+                    report_data = full_report
+            except Exception as e:
+                logger.warning(f"自動補全 {date_str} 報告失敗: {e}")
+
         # 檢查是否已上傳且無需強制覆蓋
         existing_info = self.sync_index.get("dates", {}).get(date_str)
         if existing_info and not force_reupload:
