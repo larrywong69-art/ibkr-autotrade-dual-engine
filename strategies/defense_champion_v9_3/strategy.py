@@ -74,7 +74,7 @@ class StrategyEngineV93:
     """
     V9.3 旗艦雙引擎整數自適應實盤版策略引擎
     """
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, symbol: Optional[str] = None):
         if config_path and os.path.exists(config_path):
             with open(config_path, "r", encoding="utf-8") as f:
                 self.raw_cfg = json.load(f)
@@ -86,6 +86,7 @@ class StrategyEngineV93:
             else:
                 self.raw_cfg = V93_DEFAULT_CONFIG
 
+        self.symbol = symbol
         self.strategy_cfg = StrategyConfig()
         self.pending_limit_order: Optional[PendingLimitOrder] = None
 
@@ -244,10 +245,16 @@ class StrategyEngineV93:
         bh = float(row["box_high"])
         bl = float(row["box_low"])
 
+        # 時段識別與最小止損底限 (Min Stop-Loss Floor，防止 1-4 秒秒斬)
+        ts = df.index[bar_idx] if isinstance(df.index, pd.DatetimeIndex) else pd.Timestamp.now()
+        session_name = detect_market_session(ts)
+        is_mnq = (getattr(self, "symbol", None) == "MNQ" or close_p > 10000.0)
+        min_sl_dist = 18.0 if is_mnq else 4.0
+
         direction = None
         sig_type = None
         rule_code = None
-        sl_dist = atr * self.sl_atr
+        sl_dist = max(min_sl_dist, atr * self.sl_atr)
 
         # 規則 1：順勢斐波那契浪 3 回踩進場 (Wave-3 Trend Pullback)
         trend_up = (e20 > e50) and macro_long
@@ -257,27 +264,34 @@ class StrategyEngineV93:
             direction = Direction.LONG
             sig_type = SignalType.TREND_PULLBACK_WAVE3
             rule_code = "R1"
-            sl_dist = max(1.0, atr * self.sl_atr)
+            sl_dist = max(min_sl_dist, atr * self.sl_atr)
         elif ("R1" in self.allowed_rules) and trend_dn and (high_p >= e20 - 0.25 * atr) and (close_p < open_p) and (close_p < e20):
             direction = Direction.SHORT
             sig_type = SignalType.TREND_PULLBACK_WAVE3
             rule_code = "R1"
-            sl_dist = max(1.0, atr * self.sl_atr)
+            sl_dist = max(min_sl_dist, atr * self.sl_atr)
         else:
             box_height = bh - bl
-            # 規則 2：箱體邊界反彈 (Range Bounce) + 1H ADX <= 30 保護
+            # 規則 2：箱體邊界反彈 (Range Bounce) + 1H ADX <= 30 + 4H 宏觀趨勢濾網 + 歐盤波幅過濾
             if ("R2" in self.allowed_rules) and box_height >= 2.8 * atr:
                 if adx_1h_val <= self.r2_max_adx_filter:
-                    if low_p <= bl + 0.35 * atr and close_p > bl + 0.2 * atr and close_p > open_p:
-                        direction = Direction.LONG
-                        sig_type = SignalType.RANGE_BOUNCE
-                        rule_code = "R2"
-                        sl_dist = max(1.0, atr * self.r2_sl_atr)
-                    elif high_p >= bh - 0.35 * atr and close_p < bh - 0.2 * atr and close_p < open_p:
-                        direction = Direction.SHORT
-                        sig_type = SignalType.RANGE_BOUNCE
-                        rule_code = "R2"
-                        sl_dist = max(1.0, atr * self.r2_sl_atr)
+                    min_europe_atr = 15.0 if is_mnq else 3.0
+                    is_europe_chop = (session_name == "歐盤" and atr < min_europe_atr)
+                    if not is_europe_chop:
+                        if low_p <= bl + 0.35 * atr and close_p > bl + 0.2 * atr and close_p > open_p:
+                            # 4H 宏觀空頭趨勢下嚴禁逆勢做多摸底 (淘汰負期望值逆勢單)
+                            if not macro_short:
+                                direction = Direction.LONG
+                                sig_type = SignalType.RANGE_BOUNCE
+                                rule_code = "R2"
+                                sl_dist = max(min_sl_dist, atr * self.r2_sl_atr)
+                        elif high_p >= bh - 0.35 * atr and close_p < bh - 0.2 * atr and close_p < open_p:
+                            # 4H 宏觀多頭趨勢下嚴禁逆勢做空摸頂
+                            if not macro_long:
+                                direction = Direction.SHORT
+                                sig_type = SignalType.RANGE_BOUNCE
+                                rule_code = "R2"
+                                sl_dist = max(min_sl_dist, atr * self.r2_sl_atr)
 
         if direction is None or rule_code is None:
             return None, None

@@ -196,17 +196,17 @@ def classify_trade_strategy_rule(trade: Dict[str, Any]) -> str:
     combined = f"{strat} {reason} {ref} {symbol}"
 
     if any(k in combined for k in ["假突破", "微突破", "破位", "做空", "反轉", "RULE_3", "RULE 3", "SHORT", "SLD"]):
-        return "規則 3：假突破反轉 (頂 1 口)"
+        return "規則 3：微突破反轉 (頂 1 口)"
     elif any(k in combined for k in ["箱體", "5.0", "MNQ", "極端", "邊界", "動量", "RULE_2", "RULE 2", "BOUNCE", "EXTREME"]):
-        return "規則 2：箱體邊界反彈 (頂 1 口)"
+        return "規則 2：極端邊界反彈 (頂 1 口)"
     else:
-        return "規則 1：順勢波 3 回踩"
+        return "規則 1：順勢浪 3 回踩"
 
 
 def classify_trading_session(timestamp_str: str) -> str:
-    """分類所屬交易時段 (美盤 RTH / 歐盤倫敦 / 亞盤微盤 - 精確匹配回測報表截圖格式)"""
+    """分類所屬交易時段 (美盤 RTH / 歐盤倫敦 / 亞盤雪梨 - 精確匹配回測報表截圖格式)"""
     if not timestamp_str:
-        return "🌐 美盤 RTH (09:30-16:00 ET)"
+        return "🇺🇸 美盤 RTH (09:30-16:00 ET)"
     try:
         t_clean = timestamp_str.replace("T", " ")[:19]
         dt = datetime.strptime(t_clean, "%Y-%m-%d %H:%M:%S")
@@ -215,21 +215,21 @@ def classify_trading_session(timestamp_str: str) -> str:
         et_hour = (hkt_hour - 13.0) % 24.0
 
         if 9.5 <= et_hour < 16.0:
-            return "🌐 美盤 RTH (09:30-16:00 ET)"
+            return "🇺🇸 美盤 RTH (09:30-16:00 ET)"
         elif 2.0 <= et_hour < 9.5:
-            return "🌐 歐盤倫敦 (02:00-09:30 ET)"
+            return "🇪🇺 歐盤倫敦 (02:00-09:30 ET)"
         else:
-            return "🌐 亞盤微盤 (18:00-02:00 ET)"
+            return "🇦🇺 亞盤雪梨 (18:00-02:00 ET)"
     except Exception:
-        return "🌐 美盤 RTH (09:30-16:00 ET)"
+        return "🇺🇸 美盤 RTH (09:30-16:00 ET)"
 
 
 def compute_multidimensional_stats(trades: List[Dict[str, Any]], fx_rate: float = 7.78) -> Dict[str, Any]:
     """計算符合用戶指定格式的多維度統計 (進場規則、出場原因、交易時段)"""
     standard_rules = [
-        "規則 1：順勢波 3 回踩",
-        "規則 2：箱體邊界反彈 (頂 1 口)",
-        "規則 3：假突破反轉 (頂 1 口)",
+        "規則 1：順勢浪 3 回踩",
+        "規則 2：極端邊界反彈 (頂 1 口)",
+        "規則 3：微突破反轉 (頂 1 口)",
     ]
     standard_exit_reasons = [
         "🎯 第一止盈 (TP1 1.55R)",
@@ -244,9 +244,9 @@ def compute_multidimensional_stats(trades: List[Dict[str, Any]], fx_rate: float 
         "🔄 策略動態出場 (Dynamic Exit)",
     ]
     standard_sessions = [
-        "🌐 美盤 RTH (09:30-16:00 ET)",
-        "🌐 歐盤倫敦 (02:00-09:30 ET)",
-        "🌐 亞盤微盤 (18:00-02:00 ET)",
+        "🇺🇸 美盤 RTH (09:30-16:00 ET)",
+        "🇪🇺 歐盤倫敦 (02:00-09:30 ET)",
+        "🇦🇺 亞盤雪梨 (18:00-02:00 ET)",
     ]
 
     dim_buckets: Dict[str, List[Dict[str, Any]]] = {}
@@ -820,8 +820,8 @@ class GoogleSheetsSyncManager:
         dim_headers = [
             ("A16", "分析維度", 34),
             ("B16", "成交筆數", 14),
-            ("C16", "勝率 (Win%)", 14),
-            ("D16", "累計貢獻淨利", 22)
+            ("C16", "勝率(Win%)", 14),
+            ("D16", "累計折算淨利", 22)
         ]
         ws1.row_dimensions[16].height = 26
         for coord, text, width in dim_headers:
@@ -1145,6 +1145,13 @@ class GoogleSheetsSyncManager:
                     return True
                 else:
                     logger.warning(f"Webhook 回傳非預期狀態: {res_body}")
+        except urllib.error.HTTPError as he:
+            err_body = ""
+            try:
+                err_body = he.read().decode("utf-8")[:300]
+            except Exception:
+                pass
+            logger.warning(f"Webhook 連線推送失敗: HTTP Error {he.code}: {he.reason} (詳情: {err_body})")
         except Exception as e:
             logger.warning(f"Webhook 連線推送失敗: {e}")
         return False

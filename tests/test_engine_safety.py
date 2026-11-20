@@ -20,6 +20,8 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from live_ibkr_dual_engine import LiveIBKRDualEngine, _IBKRWrapperNoiseFilter, Direction
+from mes_strategy.strategy_models import TradeSignal, SignalType
+from strategies.defense_champion_v9_3.strategy import StrategyEngineV93
 from report_and_incident_manager import IncidentManager
 from daily_auto_audit_fixer import DailyAutoAuditFixer
 
@@ -1146,6 +1148,325 @@ class TestDailyAutoAuditFixer(unittest.TestCase):
         self.assertEqual(len(placed), 1)
         self.assertEqual(placed[0][0], "MES")
         self.assertEqual(str(placed[0][1].direction).upper().endswith("SHORT"), True)
+
+
+class TestProductionOptimizationsP0P2(unittest.TestCase):
+    def test_p0_mnq_stop_loss_harmonization(self):
+        eng = object.__new__(LiveIBKRDualEngine)
+        eng.contract_mnq = SimpleNamespace(symbol="MNQ")
+        eng.contract_mes = SimpleNamespace(symbol="MES")
+        eng.incident_mgr = MagicMock()
+        eng.engine_v93_mes = MagicMock()
+        eng.engine_v93_mnq = MagicMock()
+        eng.ib = MagicMock()
+        eng.ib.isConnected = lambda: True
+        eng._last_protect_ts = {}
+        eng._stop_breach_first_seen = {}
+        eng._last_soft_stop_ts = {}
+        eng._warned_uncancellable_ids = set()
+        eng._cancel_attempt_ts = {}
+        eng._round_to_tick = LiveIBKRDualEngine._round_to_tick
+
+        # 2 MNQ child stops with 27 pts spread (21000.25 vs 20973.25)
+        sl1 = _make_trade(101, "MNQ", "STP", "SELL", 1, 21000.25, "_SL_TP1")
+        sl2 = _make_trade(102, "MNQ", "STP", "SELL", 1, 20973.25, "_SL_TP2")
+        eng.get_real_positions = lambda: (None, {"contracts": 2, "direction": "LONG", "entry_price": 21000.0, "current_price": 21050.0})
+        eng._get_symbol_open_trades = lambda sym: [sl1, sl2] if sym == "MNQ" else []
+        eng._active_trade_meta = {"MNQ": {"direction": "LONG", "current_sl": 21000.25, "be_active": True}}
+
+        eng.ensure_position_protection()
+
+        # Must record incident 7011 for harmonization
+        rec_calls = eng.incident_mgr.record_incident.call_args_list
+        has_7011 = any(c.kwargs.get("code") == 7011 for c in rec_calls)
+        self.assertTrue(has_7011, "Incident 7011 should be recorded for stop loss harmonization")
+
+        # Order 102 should be updated to target_sl (21000.25)
+        self.assertEqual(sl2.order.auxPrice, 21000.25)
+
+    def test_p0_bracket_pre_order_min_sl_floor(self):
+        eng = object.__new__(LiveIBKRDualEngine)
+        eng.ib = MagicMock()
+        eng.ib.isConnected = lambda: True
+        eng.contract_mnq = SimpleNamespace(symbol="MNQ")
+        eng._apply_live_margin_guard = lambda *a: True
+        eng.engine_v93_mnq = StrategyEngineV93(symbol="MNQ")
+        eng._active_trade_meta = {}
+        eng._order_rules = {}
+        eng._order_kinds = {}
+        eng._order_exit_reasons = {}
+        eng._round_to_tick = LiveIBKRDualEngine._round_to_tick
+
+        bracket_mock = [MagicMock(orderId=1), MagicMock(orderId=2), MagicMock(orderId=3)]
+        eng._build_single_bracket = MagicMock(return_value=bracket_mock)
+
+        # Signal with narrow stop of only 5 pts on MNQ (less than 18.0 pts floor)
+        sig = SimpleNamespace(
+            direction=Direction.LONG,
+            signal_type=SignalType.TREND_PULLBACK_WAVE3,
+            entry_price=21000.0,
+            sl_price=20995.0,
+            tp1_price=21020.0,
+            tp2_price=21050.0,
+            contracts=1,
+            rule_code="R1"
+        )
+
+        eng.place_v93_bracket_order("MNQ", sig)
+
+        meta = eng._active_trade_meta.get("MNQ")
+        self.assertIsNotNone(meta)
+        # Should be adjusted to 21000.0 - 18.0 = 20982.0
+        self.assertEqual(meta["init_sl"], 20982.0)
+        self.assertEqual(meta["current_sl"], 20982.0)
+
+    def test_p0_soft_stop_watchdog_does_not_prematurely_dump(self):
+        eng = object.__new__(LiveIBKRDualEngine)
+        eng.contract_mnq = SimpleNamespace(symbol="MNQ")
+        eng.contract_mes = SimpleNamespace(symbol="MES")
+        eng.incident_mgr = MagicMock()
+        eng.engine_v93_mes = MagicMock()
+        eng.engine_v93_mnq = MagicMock()
+        eng.ib = MagicMock()
+        eng.ib.isConnected = lambda: True
+        eng._last_protect_ts = {}
+        eng._stop_breach_first_seen = {}
+        eng._last_soft_stop_ts = {}
+        eng.emergency_flat_symbol = MagicMock()
+        eng._round_to_tick = LiveIBKRDualEngine._round_to_tick
+
+        # Long position: stop at 20973.0. Current market pulls back to 20990.0 (above stop)
+        sl1 = _make_trade(201, "MNQ", "STP", "SELL", 2, 20973.0, "_SL")
+        eng.get_real_positions = lambda: (None, {"contracts": 2, "direction": "LONG", "entry_price": 21000.0, "current_price": 20990.0})
+        eng._get_symbol_open_trades = lambda sym: [sl1] if sym == "MNQ" else []
+
+        eng.ensure_position_protection()
+        self.assertEqual(eng.emergency_flat_symbol.call_count, 0)
+
+        # Now simulate market dropping to 20970.0 (below 20973.0 - 1.00 tolerance) for > 5 seconds
+        eng.get_real_positions = lambda: (None, {"contracts": 2, "direction": "LONG", "entry_price": 21000.0, "current_price": 20970.0})
+        eng._stop_breach_first_seen["MNQ"] = time.time() - 6.0
+
+        eng.ensure_position_protection()
+        self.assertEqual(eng.emergency_flat_symbol.call_count, 1)
+        self.assertIn("軟體止蝕防穿倉保護", eng.emergency_flat_symbol.call_args[1].get("reason", ""))
+
+    def test_p0_eod_square_off(self):
+        eng = object.__new__(LiveIBKRDualEngine)
+        eng.ib = MagicMock()
+        eng.ib.isConnected = lambda: True
+        eng.incident_mgr = MagicMock()
+        eng.emergency_flat_symbol = MagicMock()
+        eng._get_symbol_open_trades = lambda sym: []
+        eng._eod_squared_today = False
+
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from unittest.mock import patch
+
+        # Wednesday 16:52 ET -> should square off
+        fake_wed_1652 = datetime(2026, 11, 18, 16, 52, 0, tzinfo=ZoneInfo("America/New_York"))
+        eng.get_real_positions = lambda: ({"contracts": 2}, {"contracts": 1})
+
+        with patch("live_ibkr_dual_engine.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_wed_1652
+            eng.check_eod_square_off()
+
+        self.assertEqual(eng.emergency_flat_symbol.call_count, 2)
+        flat_syms = [c[0][0] for c in eng.emergency_flat_symbol.call_args_list]
+        self.assertIn("MES", flat_syms)
+        self.assertIn("MNQ", flat_syms)
+        self.assertTrue(eng._eod_squared_today)
+
+        # Outside square off window (e.g. 15:00 ET) -> does not trigger
+        eng.emergency_flat_symbol.reset_mock()
+        eng._eod_squared_today = False
+        fake_wed_1500 = datetime(2026, 11, 18, 15, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+        with patch("live_ibkr_dual_engine.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_wed_1500
+            eng.check_eod_square_off()
+        self.assertEqual(eng.emergency_flat_symbol.call_count, 0)
+
+    def test_p1_us_open_shock_absorber(self):
+        eng = object.__new__(LiveIBKRDualEngine)
+        eng.net_liquidation = 100000.0
+        eng.market_data_status = "REAL_TIME"
+        eng.ib = MagicMock()
+        eng._can_query_hist_bar = lambda sym, ts: True
+
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from unittest.mock import patch
+
+        # 09:35 ET -> within shock absorber window (09:25 - 10:10 ET)
+        fake_open_time = datetime(2026, 11, 18, 9, 35, 0, tzinfo=ZoneInfo("America/New_York"))
+        with patch("live_ibkr_dual_engine.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_open_time
+            eng._evaluate_symbol_bar("MES", None, None, 60000.0, 4.5, None, [])
+
+        self.assertEqual(eng.ib.reqHistoricalData.call_count, 0)
+
+    def test_p1_consecutive_loss_circuit_breaker(self):
+        eng = object.__new__(LiveIBKRDualEngine)
+        eng.ledger_mgr = MagicMock()
+        eng.incident_mgr = MagicMock()
+        eng._consecutive_losses_today = 0
+        eng._daily_trading_halted = False
+        eng._daily_loss_circuit_until = 0.0
+        eng._last_loss_event_ts = 0.0
+        eng._active_trade_meta = {}
+        eng._order_kinds = {}
+        eng._order_rules = {}
+        eng._order_exit_reasons = {}
+        eng._notified_exec_ids = set()
+        eng.usd_hkd_rate = 7.78
+        eng.account_id = "DU12345"
+        eng._safe_float = LiveIBKRDualEngine._safe_float
+
+        def _make_fill(exec_id, pnl):
+            trade = MagicMock()
+            fill = SimpleNamespace(
+                contract=SimpleNamespace(symbol="MNQ", localSymbol="MNQZ6"),
+                commissionReport=SimpleNamespace(commission=1.5, realizedPNL=pnl),
+                execution=SimpleNamespace(
+                    execId=exec_id,
+                    orderId=1001,
+                    orderRef="V93_MNQ_SL",
+                    side="SLD",
+                    shares=1,
+                    price=21000.0,
+                    clientId=25,
+                    time="2026-11-18 10:00:00"
+                )
+            )
+            return trade, fill
+
+        # 1st loss
+        t, f = _make_fill("e1", -50.0)
+        eng.on_exec_details(t, f)
+        self.assertEqual(eng._consecutive_losses_today, 1)
+
+        # 2nd loss (advance timestamp)
+        eng._last_loss_event_ts = time.time() - 10.0
+        t, f = _make_fill("e2", -30.0)
+        eng.on_exec_details(t, f)
+        self.assertEqual(eng._consecutive_losses_today, 2)
+
+        # 3rd loss -> 60m cooldown
+        eng._last_loss_event_ts = time.time() - 10.0
+        t, f = _make_fill("e3", -40.0)
+        eng.on_exec_details(t, f)
+        self.assertEqual(eng._consecutive_losses_today, 3)
+        self.assertGreater(eng._daily_loss_circuit_until, time.time())
+        self.assertFalse(eng._daily_trading_halted)
+
+        # 4th and 5th loss -> daily halt
+        eng._last_loss_event_ts = time.time() - 10.0
+        t, f = _make_fill("e4", -20.0)
+        eng.on_exec_details(t, f)
+        eng._last_loss_event_ts = time.time() - 10.0
+        t, f = _make_fill("e5", -25.0)
+        eng.on_exec_details(t, f)
+        self.assertEqual(eng._consecutive_losses_today, 5)
+        self.assertTrue(eng._daily_trading_halted)
+
+        # Winning fill -> reset
+        t, f = _make_fill("e6", 100.0)
+        eng.on_exec_details(t, f)
+        self.assertEqual(eng._consecutive_losses_today, 0)
+
+    def test_p1_r2_macro_trend_and_europe_filters(self):
+        import pandas as pd
+        engine = StrategyEngineV93(symbol="MNQ")
+        dates = pd.date_range("2026-11-18 07:00", periods=50, freq="5min", tz="UTC")
+        df = pd.DataFrame({
+            "open": [21000.0] * 50,
+            "high": [21050.0] * 50,
+            "low": [20950.0] * 50,
+            "close": [21010.0] * 50,
+            "volume": [100] * 50,
+            "atr": [20.0] * 50,
+            "box_high": [21100.0] * 50,
+            "box_low": [20900.0] * 50,
+            "ema20": [21000.0] * 50,
+            "ema50": [21000.0] * 50,
+            "ema200_4h": [21200.0] * 50,
+            "ema20_4h": [21100.0] * 50,
+            "ema50_4h": [21150.0] * 50,
+            "close_4h": [21000.0] * 50,
+            "adx_1h": [15.0] * 50,
+        }, index=dates)
+
+        # In 4H downtrend (macro_short=True), R2 LONG must be blocked
+        df.loc[dates[-2], "low"] = 20900.0 + 0.1 * 20.0
+        df.loc[dates[-2], "close"] = 20900.0 + 0.3 * 20.0
+        df.loc[dates[-2], "open"] = 20900.0 + 0.2 * 20.0
+        df.loc[dates[-2], "ema20_4h"] = 20800.0
+        df.loc[dates[-2], "ema50_4h"] = 20900.0
+        df.loc[dates[-2], "close_4h"] = 20750.0
+
+        sig, _ = engine.evaluate_bar(len(df) - 2, df, 100000.0, 0.5)
+        self.assertIsNone(sig, "R2 Long should be blocked in 4H macro downtrend")
+
+    def test_p2_report_reconciliation_table(self):
+        from report_and_incident_manager import DailyReportGenerator
+        gen = DailyReportGenerator()
+        report_data = {
+            "report_date": "2026-11-19",
+            "generated_at": "2026-11-20 06:00:00",
+            "account_currency": "HKD",
+            "usd_hkd_rate": 7.78,
+            "equity_summary": {
+                "start_equity": 2000000.0,
+                "end_equity": 2010000.0,
+                "high_equity": 2015000.0,
+                "low_equity": 1995000.0,
+                "net_pnl": 10000.0,
+                "daily_return_pct": 0.5,
+                "intraday_drawdown_pct": 0.25,
+                "cash_balance": 1800000.0,
+                "available_funds": 1500000.0,
+                "margin_requirement": 300000.0,
+                "unrealized_pnl_usd": 0.0
+            },
+            "pnl_performance": {
+                "total_trades": 10,
+                "winning_trades": 6,
+                "losing_trades": 4,
+                "win_rate_pct": 60.0,
+                "gross_profit": 2000.0,
+                "gross_loss": -800.0,
+                "total_commission": 50.0,
+                "net_pnl": 1150.0,
+                "profit_factor": 2.5
+            },
+            "strategy_breakdown": {
+                "v43_mes": {
+                    "strategy_name": "V9.3 旗艦雙引擎整數自適應 (MES 60% 優先池)",
+                    "symbol": "MES",
+                    "trades_count": 6,
+                    "realized_pnl": 1200.0,
+                    "commission": 30.0,
+                    "net_pnl": 1170.0
+                },
+                "v50_mnq": {
+                    "strategy_name": "V9.3 旗艦雙引擎整數自適應 (MNQ 40% 防飢餓池)",
+                    "symbol": "MNQ",
+                    "trades_count": 4,
+                    "realized_pnl": 0.0,
+                    "commission": 20.0,
+                    "net_pnl": -20.0
+                }
+            },
+            "incident_audit": {"has_critical": False, "incidents": []},
+            "executions": []
+        }
+
+        md = gen._format_markdown_report(report_data)
+        self.assertIn("帳戶損益三欄對帳公式 (Three-Column PnL Reconciliation)", md)
+        self.assertIn("期貨已實現淨損益 (Realized Net PnL)", md)
+        self.assertIn("總結算淨權益變動 (Total Converted Net)", md)
+        self.assertIn("V9.3 旗艦雙引擎整數自適應 (MES 60% 優先池)", md)
 
 
 if __name__ == "__main__":

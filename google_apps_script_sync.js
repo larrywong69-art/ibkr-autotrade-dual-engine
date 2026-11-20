@@ -275,7 +275,7 @@ function doPost(e) {
 
             // 表頭 (Row 16) - 深藍背景 #1E293B，白字置中粗體
             var headRange = rSheet.getRange("A16:D16");
-            headRange.setValues([["分析維度", "成交筆數", "勝率 (Win%)", "累計貢獻淨利"]]);
+            headRange.setValues([["分析維度", "成交筆數", "勝率(Win%)", "累計折算淨利"]]);
             headRange.setBackground("#1E293B").setFontColor("#FFFFFF").setFontWeight("bold").setHorizontalAlignment("center");
 
             // 清除舊資料行 (Row 17 至 Row 50)

@@ -755,11 +755,28 @@ class DailyReportGenerator:
         mes_comm = sum(t.get("commission", 0.0) for t in mes_trades)
         mnq_comm = sum(t.get("commission", 0.0) for t in mnq_trades)
 
+        # 動態識別當前策略版本號 (預設 V9.3 旗艦雙引擎整數自適應實盤版)
+        mes_strat_name = "V9.3 旗艦雙引擎整數自適應 (MES 60% 優先池)"
+        mnq_strat_name = "V9.3 旗艦雙引擎整數自適應 (MNQ 40% 防飢餓池)"
+        if mes_trades:
+            latest_strat = str(mes_trades[-1].get("strategy", ""))
+            if "9.3" in latest_strat or "V93" in latest_strat.upper():
+                mes_strat_name = "V9.3 旗艦雙引擎整數自適應 (MES 60% 優先池)"
+            elif "9.1" in latest_strat:
+                mes_strat_name = "V9.1 雙引擎旗艦版 (MES 60% 優先池)"
+        if mnq_trades:
+            latest_strat = str(mnq_trades[-1].get("strategy", ""))
+            if "9.3" in latest_strat or "V93" in latest_strat.upper():
+                mnq_strat_name = "V9.3 旗艦雙引擎整數自適應 (MNQ 40% 防飢餓池)"
+            elif "9.1" in latest_strat:
+                mnq_strat_name = "V9.1 雙引擎旗艦版 (MNQ 40% 防飢餓池)"
+
         # 5. 構建報告結構資料
         report_data = {
             "report_date": target_date,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "account_currency": currency,
+            "usd_hkd_rate": 7.78,
             "equity_summary": {
                 "start_equity": round(start_equity, 2),
                 "end_equity": round(end_equity, 2),
@@ -770,7 +787,8 @@ class DailyReportGenerator:
                 "intraday_drawdown_pct": round(intraday_drawdown_pct, 2),
                 "cash_balance": round(cash_balance, 2),
                 "available_funds": round(available_funds, 2),
-                "margin_requirement": round(margin_req, 2)
+                "margin_requirement": round(margin_req, 2),
+                "unrealized_pnl_usd": 0.0
             },
             "pnl_performance": {
                 "total_trades": total_trades,
@@ -786,7 +804,7 @@ class DailyReportGenerator:
             },
             "strategy_breakdown": {
                 "v43_mes": {
-                    "strategy_name": "防守力冠軍策略 (v4.3)",
+                    "strategy_name": mes_strat_name,
                     "symbol": "MES",
                     "allocation_weight": "60%",
                     "trades_count": len(mes_trades),
@@ -795,7 +813,7 @@ class DailyReportGenerator:
                     "net_pnl": round(mes_pnl - mes_comm, 2)
                 },
                 "v50_mnq": {
-                    "strategy_name": "雙劍合璧防守冠軍 (v5.0 VWAP+60/25/15)",
+                    "strategy_name": mnq_strat_name,
                     "symbol": "MNQ",
                     "allocation_weight": "40%",
                     "trades_count": len(mnq_trades),
@@ -954,19 +972,25 @@ class DailyReportGenerator:
         target_date = data["report_date"]
         gen_time = data["generated_at"]
         curr = data["account_currency"]
+        fx_rate = float(data.get("usd_hkd_rate", 7.78) or 7.78)
         eq = data["equity_summary"]
         pnl = data["pnl_performance"]
         sb = data["strategy_breakdown"]
         inc = data["incident_audit"]
         trades = data["executions"]
 
+        usd_net_pnl = float(pnl.get("net_pnl", 0.0))
+        hkd_net_pnl = usd_net_pnl * fx_rate
+        unrealized_usd = float(eq.get("unrealized_pnl_usd", 0.0) or 0.0)
+        unrealized_hkd = unrealized_usd * fx_rate
+
         # 狀態標記
-        pnl_symbol = "+" if pnl["net_pnl"] >= 0 else ""
-        pnl_color = "🟢" if pnl["net_pnl"] >= 0 else "🔴"
+        pnl_symbol = "+" if usd_net_pnl >= 0 else ""
+        pnl_color = "🟢" if usd_net_pnl >= 0 else "🔴"
         audit_badge = "🟢 連線與交易完全正常"
-        if inc["has_critical"]:
+        if inc.get("has_critical", False):
             audit_badge = "🚨 嚴重警報 (包含 CRITICAL 事件)"
-        elif inc["has_error"]:
+        elif inc.get("has_error", False):
             audit_badge = "🟡 警告提示 (有連線或系統重試紀錄)"
 
         lines = [
@@ -974,7 +998,7 @@ class DailyReportGenerator:
             "",
             f"> [!NOTE]",
             f"> **結算週期**：{target_date} 美東期貨收盤結算（對應香港時間次日 06:00 AM）  ",
-            f"> **報告生成時間**：`{gen_time}` | **帳戶貨幣**：`{curr}` | **稽核狀態**：{audit_badge}",
+            f"> **報告生成時間**：`{gen_time}` | **帳戶貨幣**：`{curr}` | **基準匯率**：`USD/HKD = {fx_rate:.2f}` | **稽核狀態**：{audit_badge}",
         ]
 
         # 若已同步至 Google Drive，增加直接訪問快捷鏈結
@@ -996,12 +1020,20 @@ class DailyReportGenerator:
             "| :--- | :--- | :--- |",
             f"| **期初淨值 (Start Equity)** | `{curr} {eq['start_equity']:,.2f}` | 交易日開盤淨值 |",
             f"| **期末淨值 (End Equity)** | `{curr} {eq['end_equity']:,.2f}` | 交易日收盤淨值 |",
-            f"| **當日淨損益 (Net PnL)** | **{pnl_color} `{curr} {pnl_symbol}{pnl['net_pnl']:,.2f}`** | 扣除所有佣金手續費後淨額 |",
+            f"| **當日期貨淨損益 (Net PnL)** | **{pnl_color} `USD ${pnl_symbol}{usd_net_pnl:,.2f}` (折合 `{curr} {pnl_symbol}{hkd_net_pnl:,.2f}`)** | 扣除佣金後淨額 (@ {fx_rate:.2f}) |",
             f"| **當日收益率 (Daily Return)** | `{pnl_symbol}{eq['daily_return_pct']:.2f}%` | 淨值變動百分比 |",
             f"| **日內高點 / 低點** | `{curr} {eq['high_equity']:,.2f}` / `{curr} {eq['low_equity']:,.2f}` | 當日最高/最低權益 |",
             f"| **日內最大回撤 (Intraday Drawdown)** | `{eq['intraday_drawdown_pct']:.2f}%` | 盤中權益峰值回撤 |",
             f"| **現有可用資金 (Available Funds)** | `{curr} {eq['available_funds']:,.2f}` | 可用於開倉保證金餘額 |",
             f"| **已用保證金 (Margin Req)** | `{curr} {eq['margin_requirement']:,.2f}` | 當前持倉保證金佔用 |",
+            "",
+            "### ⚖️ 帳戶損益三欄對帳公式 (Three-Column PnL Reconciliation)",
+            "",
+            "| 對帳維度 | 美元金額 (USD) | 基準匯率 (USD/HKD) | 折合港幣金額 (HKD) | 狀態與說明 |",
+            "| :--- | :---: | :---: | :---: | :--- |",
+            f"| **期貨已實現淨損益 (Realized Net PnL)** | `USD ${usd_net_pnl:,.2f}` | `{fx_rate:.2f}` | `HKD ${hkd_net_pnl:,.2f}` | 芝商所期貨實單當日已結算淨值 |",
+            f"| **持倉未實現浮動損益 (Unrealized PnL)** | `USD ${unrealized_usd:,.2f}` | `{fx_rate:.2f}` | `HKD ${unrealized_hkd:,.2f}` | 每日收盤前已清倉 (留倉浮動為 0.00) |",
+            f"| **總結算淨權益變動 (Total Converted Net)** | **`USD ${usd_net_pnl:,.2f}`** | **`{fx_rate:.2f}`** | **`HKD ${hkd_net_pnl:,.2f}`** | 對齊 IBKR 港幣主帳戶總額變動 |",
             "",
             "---",
             "",
@@ -1009,11 +1041,11 @@ class DailyReportGenerator:
             "",
             "| 統計指標 | 數值 | 統計指標 | 數值 |",
             "| :--- | :--- | :--- | :--- |",
-            f"| **總成交筆數** | `{pnl['total_trades']} 筆` | **勝率 (Win Rate)** | `{pnl['win_rate_pct']:.2f}%` |",
-            f"| **獲利平倉筆數** | `{pnl['win_count']} 筆` | **虧損平倉筆數** | `{pnl['loss_count']} 筆` |",
+            f"| **總成交筆數** | `{pnl.get('total_trades', 0)} 筆` | **勝率 (Win Rate)** | `{pnl.get('win_rate_pct', 0.0):.2f}%` |",
+            f"| **獲利平倉筆數** | `{pnl.get('win_count', pnl.get('winning_trades', 0))} 筆` | **虧損平倉筆數** | `{pnl.get('loss_count', pnl.get('losing_trades', 0))} 筆` |",
             f"| **毛獲利 (Gross Profit)** | `USD ${sum(t.get('realized_pnl', 0.0) for t in trades if t.get('realized_pnl', 0.0) > 0):,.2f}` | **毛虧損 (Gross Loss)** | `USD ${abs(sum(t.get('realized_pnl', 0.0) for t in trades if t.get('realized_pnl', 0.0) < 0)):,.2f}` |",
-            f"| **獲利因子 (Profit Factor)** | `{pnl['profit_factor']:.2f}` | **手續費總額 (Commissions)** | `USD ${pnl['total_commission']:,.2f}` |",
-            f"| **平均單筆盈利** | `USD ${pnl['avg_win']:,.2f}` | **平均單筆虧損** | `USD ${pnl['avg_loss']:,.2f}` |",
+            f"| **獲利因子 (Profit Factor)** | `{pnl.get('profit_factor', 0.0):.2f}` | **手續費總額 (Commissions)** | `USD ${pnl.get('total_commission', 0.0):.2f}` |",
+            f"| **平均單筆盈利** | `USD ${pnl.get('avg_win', 0.0):.2f}` | **平均單筆虧損** | `USD ${pnl.get('avg_loss', 0.0):.2f}` |",
             "",
             "---",
             "",
@@ -1021,22 +1053,22 @@ class DailyReportGenerator:
             "",
             "雙策略 6:4 資金分配執行成效與合約明細：",
             "",
-            "| 策略模組 | 交易標的 | 資金配額 | 成交筆數 | 實現損益 (USD) | 佣金 (USD) | 淨收益 (USD) |",
-            "| :--- | :--- | :---: | :---: | :---: | :---: | :---: |",
-            f"| **V4.3 防守力冠軍** | `MES (微型標普)` | `60% (優先開火)` | `{sb['v43_mes']['trades_count']}` | `${sb['v43_mes']['realized_pnl']:,.2f}` | `${sb['v43_mes']['commission']:,.2f}` | **`${sb['v43_mes']['net_pnl']:,.2f}`** |",
-            f"| **V5.0 雙劍合璧版** | `MNQ (微型納指)` | `40% (防飢餓约束)` | `{sb['v50_mnq']['trades_count']}` | `${sb['v50_mnq']['realized_pnl']:,.2f}` | `${sb['v50_mnq']['commission']:,.2f}` | **`${sb['v50_mnq']['net_pnl']:,.2f}`** |",
+            "| 策略模組 | 交易標的 | 資金配額 | 成交筆數 | 實現損益 (USD) | 佣金 (USD) | 淨收益 (USD) | 折合港幣 (HKD) |",
+            "| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
+            f"| **{sb['v43_mes'].get('strategy_name', 'V9.3 MES 策略')}** | `MES (微型標普)` | `60% (優先開火)` | `{sb['v43_mes']['trades_count']}` | `${sb['v43_mes']['realized_pnl']:,.2f}` | `${sb['v43_mes']['commission']:,.2f}` | **`${sb['v43_mes']['net_pnl']:,.2f}`** | `HKD ${sb['v43_mes']['net_pnl'] * fx_rate:,.2f}` |",
+            f"| **{sb['v50_mnq'].get('strategy_name', 'V9.3 MNQ 策略')}** | `MNQ (微型納指)` | `40% (防飢餓約束)` | `{sb['v50_mnq']['trades_count']}` | `${sb['v50_mnq']['realized_pnl']:,.2f}` | `${sb['v50_mnq']['commission']:,.2f}` | **`${sb['v50_mnq']['net_pnl']:,.2f}`** | `HKD ${sb['v50_mnq']['net_pnl'] * fx_rate:,.2f}` |",
             "",
             "---",
             "",
             "## 🛡️ 4. 連線與交易異常稽核日誌 (Incident & Audit Log)",
             "",
-            f"- **當日異常總數**：`{inc['total_count']} 筆`",
-            f"- **嚴重程度分佈**：`INFO: {inc['by_severity'].get('INFO', 0)}` | `WARNING: {inc['by_severity'].get('WARNING', 0)}` | `ERROR: {inc['by_severity'].get('ERROR', 0)}` | `CRITICAL: {inc['by_severity'].get('CRITICAL', 0)}`",
+            f"- **當日異常總數**：`{inc.get('total_count', len(inc.get('incidents', [])))} 筆`",
+            f"- **嚴重程度分佈**：`INFO: {inc.get('by_severity', {}).get('INFO', 0)}` | `WARNING: {inc.get('by_severity', {}).get('WARNING', 0)}` | `ERROR: {inc.get('by_severity', {}).get('ERROR', 0)}` | `CRITICAL: {inc.get('by_severity', {}).get('CRITICAL', 0)}`",
             f"- **類別統計**：{json.dumps(inc.get('by_category', {}), ensure_ascii=False)}",
             ""
         ])
 
-        if inc["total_count"] == 0:
+        if inc.get("total_count", len(inc.get("incidents", []))) == 0:
             lines.extend([
                 "> [!TIP]",
                 "> **全日運作順暢**：當日無任何斷線、拒單或保證金衝突事件。"

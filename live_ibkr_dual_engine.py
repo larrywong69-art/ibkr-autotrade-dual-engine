@@ -32,7 +32,7 @@ import time
 import json
 import math
 import logging
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from zoneinfo import ZoneInfo
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -289,8 +289,8 @@ class LiveIBKRDualEngine:
     def __init__(self, check_interval_sec: float = 2.0):
         self.interval = check_interval_sec
         # 旗艦 V9.3 策略引擎實例 (MES 享有 60% 優先池，MNQ 享有 40% 防飢餓池)
-        self.engine_v93_mes = StrategyEngineV93(CONFIG_V93)
-        self.engine_v93_mnq = StrategyEngineV93(CONFIG_V93)
+        self.engine_v93_mes = StrategyEngineV93(CONFIG_V93, symbol="MES")
+        self.engine_v93_mnq = StrategyEngineV93(CONFIG_V93, symbol="MNQ")
         # 向下相容別名，確保原有調用與 API 無縫銜接
         self.engine_v91_mes = self.engine_v93_mes
         self.engine_v91_mnq = self.engine_v93_mnq
@@ -302,6 +302,14 @@ class LiveIBKRDualEngine:
         self.currency: str = "HKD"
         self.usd_hkd_rate: float = 7.78
         self.is_connected = False
+
+        # 連輸熔斷與避震冷卻控制
+        self._consecutive_losses_today: int = 0
+        self._daily_loss_circuit_until: float = 0.0
+        self._daily_trading_halted: bool = False
+        self._last_circuit_reset_day: str = ""
+        self._last_shock_absorber_log_ts: Dict[str, float] = {}
+        self._eod_squared_today: bool = False
 
         # 4H 宏觀趨勢濾網快取 (4H_LOCK: 15 分鐘動態更新)
         self.macro_cache_mes: Dict[str, Any] = {"ts": 0.0, "long": True, "short": False, "e20": 0.0, "e50": 0.0, "e200": 0.0, "c": 0.0}
@@ -411,7 +419,14 @@ class LiveIBKRDualEngine:
             self.status_message = f"⚠️ 收到 IBKR 斷線代碼 {error_code}: {error_string}，自動重連守護啟動中..."
             logger.warning(self.status_message)
         elif error_code in (1101, 1102):
-            logger.info(f"🟢 收到 IBKR 恢復代碼 {error_code}: {error_string}")
+            logger.info(f"🟢 收到 IBKR 恢復代碼 {error_code}: {error_string}，立即執行帳戶同步與持倉止損對帳補單...")
+            self.is_connected = True
+            self.is_reconnecting = False
+            try:
+                self.sync_account_and_market()
+                self.ensure_position_protection()
+            except Exception as se:
+                logger.warning(f"重連後對帳補單異常: {se}")
         elif error_code in (354, 10168):
             # 請求 Type 1 但目前工作階段尚未載入實時行情權限，自動降級至 Type 3 延遲行情避免無報價卡死
             logger.warning(f"⚠️ 收到 IBKR 代碼 {error_code} (實時報價尚未在當前工作階段生效)，自動切換至 Type 3 延遲行情守護模式。請重新登入/重啟 IB Gateway 載入最新 CME 實時權限。")
@@ -533,11 +548,11 @@ class LiveIBKRDualEngine:
                     entry_rule = self._active_trade_meta.get(sym, {}).get("rule_desc", "")
                 if not entry_rule:
                     if sym == "MNQ":
-                        entry_rule = "規則 2：箱體邊界反彈 (頂 1 口)"
+                        entry_rule = "規則 2：極端邊界反彈 (頂 1 口)"
                     elif side == "SLD" and not is_closing:
-                        entry_rule = "規則 3：假突破反轉 (頂 1 口)"
+                        entry_rule = "規則 3：微突破反轉 (頂 1 口)"
                     else:
-                        entry_rule = "規則 1：順勢波 3 回踩"
+                        entry_rule = "規則 1：順勢浪 3 回踩"
 
                 # 3. 出場原因
                 exit_reason = ""
@@ -598,6 +613,46 @@ class LiveIBKRDualEngine:
                         else:
                             pnl_val = 0.0
                     pnl_hkd_val = round(pnl_val * fx_rate, 2)
+
+                    # 連輸風控計數與熔斷監控 (5 秒防抖避免多梯次同單重複計次)
+                    now_exec_ts = time.time()
+                    if pnl_val < -0.01:
+                        last_loss_ts = getattr(self, "_last_loss_event_ts", 0.0)
+                        if (now_exec_ts - last_loss_ts) > 5.0:
+                            self._last_loss_event_ts = now_exec_ts
+                            self._consecutive_losses_today = getattr(self, "_consecutive_losses_today", 0) + 1
+                            logger.warning(
+                                f"⚠️ [連輸風控計數] 今日連續虧損: {self._consecutive_losses_today} 回合 (本次結算: USD ${pnl_val:.2f})"
+                            )
+                            if self._consecutive_losses_today >= 5:
+                                self._daily_trading_halted = True
+                                circuit_msg = f"🚨 [連輸當日熔斷 5002] 今日連續虧損達到 {self._consecutive_losses_today} 回合，啟動當日全面暫停開倉保護！"
+                                logger.critical(circuit_msg)
+                                self.incident_mgr.record_incident(
+                                    severity="CRITICAL",
+                                    category="RISK",
+                                    code=5002,
+                                    message=circuit_msg,
+                                    details={"consecutive_losses": self._consecutive_losses_today, "last_pnl": pnl_val},
+                                    source="CIRCUIT_BREAKER"
+                                )
+                            elif self._consecutive_losses_today >= 3:
+                                self._daily_loss_circuit_until = now_exec_ts + 3600.0
+                                circuit_msg = f"⏸️ [連輸避震冷卻 5001] 今日連續虧損達到 {self._consecutive_losses_today} 回合，啟動 60 分鐘暫停開倉冷卻保護！"
+                                logger.warning(circuit_msg)
+                                self.incident_mgr.record_incident(
+                                    severity="WARNING",
+                                    category="RISK",
+                                    code=5001,
+                                    message=circuit_msg,
+                                    details={"consecutive_losses": self._consecutive_losses_today, "cooldown_sec": 3600.0, "last_pnl": pnl_val},
+                                    source="CIRCUIT_BREAKER"
+                                )
+                    elif pnl_val > 0.01:
+                        if getattr(self, "_consecutive_losses_today", 0) > 0:
+                            logger.info(f"🟢 [連輸歸零] 獲利平倉 (+USD ${pnl_val:.2f})，今日連續虧損計數重設為 0")
+                            self._consecutive_losses_today = 0
+                            self._daily_loss_circuit_until = 0.0
 
                 # 6. 開倉保護目標
                 tp_target = None
@@ -1357,7 +1412,20 @@ class LiveIBKRDualEngine:
             return
 
         entry_p = self._round_to_tick(signal.entry_price, 0.25)
-        sl_p = self._round_to_tick(signal.sl_price, 0.25)
+        raw_sl_p = self._round_to_tick(signal.sl_price, 0.25)
+
+        # 下單前防呆校驗：統一止損基準與止損距離下限 (MNQ >= 18.0 pts, MES >= 4.0 pts，徹底消除 1-4 秒秒斬)
+        min_sl_dist = 18.0 if symbol == "MNQ" else 4.0
+        actual_dist = abs(entry_p - raw_sl_p)
+        if actual_dist < min_sl_dist:
+            sl_p = self._round_to_tick(
+                entry_p - min_sl_dist if signal.direction == Direction.LONG else entry_p + min_sl_dist,
+                0.25
+            )
+            logger.warning(f"🛡️ [{symbol} 止損下限校準] 原止損距 {actual_dist:.2f} 點小於下限 {min_sl_dist:.2f} 點，已強制校準為 {sl_p:.2f}")
+        else:
+            sl_p = raw_sl_p
+
         tp1_p = self._round_to_tick(signal.tp1_price, 0.25)
         tp2_p = self._round_to_tick(signal.tp2_price, 0.25)
         runner_calc = entry_p + 5.50 * abs(entry_p - sl_p) if signal.direction == Direction.LONG else entry_p - 5.50 * abs(entry_p - sl_p)
@@ -1371,25 +1439,26 @@ class LiveIBKRDualEngine:
 
         rule_code = getattr(signal, "rule_code", None)
         if rule_code == "R1":
-            rule_desc = "規則 1：順勢波 3 回踩"
+            rule_desc = "規則 1：順勢浪 3 回踩"
         elif rule_code == "R2":
-            rule_desc = "規則 2：箱體邊界反彈 (頂 1 口)"
+            rule_desc = "規則 2：極端邊界反彈 (頂 1 口)"
         elif rule_code == "R3":
-            rule_desc = "規則 3：假突破反轉 (頂 1 口)"
+            rule_desc = "規則 3：微突破反轉 (頂 1 口)"
         else:
             if symbol == "MNQ":
-                rule_desc = "規則 2：箱體邊界反彈 (頂 1 口)"
+                rule_desc = "規則 2：極端邊界反彈 (頂 1 口)"
             elif signal.direction == Direction.SHORT:
-                rule_desc = "規則 3：假突破反轉 (頂 1 口)"
+                rule_desc = "規則 3：微突破反轉 (頂 1 口)"
             else:
-                rule_desc = "規則 1：順勢波 3 回踩"
+                rule_desc = "規則 1：順勢浪 3 回踩"
 
         if hasattr(self, "_active_trade_meta"):
             self._active_trade_meta[symbol] = {
                 "direction": "LONG" if signal.direction == Direction.LONG else "SHORT",
                 "entry": entry_p,
                 "init_sl": sl_p,
-                "sl_dist": max(1.0, abs(entry_p - sl_p)),
+                "current_sl": sl_p,
+                "sl_dist": max(min_sl_dist, abs(entry_p - sl_p)),
                 "tp1": tp1_p,
                 "tp2": tp2_p,
                 "runner": runner_p,
@@ -1402,7 +1471,7 @@ class LiveIBKRDualEngine:
         prefix = f"V93_{symbol}"
         logger.info(
             f"🚀 [{prefix} 旗艦開火] 送出 {symbol} 分梯獨立 Bracket ({rule_desc}): {direction_action} {qty} 口 @ LMT {entry_p:.2f} | "
-            f"止蝕: {sl_p:.2f} (0.82x ATR) | TP1(1.55R): {tp1_p:.2f} ({cnt_a}口) | TP2(3.10R): {tp2_p:.2f} ({cnt_b}口) | Runner(5.50R): {runner_p:.2f} ({cnt_c}口)"
+            f"止蝕: {sl_p:.2f} (統一基準) | TP1(1.55R): {tp1_p:.2f} ({cnt_a}口) | TP2(3.10R): {tp2_p:.2f} ({cnt_b}口) | Runner(5.50R): {runner_p:.2f} ({cnt_c}口)"
         )
 
         tranche_specs = []
@@ -1741,16 +1810,69 @@ class LiveIBKRDualEngine:
                 except (TypeError, ValueError):
                     pass
 
+            # -----------------------------------------------------------------
+            # D-0. 止損價差自動修復 (Stop Loss Harmonization - 徹底修復 ~27 點價差 Bug)
+            # 當同一標的多張分批子單止損價出現異常分散 (> 0.50 pt for MES / > 1.00 pt for MNQ)
+            # 自動校準至統一基準價，防止同一筆交易不同口數在不同價位止損
+            # -----------------------------------------------------------------
+            max_allowed_spread = 0.50 if symbol == "MES" else 1.00
+            if len(sl_prices) > 1 and (max(sl_prices) - min(sl_prices)) > max_allowed_spread:
+                meta = getattr(self, "_active_trade_meta", {}).get(symbol, {})
+                target_sl = float(meta.get("current_sl") or 0.0)
+                if target_sl <= 0:
+                    if direction == "LONG":
+                        target_sl = max(sl_prices) if meta.get("be_active") else min(sl_prices)
+                    else:
+                        target_sl = min(sl_prices) if meta.get("be_active") else max(sl_prices)
+
+                # 確保 target_sl 相對於現價合理
+                cur_mkt = float(pos.get("current_price") or 0.0)
+                if cur_mkt > 0:
+                    if direction == "LONG":
+                        target_sl = min(target_sl, cur_mkt - max_allowed_spread)
+                    else:
+                        target_sl = max(target_sl, cur_mkt + max_allowed_spread)
+                target_sl = self._round_to_tick(target_sl, 0.25)
+
+                harmonized_count = 0
+                for t in (sl_trades or all_sl_trades):
+                    cur_ap = float(getattr(t.order, "auxPrice", 0.0) or 0.0)
+                    if abs(cur_ap - target_sl) >= 0.25:
+                        try:
+                            t.order.auxPrice = target_sl
+                            t.order.outsideRth = True
+                            t.order.transmit = True
+                            self.ib.placeOrder(contract, t.order)
+                            harmonized_count += 1
+                        except Exception as he:
+                            logger.warning(f"修復 {symbol} 止損價差失敗: {he}")
+
+                if harmonized_count > 0:
+                    logger.warning(
+                        f"🛡️ [止損價差修復] 發現 {symbol} 止損價差 ({max(sl_prices) - min(sl_prices):.2f} 點)，"
+                        f"已自動校準 {harmonized_count} 張子單至統一基準 {target_sl:.2f}"
+                    )
+                    self.incident_mgr.record_incident(
+                        severity="WARNING",
+                        category="TRADING",
+                        code=7011,
+                        message=f"止損價差修復: 已校準 {symbol} {harmonized_count} 張子單止損價至 {target_sl:.2f}",
+                        details={"symbol": symbol, "original_prices": sl_prices, "target_sl": target_sl},
+                        source="POSITION_GUARDIAN"
+                    )
+                    sl_prices = [target_sl] * len(sl_prices)
+
             cur_mkt = float(pos.get("current_price") or 0.0)
             breach_tol = 0.50 if symbol == "MES" else 1.00
             breached = False
             sl_trigger = 0.0
             if sl_prices and cur_mkt > 0:
                 if direction == "LONG":
-                    sl_trigger = max(sl_prices)
+                    # 軟體止蝕底線：以最深的原生止蝕價為基準，防止分梯保本單造成過早誤平
+                    sl_trigger = min(sl_prices)
                     breached = cur_mkt <= (sl_trigger - breach_tol)
                 else:
-                    sl_trigger = min(sl_prices)
+                    sl_trigger = max(sl_prices)
                     breached = cur_mkt >= (sl_trigger + breach_tol)
 
             if breached:
@@ -1807,18 +1929,33 @@ class LiveIBKRDualEngine:
                 continue
 
             atr = self._fetch_latest_atr(contract, fallback_atr)
-            sl_dist = max(1.0, atr * 0.82)
+            min_sl_dist = 18.0 if symbol == "MNQ" else 4.0
+            sl_dist = max(min_sl_dist, atr * 0.82)
             min_buf = max(0.50, atr * 0.25)
 
+            # 若有現存 SL 單或 meta current_sl，優先對齊現有基準，防止補掛產生價差
+            meta = getattr(self, "_active_trade_meta", {}).get(symbol, {})
+            existing_target_sl = None
+            if sl_prices:
+                existing_target_sl = sl_prices[0]
+            elif meta.get("current_sl"):
+                existing_target_sl = float(meta["current_sl"])
+
             if direction == "LONG":
-                raw_sl = (entry_p - sl_dist) if entry_p > 0 else (cur_p - sl_dist)
-                sl_p = self._round_to_tick(min(raw_sl, cur_p - min_buf), 0.25)
+                if existing_target_sl and existing_target_sl < cur_p:
+                    sl_p = existing_target_sl
+                else:
+                    raw_sl = (entry_p - sl_dist) if entry_p > 0 else (cur_p - sl_dist)
+                    sl_p = self._round_to_tick(min(raw_sl, cur_p - min_buf), 0.25)
                 raw_tp1 = max((entry_p if entry_p > 0 else cur_p) + sl_dist * 1.55, cur_p + 0.50)
                 raw_tp2 = max((entry_p if entry_p > 0 else cur_p) + sl_dist * 3.10, raw_tp1 + 0.50)
                 raw_run = max((entry_p if entry_p > 0 else cur_p) + sl_dist * 5.50, raw_tp2 + 0.50)
             else:
-                raw_sl = (entry_p + sl_dist) if entry_p > 0 else (cur_p + sl_dist)
-                sl_p = self._round_to_tick(max(raw_sl, cur_p + min_buf), 0.25)
+                if existing_target_sl and existing_target_sl > cur_p:
+                    sl_p = existing_target_sl
+                else:
+                    raw_sl = (entry_p + sl_dist) if entry_p > 0 else (cur_p + sl_dist)
+                    sl_p = self._round_to_tick(max(raw_sl, cur_p + min_buf), 0.25)
                 raw_tp1 = min((entry_p if entry_p > 0 else cur_p) - sl_dist * 1.55, cur_p - 0.50)
                 raw_tp2 = min((entry_p if entry_p > 0 else cur_p) - sl_dist * 3.10, raw_tp1 - 0.50)
                 raw_run = min((entry_p if entry_p > 0 else cur_p) - sl_dist * 5.50, raw_tp2 - 0.50)
@@ -1987,6 +2124,7 @@ class LiveIBKRDualEngine:
         meta["be_active"] = True
         if tp2_hit:
             meta["trailing_active"] = True
+        meta["current_sl"] = desired_sl
 
         modified_ids = []
         for t in sl_trades:
@@ -2137,6 +2275,50 @@ class LiveIBKRDualEngine:
         if getattr(self, "market_data_status", "REAL_TIME") == "COMPETING_SESSION":
             return
         now_ts = time.time()
+
+        # -----------------------------------------------------------------
+        # 1. 連輸風控熔斷檢查與跨日自動重設 (美東時間基準)
+        # -----------------------------------------------------------------
+        try:
+            et_now = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            et_now = datetime.now()
+
+        today_str = et_now.strftime("%Y-%m-%d")
+        if getattr(self, "_last_circuit_reset_day", "") != today_str:
+            self._last_circuit_reset_day = today_str
+            self._consecutive_losses_today = 0
+            self._daily_loss_circuit_until = 0.0
+            self._daily_trading_halted = False
+            logger.info(f"🔄 [每日風控重設] 新交易日 {today_str}，重設連續虧損計數與熔斷旗標")
+
+        if getattr(self, "_daily_trading_halted", False):
+            return
+
+        circuit_until = getattr(self, "_daily_loss_circuit_until", 0.0)
+        if now_ts < circuit_until:
+            remain = int(circuit_until - now_ts)
+            if (now_ts % 300.0) < 5.0:
+                logger.warning(f"⏸️ [連輸避震冷卻中] 今日連輸 {getattr(self, '_consecutive_losses_today', 0)} 筆，冷卻保護中 (剩餘 {remain // 60} 分鐘)")
+            return
+
+        # -----------------------------------------------------------------
+        # 2. 美盤開市避震鎖 (09:25–10:10 ET，自動處理夏令/冬令時)
+        # 美盤開市頭 40 分鐘為劇烈絞肉機洗盤時段，暫停新開倉以防秒斬
+        # -----------------------------------------------------------------
+        cur_et_time = et_now.time()
+        if dt_time(9, 25) <= cur_et_time <= dt_time(10, 10):
+            last_shock_log = getattr(self, "_last_shock_absorber_log_ts", {}).get(symbol, 0.0)
+            if now_ts - last_shock_log > 300.0:
+                if not hasattr(self, "_last_shock_absorber_log_ts"):
+                    self._last_shock_absorber_log_ts = {}
+                self._last_shock_absorber_log_ts[symbol] = now_ts
+                logger.info(
+                    f"🛡️ [美盤開市避震鎖] {symbol} 當前 ET 時間 {et_now.strftime('%H:%M:%S')} 處於美盤開市絞肉期 (09:25–10:10 ET)，"
+                    f"暫停新開倉以防秒斬磨損"
+                )
+            return
+
         if not self._can_query_hist_bar(symbol, now_ts):
             return
 
@@ -2660,6 +2842,80 @@ class LiveIBKRDualEngine:
 
         return True, "CME 開市交易中"
 
+    def check_eod_square_off(self):
+        """
+        CME 收市前自動清倉保護 (EOD Auto Square-Off)
+        - 平日 (週一至週四) 16:50 ET，週五 16:45 ET：
+        - 自動撤銷所有未成交之進場單 (防收市撮合殘單)
+        - 檢查是否有持倉 (MES / MNQ)，如有立即執行市價全平倉 (emergency_flat_symbol)
+        - 徹底根除收盤前斷線或休市導致之留倉過夜保證金暴增 (如 4 口凍結 14.4 萬 HKD) 及跳空開盤風險
+        """
+        if not self.ib or not self.ib.isConnected():
+            return
+
+        try:
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            now_et = datetime.now()
+
+        weekday = now_et.weekday()  # 0=Mon ... 4=Fri, 5=Sat, 6=Sun
+        cur_time = now_et.time()
+
+        # 平日 16:50-17:00 ET，週五 16:45-17:00 ET
+        is_square_off_window = False
+        if weekday in (0, 1, 2, 3):
+            if dt_time(16, 50) <= cur_time < dt_time(17, 0):
+                is_square_off_window = True
+        elif weekday == 4:  # 週五提前至 16:45 避開週末閉市前流動性枯竭
+            if dt_time(16, 45) <= cur_time < dt_time(17, 0):
+                is_square_off_window = True
+
+        if not is_square_off_window:
+            # 每日 18:00 開盤後重置清倉保護旗標
+            if getattr(self, "_eod_squared_today", False) and cur_time >= dt_time(18, 0):
+                self._eod_squared_today = False
+            return
+
+        if getattr(self, "_eod_squared_today", False):
+            return
+
+        logger.info(f"🛡️ [CME 收市前清倉保護] 觸發收市前保護機制 (當前 ET: {now_et.strftime('%H:%M:%S')})，開始撤單與全平倉...")
+
+        # 1. 撤銷所有未成交進場單
+        for sym in ("MES", "MNQ"):
+            trades = self._get_symbol_open_trades(sym)
+            for t in trades:
+                pid = int(getattr(t.order, "parentId", 0) or 0)
+                oref = str(getattr(t.order, "orderRef", "") or "")
+                otype = getattr(t.order, "orderType", "")
+                if pid == 0 and ("_ENTRY_" in oref or otype == "LMT"):
+                    self._cancel_trade_safely(t, sym, 7009, "CME 收市前自動撤銷未成交進場單")
+
+        # 2. 檢查持倉並市價全平
+        pos_mes, pos_mnq = self.get_real_positions()
+        did_flat = False
+        if pos_mes and int(pos_mes.get("contracts", 0)) > 0:
+            logger.warning(f"🛡️ [CME 收市前清倉] 平倉 MES {pos_mes.get('contracts')} 口")
+            self.emergency_flat_symbol("MES", reason="CME 收市前自動清倉保護 (防過夜跳空與保證金暴增)")
+            did_flat = True
+
+        if pos_mnq and int(pos_mnq.get("contracts", 0)) > 0:
+            logger.warning(f"🛡️ [CME 收市前清倉] 平倉 MNQ {pos_mnq.get('contracts')} 口")
+            self.emergency_flat_symbol("MNQ", reason="CME 收市前自動清倉保護 (防過夜跳空與保證金暴增)")
+            did_flat = True
+
+        self._eod_squared_today = True
+
+        if did_flat:
+            self.incident_mgr.record_incident(
+                severity="WARNING",
+                category="TRADING",
+                code=7010,
+                message="CME 收市前自動清倉保護已執行，已市價平倉所有隔夜部位避免跳空與保證金激增",
+                details={"time_et": now_et.strftime("%Y-%m-%d %H:%M:%S")},
+                source="EOD_GUARDIAN"
+            )
+
     def run_loop(self):
         """雙引擎主輪詢循環，具備 CME 休市自動暫停/開市自動連線與斷線重連守護"""
         logger.info("======================================================================")
@@ -2673,6 +2929,7 @@ class LiveIBKRDualEngine:
         while True:
             try:
                 self.check_controls()
+                self.check_eod_square_off()
 
                 # 0. CME (MES/MNQ) 開休市排程檢查：休市自動暫停並斷線，開市自動恢復連線
                 mkt_open, mkt_reason = self.is_cme_market_open()
