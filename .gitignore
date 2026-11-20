@@ -18,6 +18,9 @@ venv.bak/
 .env
 .env.*
 !.env.example
+.ssh_keys/
+*.id_ed25519*
+*ed25519*
 
 # IDE & OS files
 .DS_Store
@@ -53,3 +56,4 @@ backtest_*.png
 mes_trades_*.csv
 *.png
 
+remote_vm.sh

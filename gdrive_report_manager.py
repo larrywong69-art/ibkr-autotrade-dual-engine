@@ -519,10 +519,13 @@ table.data-table tr:nth-child(even) {{
             ])
             for ex in execs:
                 side_text = "買入 (BOT)" if ex.get("side") == "BOT" else "賣出 (SLD)"
+                strategy_val = ex.get("strategy", "")
+                if not strategy_val or strategy_val in ["v4.3", "v5.0", "V4.3", "V5.0"]:
+                    strategy_val = "v9.1"
                 writer.writerow([
                     ex.get("timestamp", ""),
                     ex.get("symbol", ""),
-                    ex.get("strategy", ""),
+                    strategy_val,
                     side_text,
                     ex.get("shares", 0.0),
                     ex.get("price", 0.0),
@@ -714,12 +717,18 @@ table.data-table tr:nth-child(even) {{
     # --------------------------------------------------------------------------
     # 4. 核心上傳與推播動作 (Push Daily Report)
     # --------------------------------------------------------------------------
-    def push_daily_report(self, report_data: Dict[str, Any], force_reupload: bool = False) -> Dict[str, Any]:
+    def push_daily_report(
+        self,
+        report_data: Dict[str, Any],
+        force_reupload: bool = False,
+        only_trade_detail: bool = True
+    ) -> Dict[str, Any]:
         """
-        執行 Google Drive 推播：
-        1. 匯出 HTML 並上傳為 Google Doc / HTML 檢視檔
-        2. 匯出 CSV 並上傳為 Google Sheet / CSV 明細檔
-        3. 更新並同步累計追蹤總表
+        執行 Google Drive 每日推播與總表自動更新：
+        1. 匯出當日交易明細 CSV，統一命名格式為「{YYYY-MM-DD}交易明細.csv」。
+        2. 若 only_trade_detail=True（預設）：每日僅輸出上傳該交易明細檔案至 Google Drive，
+           避免資料夾產生冗餘 Google Doc 與額外追蹤表。
+        3. 同步觸發 GoogleSheetsSyncManager 自動更新「AutoTrade_交易紀錄與分析總表」與「AutoTrade_帳戶結餘表」。
         """
         date_str = report_data.get("report_date", datetime.now().strftime("%Y-%m-%d"))
 
@@ -756,52 +765,57 @@ table.data-table tr:nth-child(even) {{
                 self._run_gdrive_cmd(f'gdrive mutate trash {old_sheet}')
             logger.info(f"[{date_str}] 已自動清理舊有 Google Drive 檔案 (Doc: {old_doc}, Sheet: {old_sheet})")
 
-        # 1. 產生並上傳 Google Doc
-        html_content = self.generate_styled_html(report_data)
-        doc_filename = f"AutoTrade_每日交易結算與審計報告_{date_str}.html"
-        html_path = os.path.join(GDRIVE_TEMP_DIR, doc_filename)
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(html_content)
+        doc_id = ""
+        doc_url = ""
 
-        doc_id, doc_url, err_doc = self._upload_to_gdrive(html_path, "application/vnd.google-apps.document")
-        if doc_id:
-            logger.info(f"[Google Doc 上傳成功] ID={doc_id} URL={doc_url}")
-        else:
-            logger.error(f"[Google Doc 上傳失敗] Error={err_doc}")
+        # 1. 若非僅輸出明細模式，產生並上傳 Google Doc
+        if not only_trade_detail:
+            html_content = self.generate_styled_html(report_data)
+            doc_filename = f"AutoTrade_每日交易結算與審計報告_{date_str}.html"
+            html_path = os.path.join(GDRIVE_TEMP_DIR, doc_filename)
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html_content)
 
-        # 2. 產生並上傳 Google Sheet (當日明細)
-        csv_filename = f"AutoTrade_當日成交明細_{date_str}.csv"
+            doc_id, doc_url, err_doc = self._upload_to_gdrive(html_path, "application/vnd.google-apps.document")
+            if doc_id:
+                logger.info(f"[Google Doc 上傳成功] ID={doc_id} URL={doc_url}")
+            else:
+                logger.error(f"[Google Doc 上傳失敗] Error={err_doc}")
+
+        # 2. 產生並上傳 Google Sheet (當日交易明細，嚴格依照 {date_str}交易明細.csv 格式命名)
+        csv_filename = f"{date_str}交易明細.csv"
         csv_path = os.path.join(GDRIVE_TEMP_DIR, csv_filename)
         self.generate_executions_csv(report_data, csv_path)
 
         sheet_id, sheet_url, err_sheet = self._upload_to_gdrive(csv_path, "application/vnd.google-apps.spreadsheet")
         if sheet_id:
-            logger.info(f"[Google Sheet 上傳成功] ID={sheet_id} URL={sheet_url}")
+            logger.info(f"[Google Sheet 交易明細上傳成功] 檔名: {csv_filename} | ID={sheet_id} URL={sheet_url}")
         else:
-            logger.error(f"[Google Sheet 上傳失敗] Error={err_sheet}")
+            logger.error(f"[Google Sheet 交易明細上傳失敗] Error={err_sheet}")
 
         # 3. 更新並同步累計總表 (Master Tracking Sheet)
         master_csv_path = self.update_master_tracker_csv(report_data, doc_url=doc_url, sheet_url=sheet_url)
-        master_upload_csv = os.path.join(GDRIVE_TEMP_DIR, "AutoTrade_每日績效累計追蹤總表.csv")
-        try:
-            shutil.copyfile(master_csv_path, master_upload_csv)
-        except Exception:
-            master_upload_csv = master_csv_path
-
         master_sheet_id = self.sync_index.get("master_sheet_id", "")
         master_sheet_url = self.sync_index.get("master_sheet_url", "")
 
-        if not master_sheet_id:
-            master_sheet_id, master_sheet_url, _ = self._upload_to_gdrive(
-                master_upload_csv, "application/vnd.google-apps.spreadsheet"
-            )
-            if master_sheet_id:
-                self.sync_index["master_sheet_id"] = master_sheet_id
-                self.sync_index["master_sheet_url"] = master_sheet_url
-        else:
-            self._upload_to_gdrive(
-                master_upload_csv, "application/vnd.google-apps.spreadsheet", update_file_id=master_sheet_id
-            )
+        if not only_trade_detail:
+            master_upload_csv = os.path.join(GDRIVE_TEMP_DIR, "AutoTrade_每日績效累計追蹤總表.csv")
+            try:
+                shutil.copyfile(master_csv_path, master_upload_csv)
+            except Exception:
+                master_upload_csv = master_csv_path
+
+            if not master_sheet_id:
+                master_sheet_id, master_sheet_url, _ = self._upload_to_gdrive(
+                    master_upload_csv, "application/vnd.google-apps.spreadsheet"
+                )
+                if master_sheet_id:
+                    self.sync_index["master_sheet_id"] = master_sheet_id
+                    self.sync_index["master_sheet_url"] = master_sheet_url
+            else:
+                self._upload_to_gdrive(
+                    master_upload_csv, "application/vnd.google-apps.spreadsheet", update_file_id=master_sheet_id
+                )
 
         # 4. 更新同步索引
         self.sync_index.setdefault("dates", {})[date_str] = {
@@ -809,9 +823,20 @@ table.data-table tr:nth-child(even) {{
             "doc_id": doc_id,
             "doc_url": doc_url,
             "sheet_id": sheet_id,
-            "sheet_url": sheet_url
+            "sheet_url": sheet_url,
+            "filename": csv_filename
         }
         self._save_sync_index()
+
+        # 5. 自動觸發全量雙表分析與同步 (更新「AutoTrade_交易紀錄與分析總表」與「帳戶結餘表」)
+        sheets_sync_res = {}
+        try:
+            from google_sheets_sync_manager import GoogleSheetsSyncManager
+            sheets_mgr = GoogleSheetsSyncManager()
+            sheets_sync_res = sheets_mgr.sync_all()
+            logger.info(f"✨ [總表同步成功] 交易總表已完成全量更新: {sheets_sync_res.get('trade_ledger_url')}")
+        except Exception as se:
+            logger.warning(f"自動更新交易紀錄與分析總表失敗或跳過: {se}")
 
         return {
             "status": "ok",
@@ -820,10 +845,12 @@ table.data-table tr:nth-child(even) {{
             "doc_url": doc_url,
             "sheet_id": sheet_id,
             "sheet_url": sheet_url,
+            "csv_filename": csv_filename,
             "master_sheet_id": master_sheet_id,
             "master_sheet_url": master_sheet_url,
             "folder_url": self.folder_url,
-            "message": f"成功將 {date_str} 報告以文件與試算表格式推送到 Google Drive！"
+            "sheets_sync": sheets_sync_res,
+            "message": f"成功產出 {csv_filename} 並全量更新 Google Sheets 交易紀錄與分析總表！"
         }
 
     # --------------------------------------------------------------------------

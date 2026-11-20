@@ -415,7 +415,7 @@ class GoogleSheetsSyncManager:
     # 資料讀取器 (Data Loaders)
     # ==========================================================================
     def load_all_trades(self) -> List[Dict[str, Any]]:
-        """載入全部成交紀錄 (trades.jsonl + mes_paper_trade_log.csv 去重整合)"""
+        """載入全部成交紀錄 (trades.jsonl + 每日交易明細 CSV + mes_paper_trade_log.csv 去重整合)"""
         trades: List[Dict[str, Any]] = []
         seen_ids = set()
 
@@ -441,7 +441,58 @@ class GoogleSheetsSyncManager:
             except Exception as e:
                 logger.warning(f"讀取 trades.jsonl 失敗: {e}")
 
-        # 2. 補充 mes_paper_trade_log.csv
+        # 2. 補充讀取歷史每日交易明細 CSV (reports/gdrive_imports 與 reports/gdrive_exports)
+        import glob
+        candidate_csv_patterns = [
+            os.path.join(REPORTS_DIR, "gdrive_imports", "*交易明細*.csv"),
+            os.path.join(EXPORTS_DIR, "*交易明細*.csv"),
+        ]
+        for pat in candidate_csv_patterns:
+            for csv_path in sorted(glob.glob(pat)):
+                try:
+                    with open(csv_path, "r", encoding="utf-8-sig") as cf:
+                        in_execs = False
+                        headers = []
+                        for line in cf:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if "=== 逐筆官方成交審計分錄 ===" in line:
+                                in_execs = True
+                                continue
+                            if in_execs:
+                                parts = [p.strip() for p in line.split(",")]
+                                if not headers:
+                                    headers = parts
+                                else:
+                                    row = dict(zip(headers, parts))
+                                    eid = row.get("官方成交編號", "")
+                                    if eid and eid in seen_ids:
+                                        continue
+                                    if eid:
+                                        seen_ids.add(eid)
+                                    realized_pnl = float(row.get("實現損益(USD)", 0.0) or 0.0)
+                                    comm = float(row.get("佣金手續費(USD)", 0.0) or 0.0)
+                                    net_pnl = float(row.get("淨損益(USD)", realized_pnl - comm) or 0.0)
+                                    side_raw = row.get("買賣方向", "")
+                                    side = "BOT" if "BOT" in side_raw or "買" in side_raw else "SLD"
+                                    trades.append({
+                                        "timestamp": row.get("成交時間", ""),
+                                        "symbol": row.get("合約代號", "MES"),
+                                        "strategy": row.get("策略版本", "v9.1"),
+                                        "side": side,
+                                        "shares": float(row.get("合約張數", 1.0) or 1.0),
+                                        "price": float(row.get("成交價(USD)", 0.0) or 0.0),
+                                        "realized_pnl": realized_pnl,
+                                        "commission": comm,
+                                        "net_pnl": net_pnl,
+                                        "exec_id": eid,
+                                        "reason": "官方成交審計明細"
+                                    })
+                except Exception as ce:
+                    logger.debug(f"解析 {csv_path} 略過: {ce}")
+
+        # 3. 補充 mes_paper_trade_log.csv
         csv_file = os.path.join(CURRENT_DIR, "mes_paper_trade_log.csv")
         if os.path.exists(csv_file):
             try:
