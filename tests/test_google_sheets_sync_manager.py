@@ -187,16 +187,23 @@ class TestGoogleSheetsSyncManager(unittest.TestCase):
         self.assertGreaterEqual(len(ws1._charts), 1)
 
         ws2 = wb["詳細交易紀錄"]
-        # Verify 14 columns
-        self.assertEqual(ws2["A3"].value, "成交時間\n(Timestamp)")
-        self.assertEqual(ws2["H3"].value, "實現損益 (HKD)\n(Gross PnL)")
-        self.assertEqual(ws2["I3"].value, "手續費佣金 (HKD)\n(Commission)")
-        self.assertEqual(ws2["J3"].value, "淨損益 (HKD)\n(Net PnL)")
-        self.assertEqual(ws2["L3"].value, "出場原因/維度\n(Exit Reason)")
-        self.assertEqual(ws2["M3"].value, "所屬交易時段\n(Session)")
+        # 驗證 10 欄配對格式 (成交時間, 合約代號, 策略版本, 買賣方向, 合約張數, 開倉價(USD), 平倉價(USD), 實現損益(USD), 佣金手續費(USD), 淨損益(USD))
+        self.assertEqual(ws2["A3"].value, "成交時間")
+        self.assertEqual(ws2["B3"].value, "合約代號")
+        self.assertEqual(ws2["C3"].value, "策略版本")
+        self.assertEqual(ws2["D3"].value, "買賣方向")
+        self.assertEqual(ws2["E3"].value, "合約張數")
+        self.assertEqual(ws2["F3"].value, "開倉價(USD)")
+        self.assertEqual(ws2["G3"].value, "平倉價(USD)")
+        self.assertEqual(ws2["H3"].value, "實現損益(USD)")
+        self.assertEqual(ws2["I3"].value, "佣金手續費(USD)")
+        self.assertEqual(ws2["J3"].value, "淨損益(USD)")
 
-        # Verify first row data has Exit Reason populated
-        self.assertEqual(ws2["L4"].value, "🎯 第一止盈 (TP1 1.55R)")
+        # 驗證資料列有正確填入配對資料
+        self.assertIsNotNone(ws2["F4"].value)
+        self.assertIsNotNone(ws2["G4"].value)
+        self.assertIsNotNone(ws2["H4"].value)
+        self.assertIsNotNone(ws2["J4"].value)
 
 
 if __name__ == "__main__":

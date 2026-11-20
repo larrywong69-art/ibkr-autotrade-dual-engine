@@ -166,56 +166,58 @@ function doPost(e) {
         }
 
         // -----------------------------------------------------------------------
-        // (1) 更新分頁二【詳細交易紀錄】 (14 欄位，含 Exit Reason 及 HKD 損益)
+        // (1) 更新分頁二【詳細交易紀錄】 (10 欄位配對形式 Round-Trip Trades - USD)
         // -----------------------------------------------------------------------
         var lSheet = lApp.getSheetByName("詳細交易紀錄") || (lApp.getSheets().length > 1 ? lApp.getSheets()[1] : null);
         if (lSheet) {
           var lastLRow = lSheet.getLastRow();
+          var lastLCol = Math.max(14, lSheet.getLastColumn());
           if (lastLRow > 3) {
-            lSheet.getRange(4, 1, lastLRow - 3, 14).clearContent();
+            lSheet.getRange(4, 1, lastLRow - 3, lastLCol).clearContent();
           }
 
+          // 重新設定標題行 (Row 3) 為指定的 10 欄
+          var pairedHeaders = [
+            "成交時間", "合約代號", "策略版本", "買賣方向", "合約張數",
+            "開倉價(USD)", "平倉價(USD)", "實現損益(USD)", "佣金手續費(USD)", "淨損益(USD)"
+          ];
+          lSheet.getRange(3, 1, 1, 10).setValues([pairedHeaders]);
+          if (lastLCol > 10) {
+            lSheet.getRange(3, 11, 1, lastLCol - 10).clearContent();
+          }
+
+          var sourceTrades = payload.paired_trades || payload.trades || [];
           var tRows = [];
-          for (var j = 0; j < payload.trades.length; j++) {
-            var t = payload.trades[j];
-            var side = t.side || "";
-            var action = t.action || "";
-            if (!side && action) {
-              side = (t.direction && t.direction.indexOf("LONG") !== -1) ? "BOT" : "SLD";
+          for (var j = 0; j < sourceTrades.length; j++) {
+            var t = sourceTrades[j];
+            if (t.open_price !== undefined) {
+              tRows.push([
+                t.timestamp || "",
+                t.symbol || "MES",
+                t.strategy || "V9.3",
+                t.direction || "做多 (LONG)",
+                Number(t.contracts || 1),
+                Number(t.open_price || 0),
+                (typeof t.close_price === "number") ? Number(t.close_price) : (t.close_price || "持倉中"),
+                Number(t.realized_pnl || 0),
+                Number(t.commission || 0),
+                Number(t.net_pnl || 0)
+              ]);
             }
-            var sideText = (side === "BOT") ? "買入 (BOT)" : (side === "SLD" ? "賣出 (SLD)" : side);
-
-            var grossHkd = Number(t.gross_pnl_hkd !== undefined ? t.gross_pnl_hkd : (Number(t.realized_pnl || 0) * fxRate));
-            var commHkd = Number(t.commission_hkd !== undefined ? t.commission_hkd : (Number(t.commission || 0) * fxRate));
-            var netHkd = Number(t.net_pnl_hkd !== undefined ? t.net_pnl_hkd : (Number(t.net_pnl || 0) * fxRate));
-
-            tRows.push([
-              t.timestamp || "",
-              t.symbol || "MES",
-              t.strategy || "V4.3",
-              sideText,
-              action || (Number(t.net_pnl || 0) !== 0 ? "平倉" : "開倉"),
-              Number(t.shares || t.contracts || 1),
-              Number(t.price || t.entry_price || t.exit_price || 0),
-              grossHkd,
-              commHkd,
-              netHkd,
-              t.exec_id || t.trade_id || "",
-              t.exit_reason || "進場開倉 (Entry)",
-              t.session || "🌐 美盤 RTH (09:30-16:00 ET)",
-              t.reason || t.order_ref || ""
-            ]);
           }
 
           if (tRows.length > 0) {
-            var tRange = lSheet.getRange(4, 1, tRows.length, 14);
+            var tRange = lSheet.getRange(4, 1, tRows.length, 10);
             tRange.setValues(tRows);
             tradeCount = tRows.length;
 
-            // 格式化欄位
-            lSheet.getRange(4, 6, tRows.length, 1).setNumberFormat("#,##0");
-            lSheet.getRange(4, 7, tRows.length, 1).setNumberFormat("$#,##0.00");
-            lSheet.getRange(4, 8, tRows.length, 3).setNumberFormat('"HK$"#,##0.00;[Red]("HK$"#,##0.00);"HK$0.00"');
+            // 格式化欄位 (置中、千分位、美元金額)
+            lSheet.getRange(4, 1, tRows.length, 4).setHorizontalAlignment("center");
+            lSheet.getRange(4, 5, tRows.length, 1).setNumberFormat("#,##0").setHorizontalAlignment("right");
+            lSheet.getRange(4, 6, tRows.length, 2).setNumberFormat("$#,##0.00").setHorizontalAlignment("right");
+            lSheet.getRange(4, 8, tRows.length, 1).setNumberFormat('$#,##0.00;[Red]($#,##0.00);"$0.00"').setHorizontalAlignment("right");
+            lSheet.getRange(4, 9, tRows.length, 1).setNumberFormat('$#,##0.00;"$0.00"').setHorizontalAlignment("right");
+            lSheet.getRange(4, 10, tRows.length, 1).setNumberFormat('$#,##0.00;[Red]($#,##0.00);"$0.00"').setFontWeight("bold").setHorizontalAlignment("right");
           }
         }
 

@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import csv
+import math
 import logging
 import subprocess
 import shutil
@@ -222,6 +223,173 @@ def classify_trading_session(timestamp_str: str) -> str:
             return "🌏 亞盤盤前 (18:00-02:00 ET)"
     except Exception:
         return "🇺🇸 美盤 RTH (09:30-16:00 ET)"
+
+
+
+def generate_paired_round_trips(executions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """依標的採 FIFO 配對開倉與平倉成交，組成嚴格之一對配對交易分錄 (Round-Trip Trades)。
+    
+    橫向 10 欄輸出標準：
+    1. 成交時間 (timestamp)
+    2. 合約代號 (symbol)
+    3. 策略版本 (strategy)
+    4. 買賣方向 (direction: 做多 (LONG) / 做空 (SHORT))
+    5. 合約張數 (contracts)
+    6. 開倉價(USD) (open_price)
+    7. 平倉價(USD) (close_price)
+    8. 實現損益(USD) (realized_pnl)
+    9. 佣金手續費(USD) (commission)
+    10. 淨損益(USD) (net_pnl)
+    """
+    if not executions:
+        return []
+
+    # 若傳入的列表中已經包含完整的 round-trip 鍵值 (open_price 與 close_price)，直接回傳
+    if executions and "open_price" in executions[0] and "close_price" in executions[0]:
+        return executions
+
+    def _is_entry_trade(ex: Dict[str, Any]) -> bool:
+        ref = str(ex.get("order_ref") or "").upper()
+        act = str(ex.get("action") or "").upper()
+        pnl = float(ex.get("realized_pnl") or 0.0)
+        if "ENTRY" in ref or "OPEN" in act or "開倉" in act:
+            return True
+        if any(k in ref for k in ["SL_", "TP_", "BE_", "FLAT", "CLOSE", "EXIT", "TRAIL", "RUNNER_TRAIL"]):
+            return False
+        if abs(pnl) > 1e-6:
+            return False
+        return True
+
+    def _safe_num(val: Any, default: float = 0.0) -> float:
+        try:
+            f = float(val)
+            return f if math.isfinite(f) else default
+        except (TypeError, ValueError):
+            return default
+
+    ordered = sorted(
+        executions,
+        key=lambda x: (
+            str(x.get("timestamp") or ""),
+            0 if not _is_entry_trade(x) else 1,
+            str(x.get("exec_id") or ""),
+        ),
+    )
+
+    open_lots: Dict[str, List[Dict[str, Any]]] = {}
+    paired_rows: List[Dict[str, Any]] = []
+
+    for ex in ordered:
+        raw_sym = str(ex.get("symbol") or "").upper()
+        sym = "MNQ" if "MNQ" in raw_sym else ("MES" if "MES" in raw_sym else (raw_sym or "MES"))
+        side = str(ex.get("side") or "").upper()
+        if side not in ("BOT", "SLD"):
+            side = "BOT" if str(ex.get("direction") or "").upper() == "LONG" else "SLD"
+        dir_label = "做多 (LONG)" if side == "BOT" else "做空 (SHORT)"
+        qty = max(1, int(round(_safe_num(ex.get("contracts") or ex.get("shares") or 1, 1.0))))
+        price = _safe_num(ex.get("price") or ex.get("fill_price") or ex.get("entry_price") or ex.get("exit_price"), 0.0)
+        comm = _safe_num(ex.get("commission"), 0.0)
+        realized_raw = _safe_num(ex.get("realized_pnl"), 0.0)
+        ts = str(ex.get("timestamp") or "")
+        order_ref = str(ex.get("order_ref") or "")
+        strat = f"V9.3 {sym}" if "V93" in order_ref else ("V4.3" if sym == "MES" else "V5.0")
+        mult = 2.0 if sym == "MNQ" else 5.0
+        is_entry = _is_entry_trade(ex)
+
+        queue = open_lots.setdefault(sym, [])
+
+        if not is_entry:
+            # 平倉單：撮合隊列中的開倉單
+            remaining = float(qty)
+            while remaining > 1e-6 and queue and queue[0]["direction"] != dir_label:
+                lot = queue[0]
+                matched = min(remaining, lot["remaining_qty"])
+                matched_qty = int(round(matched)) if abs(matched - round(matched)) < 1e-6 else matched
+
+                open_p = lot["open_price"]
+                close_p = price
+                pts = (close_p - open_p) if lot["direction"] == "做多 (LONG)" else (open_p - close_p)
+                gross = round(pts * mult * matched, 2)
+
+                open_comm_part = round(lot["unit_comm"] * matched, 2)
+                close_comm_part = round((comm / qty) * matched, 2)
+                tot_comm = round(open_comm_part + close_comm_part, 2)
+                net = round(gross - tot_comm, 2)
+
+                paired_rows.append({
+                    "timestamp": ts,
+                    "symbol": sym,
+                    "strategy": strat,
+                    "direction": lot["direction"],
+                    "contracts": matched_qty,
+                    "open_price": round(open_p, 2),
+                    "close_price": round(close_p, 2),
+                    "realized_pnl": gross,
+                    "commission": tot_comm,
+                    "net_pnl": net,
+                    "status": "CLOSED"
+                })
+
+                lot["remaining_qty"] -= matched
+                remaining -= matched
+                if lot["remaining_qty"] <= 1e-6:
+                    queue.pop(0)
+
+            # 孤兒平倉單
+            if remaining > 1e-6:
+                rem_qty = int(round(remaining)) if abs(remaining - round(remaining)) < 1e-6 else remaining
+                orphan_net = round(realized_raw * (remaining / qty), 2)
+                paired_rows.append({
+                    "timestamp": ts,
+                    "symbol": sym,
+                    "strategy": strat,
+                    "direction": "做空 (SHORT)" if side == "BOT" else "做多 (LONG)",
+                    "contracts": rem_qty,
+                    "open_price": "-",
+                    "close_price": round(price, 2),
+                    "realized_pnl": orphan_net,
+                    "commission": round((comm / qty) * remaining, 2),
+                    "net_pnl": orphan_net,
+                    "status": "CLOSED"
+                })
+        else:
+            # 開倉單：清除反向過期殘留
+            while queue and queue[0]["direction"] != dir_label:
+                queue.pop(0)
+
+            unit_comm = comm / qty if qty > 0 else 0.0
+            queue.append({
+                "direction": dir_label,
+                "open_price": price,
+                "remaining_qty": float(qty),
+                "unit_comm": unit_comm,
+                "timestamp": ts,
+                "order_ref": order_ref,
+                "strategy": strat
+            })
+
+    # 殘留未平倉部位
+    for sym, q in open_lots.items():
+        for lot in q:
+            if lot["remaining_qty"] > 1e-6:
+                rem_qty = int(round(lot["remaining_qty"])) if abs(lot["remaining_qty"] - round(lot["remaining_qty"])) < 1e-6 else lot["remaining_qty"]
+                open_comm = round(lot["unit_comm"] * rem_qty, 2)
+                paired_rows.append({
+                    "timestamp": lot["timestamp"],
+                    "symbol": sym,
+                    "strategy": lot["strategy"],
+                    "direction": lot["direction"],
+                    "contracts": rem_qty,
+                    "open_price": round(lot["open_price"], 2),
+                    "close_price": "持倉中",
+                    "realized_pnl": 0.0,
+                    "commission": open_comm,
+                    "net_pnl": -open_comm,
+                    "status": "OPEN"
+                })
+
+    paired_rows.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
+    return paired_rows
 
 
 def compute_multidimensional_stats(trades: List[Dict[str, Any]], fx_rate: float = 7.78) -> Dict[str, Any]:
@@ -1013,73 +1181,50 @@ class GoogleSheetsSyncManager:
             ws1.add_chart(pie_chart, "N16")
 
         # ----------------------------------------------------------------------
-        # 分頁二：【詳細交易紀錄】 (14 欄精準審計流水，全面支援 HKD 計價與出場原因)
+        # 分頁二：【詳細交易紀錄】 (10 欄配對交易形式 Round-Trip Trades)
         # ----------------------------------------------------------------------
         ws2 = wb.create_sheet(title="詳細交易紀錄")
         ws2.views.sheetView[0].showGridLines = True
 
-        ws2.merge_cells("A1:N1")
+        ws2.merge_cells("A1:J1")
         t_ledger = ws2["A1"]
-        t_ledger.value = "📜 AutoTrade 逐筆官方成交審計分錄 (Execution Ledger - HKD)"
+        t_ledger.value = "📜 AutoTrade 配對交易紀錄審計總表 (Paired Round-Trip Trades - USD)"
         t_ledger.font = Font(name="Microsoft JhengHei", size=15, bold=True, color="1E3A8A")
         t_ledger.alignment = Alignment(horizontal="center", vertical="center")
         ws2.row_dimensions[1].height = 36
 
-        ws2.merge_cells("A2:N2")
+        ws2.merge_cells("A2:J2")
         sub_ledger = ws2["A2"]
-        sub_ledger.value = f"按時間順序排序 | 包含開平倉、成交價位、以港幣 (HKD) 計算之損益與佣金、出場原因及交易時段 | 更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        sub_ledger.value = f"依先進先出 (FIFO) 配對開平倉 | 橫向 10 欄一對格式 (含開平倉價、合約張數、以美元計價之損益與佣金) | 更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         sub_ledger.font = Font(name="Microsoft JhengHei", size=9, italic=True, color="64748B")
         sub_ledger.alignment = Alignment(horizontal="center", vertical="center")
         ws2.row_dimensions[2].height = 20
 
         ledger_headers = [
-            ("A3", "成交時間\n(Timestamp)", 20),
-            ("B3", "標的合約\n(Symbol)", 12),
-            ("C3", "策略版本\n(Strategy)", 14),
-            ("D3", "買賣方向\n(Side)", 14),
-            ("E3", "動作類型\n(Action)", 14),
-            ("F3", "成交口數\n(Contracts)", 13),
-            ("G3", "成交價\n(Price USD)", 14),
-            ("H3", "實現損益 (HKD)\n(Gross PnL)", 18),
-            ("I3", "手續費佣金 (HKD)\n(Commission)", 16),
-            ("J3", "淨損益 (HKD)\n(Net PnL)", 18),
-            ("K3", "官方成交編號\n(Execution ID)", 26),
-            ("L3", "出場原因/維度\n(Exit Reason)", 26),
-            ("M3", "所屬交易時段\n(Session)", 22),
-            ("N3", "備註信號\n(Order Ref / Notes)", 22),
+            ("A3", "成交時間", 22),
+            ("B3", "合約代號", 14),
+            ("C3", "策略版本", 16),
+            ("D3", "買賣方向", 16),
+            ("E3", "合約張數", 14),
+            ("F3", "開倉價(USD)", 16),
+            ("G3", "平倉價(USD)", 16),
+            ("H3", "實現損益(USD)", 18),
+            ("I3", "佣金手續費(USD)", 16),
+            ("J3", "淨損益(USD)", 18),
         ]
-        ws2.row_dimensions[3].height = 32
+        ws2.row_dimensions[3].height = 30
         for coord, text, width in ledger_headers:
             cell = ws2[coord]
             cell.value = text
             style_header_cell(cell, fill_color="1E3A8A")
             ws2.column_dimensions[coord[0]].width = width
 
+        paired_rows = generate_paired_round_trips(trades)
         start_r = 4
-        for idx, tr in enumerate(trades):
+        for idx, tr in enumerate(paired_rows):
             r = start_r + idx
             ws2.row_dimensions[r].height = 22
             is_even = (idx % 2 == 1)
-
-            pnl_usd = float(tr.get("net_pnl", 0.0))
-            gross_usd = float(tr.get("realized_pnl", 0.0))
-            comm_usd = float(tr.get("commission", 0.0))
-
-            gross_hkd = gross_usd * fx_rate
-            comm_hkd = comm_usd * fx_rate
-            net_hkd = pnl_usd * fx_rate
-
-            shares = float(tr.get("shares", 0.0) or tr.get("contracts", 1.0))
-            price = float(tr.get("price", 0.0) or tr.get("entry_price", 0.0) or tr.get("exit_price", 0.0))
-
-            side = tr.get("side", "")
-            action = tr.get("action", "")
-            if not side and action:
-                side = "BOT" if "LONG" in tr.get("direction", "") else "SLD"
-            side_text = "買入 (BOT)" if side == "BOT" else "賣出 (SLD)" if side == "SLD" else side
-
-            exit_reason = classify_trade_exit_reason(tr)
-            session_str = classify_trading_session(tr.get("timestamp", ""))
 
             c_time = ws2.cell(row=r, column=1, value=str(tr.get("timestamp", "")))
             style_data_cell(c_time, is_even, align="center")
@@ -1087,41 +1232,42 @@ class GoogleSheetsSyncManager:
             c_sym = ws2.cell(row=r, column=2, value=str(tr.get("symbol", "MES")))
             style_data_cell(c_sym, is_even, align="center", is_bold=True)
 
-            c_strat = ws2.cell(row=r, column=3, value=str(tr.get("strategy", "V4.3")))
+            c_strat = ws2.cell(row=r, column=3, value=str(tr.get("strategy", "V9.3")))
             style_data_cell(c_strat, is_even, align="center")
 
-            c_side = ws2.cell(row=r, column=4, value=side_text)
-            style_data_cell(c_side, is_even, align="center", is_bold=True)
+            c_dir = ws2.cell(row=r, column=4, value=str(tr.get("direction", "")))
+            style_data_cell(c_dir, is_even, align="center", is_bold=True)
 
-            c_act = ws2.cell(row=r, column=5, value=str(action or ("平倉" if pnl_usd != 0 else "開倉")))
-            style_data_cell(c_act, is_even, align="center")
+            c_qty = ws2.cell(row=r, column=5, value=tr.get("contracts", 1))
+            style_data_cell(c_qty, is_even, align="right", num_format="#,##0")
 
-            c_sh = ws2.cell(row=r, column=6, value=shares)
-            style_data_cell(c_sh, is_even, align="right", num_format="#,##0")
+            open_p_val = tr.get("open_price")
+            if isinstance(open_p_val, (int, float)):
+                c_open_p = ws2.cell(row=r, column=6, value=float(open_p_val))
+                style_data_cell(c_open_p, is_even, align="right", num_format="$#,##0.00")
+            else:
+                c_open_p = ws2.cell(row=r, column=6, value=str(open_p_val or "-"))
+                style_data_cell(c_open_p, is_even, align="center")
 
-            c_pr = ws2.cell(row=r, column=7, value=price)
-            style_data_cell(c_pr, is_even, align="right", num_format="$#,##0.00")
+            close_p_val = tr.get("close_price")
+            if isinstance(close_p_val, (int, float)):
+                c_close_p = ws2.cell(row=r, column=7, value=float(close_p_val))
+                style_data_cell(c_close_p, is_even, align="right", num_format="$#,##0.00")
+            else:
+                c_close_p = ws2.cell(row=r, column=7, value=str(close_p_val or "持倉中"))
+                style_data_cell(c_close_p, is_even, align="center")
 
-            c_gp = ws2.cell(row=r, column=8, value=gross_hkd)
-            style_data_cell(c_gp, is_even, align="right", num_format="\"HK$\"#,##0.00;[Red](\"HK$\"#,##0.00);\"HK$0.00\"", pnl_val=gross_hkd)
+            gross_usd = float(tr.get("realized_pnl", 0.0))
+            c_gross = ws2.cell(row=r, column=8, value=gross_usd)
+            style_data_cell(c_gross, is_even, align="right", num_format="$#,##0.00;[Red]($#,##0.00);\"$0.00\"", pnl_val=gross_usd)
 
-            c_cm = ws2.cell(row=r, column=9, value=comm_hkd)
-            style_data_cell(c_cm, is_even, align="right", num_format="\"HK$\"#,##0.00")
+            comm_usd = float(tr.get("commission", 0.0))
+            c_comm = ws2.cell(row=r, column=9, value=comm_usd)
+            style_data_cell(c_comm, is_even, align="right", num_format="$#,##0.00;\"$0.00\"")
 
-            c_np = ws2.cell(row=r, column=10, value=net_hkd)
-            style_data_cell(c_np, is_even, align="right", is_bold=True, num_format="\"HK$\"#,##0.00;[Red](\"HK$\"#,##0.00);\"HK$0.00\"", pnl_val=net_hkd)
-
-            c_ex = ws2.cell(row=r, column=11, value=str(tr.get("exec_id", tr.get("trade_id", ""))))
-            style_data_cell(c_ex, is_even, align="center")
-
-            c_exit = ws2.cell(row=r, column=12, value=exit_reason)
-            style_data_cell(c_exit, is_even, align="left")
-
-            c_sess = ws2.cell(row=r, column=13, value=session_str)
-            style_data_cell(c_sess, is_even, align="center")
-
-            c_rs = ws2.cell(row=r, column=14, value=str(tr.get("reason", tr.get("order_ref", ""))))
-            style_data_cell(c_rs, is_even, align="left")
+            net_usd = float(tr.get("net_pnl", 0.0))
+            c_net = ws2.cell(row=r, column=10, value=net_usd)
+            style_data_cell(c_net, is_even, align="right", is_bold=True, num_format="$#,##0.00;[Red]($#,##0.00);\"$0.00\"", pnl_val=net_usd)
 
         out_path = os.path.join(EXPORTS_DIR, "AutoTrade_交易紀錄與分析總表.xlsx")
         wb.save(out_path)
@@ -1167,11 +1313,15 @@ class GoogleSheetsSyncManager:
             t_copy["rule"] = classify_trade_strategy_rule(t)
             enriched_trades.append(t_copy)
 
+        # 生成 10 欄配對交易紀錄 (一對形式 Round-Trip Trades)
+        paired_trades = generate_paired_round_trips(trades)
+
         payload = {
             "balance_sheet_id": self.state.get("balance_sheet_id", "1aVh_vFGwxrcXckr4LNh-AWxwGzzav1KuY7uXCLqpFXI"),
             "trade_ledger_sheet_id": self.state.get("trade_ledger_sheet_id", "139yDV3lOdbF5fK4C00MQYh4MHG-gscBMx_f0RVu853c"),
             "balances": balances,
             "trades": enriched_trades,
+            "paired_trades": paired_trades,
             "stats": stats,
             "fx_rate": fx_rate,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
