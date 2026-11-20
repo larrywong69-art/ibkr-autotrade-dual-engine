@@ -113,6 +113,12 @@
             <span id="incident-count-badge" class="px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-500 text-[10px] font-bold">0</span>
           </button>
 
+          <!-- 安全授權 PIN 碼設定按鈕 -->
+          <button id="btn-pin-config" onclick="promptPinConfig()" class="px-2.5 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-400 border border-amber-500/30 text-xs font-bold transition-all flex items-center gap-1 active:scale-95 shadow-sm" title="設定遠端授權 PIN 碼（用於手動平倉與交易啟閉）">
+            <span>🔑</span>
+            <span>PIN 碼</span>
+          </button>
+
           <!-- 一鍵匯出最新成交與錯誤紀錄至 Google Drive / 本機下載 -->
           <button id="btn-export-diag-gdrive" onclick="exportDiagnosticsToGDrive(this)" class="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-400 border border-amber-500/30 text-xs font-bold transition-all flex items-center gap-1.5 active:scale-95 shadow-sm">
             <span>☁️</span>
@@ -580,21 +586,123 @@
     let v43TradingEnabled = true;
     let v50TradingEnabled = true;
 
+    // 0. 安全 PIN 碼授權管理 (支援公網/Tailscale 遠端操作)
+    function getAuthPin() {
+      return localStorage.getItem("autotrade_pin") || "LARRYAUTOTRADE";
+    }
+
+    function setAuthPin(pin) {
+      if (pin) {
+        localStorage.setItem("autotrade_pin", pin.trim());
+      } else {
+        localStorage.removeItem("autotrade_pin");
+      }
+      updatePinButtonUI();
+    }
+
+    function updatePinButtonUI() {
+      const btn = document.getElementById("btn-pin-config");
+      if (!btn) return;
+      const pin = localStorage.getItem("autotrade_pin") || "LARRYAUTOTRADE";
+      if (pin) {
+        btn.className = "px-2.5 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 text-xs font-bold transition-all flex items-center gap-1 active:scale-95 shadow-sm";
+        btn.innerHTML = '<span>🔒</span><span>PIN: 已就緒</span>';
+      } else {
+        btn.className = "px-2.5 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-400 border border-amber-500/30 text-xs font-bold transition-all flex items-center gap-1 active:scale-95 shadow-sm";
+        btn.innerHTML = '<span>🔑</span><span>PIN 碼</span>';
+      }
+    }
+
+    async function promptPinConfig() {
+      const current = localStorage.getItem("autotrade_pin") || "LARRYAUTOTRADE";
+      const pin = prompt("請輸入安全操作 PIN 碼（預設: LARRYAUTOTRADE）：", current);
+      if (pin === null) return;
+      const trimmed = pin.trim();
+      if (!trimmed) {
+        setAuthPin("");
+        alert("已清除本地保存的 PIN 碼。");
+        return;
+      }
+      try {
+        const res = await fetch("/api/auth/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: trimmed })
+        });
+        const d = await res.json();
+        if (res.ok && d.valid) {
+          setAuthPin(trimmed);
+          alert("✓ PIN 碼驗證成功！已成功解鎖平倉與控制授權。");
+        } else {
+          alert("❌ PIN 碼錯誤：" + (d.message || "驗證失敗"));
+        }
+      } catch (e) {
+        setAuthPin(trimmed);
+        alert("已儲存 PIN 碼：" + trimmed);
+      }
+    }
+
+    async function fetchWithAuth(url, options = {}) {
+      options.headers = options.headers || {};
+      const currentPin = getAuthPin();
+      if (currentPin) {
+        options.headers["X-Access-PIN"] = currentPin;
+      }
+      if (options.body && typeof options.body === "string") {
+        try {
+          const bodyObj = JSON.parse(options.body);
+          if (!bodyObj.pin && currentPin) {
+            bodyObj.pin = currentPin;
+            options.body = JSON.stringify(bodyObj);
+          }
+        } catch (_) {}
+      } else if (options.body && typeof options.body === "object") {
+        if (!options.body.pin && currentPin) {
+          options.body.pin = currentPin;
+        }
+        options.headers["Content-Type"] = "application/json";
+        options.body = JSON.stringify(options.body);
+      }
+
+      let res = await fetch(url, options);
+
+      // 若回傳 401 Unauthorized，彈窗要求輸入 PIN 碼並自動重試
+      if (res.status === 401) {
+        const promptVal = prompt("⚠️ 遠端授權要求：請輸入安全操作 PIN 碼以執行此操作：", currentPin || "LARRYAUTOTRADE");
+        if (promptVal !== null && promptVal.trim()) {
+          const newPin = promptVal.trim();
+          setAuthPin(newPin);
+          options.headers["X-Access-PIN"] = newPin;
+          if (options.body) {
+            try {
+              const bodyObj = JSON.parse(options.body);
+              bodyObj.pin = newPin;
+              options.body = JSON.stringify(bodyObj);
+            } catch (_) {}
+          }
+          res = await fetch(url, options);
+        }
+      }
+      return res;
+    }
+
     // 1. 全局開關切換
     async function toggleGlobalTrading() {
       try {
-        const res = await fetch('/api/control', {
+        const res = await fetchWithAuth('/api/control', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'toggle' })
         });
-        if (res.ok) {
+        if (res && res.ok) {
           const d = await res.json();
           updateGlobalTradingBtn(d.trading_enabled);
+        } else if (res) {
+          const d = await res.json().catch(() => ({}));
+          alert(`操作失敗: ${d.message || res.statusText}`);
         }
       } catch (e) {
-        globalTradingEnabled = !globalTradingEnabled;
-        updateGlobalTradingBtn(globalTradingEnabled);
+        console.error("toggleGlobalTrading error:", e);
       }
     }
 
@@ -616,18 +724,20 @@
     async function toggleV43Trading() {
       const action = v43TradingEnabled ? 'pause_v43' : 'start_v43';
       try {
-        const res = await fetch('/api/control', {
+        const res = await fetchWithAuth('/api/control', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action })
         });
-        if (res.ok) {
+        if (res && res.ok) {
           v43TradingEnabled = !v43TradingEnabled;
           updateV43TradingBtn(v43TradingEnabled);
+        } else if (res) {
+          const d = await res.json().catch(() => ({}));
+          alert(`操作失敗: ${d.message || res.statusText}`);
         }
       } catch (e) {
-        v43TradingEnabled = !v43TradingEnabled;
-        updateV43TradingBtn(v43TradingEnabled);
+        console.error("toggleV43Trading error:", e);
       }
     }
 
@@ -649,18 +759,20 @@
     async function toggleV50Trading() {
       const action = v50TradingEnabled ? 'pause_v50' : 'start_v50';
       try {
-        const res = await fetch('/api/control', {
+        const res = await fetchWithAuth('/api/control', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action })
         });
-        if (res.ok) {
+        if (res && res.ok) {
           v50TradingEnabled = !v50TradingEnabled;
           updateV50TradingBtn(v50TradingEnabled);
+        } else if (res) {
+          const d = await res.json().catch(() => ({}));
+          alert(`操作失敗: ${d.message || res.statusText}`);
         }
       } catch (e) {
-        v50TradingEnabled = !v50TradingEnabled;
-        updateV50TradingBtn(v50TradingEnabled);
+        console.error("toggleV50Trading error:", e);
       }
     }
 
@@ -678,52 +790,44 @@
       }
     }
 
-    // 4. 一鍵全平 (全倉)
-    async function emergencyFlatAll() {
-      if (!confirm("⚠️ 確定要立即以市價平掉 MES 及 MNQ 的所有持倉，並撤銷全部掛單嗎？")) return;
+    // 統一手動平倉執行器
+    async function executeManualClose(symbol, desc) {
+      const targetTxt = symbol === 'ALL' ? 'MES 及 MNQ 的所有持倉' : `${symbol} 持倉`;
+      if (!confirm(`⚠️ 確定要立即以市價平掉 ${targetTxt}，並撤銷全部生效掛單嗎？`)) {
+        return;
+      }
       try {
-        await fetch('/api/positions/close', {
+        const res = await fetchWithAuth('/api/positions/close', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbol: 'ALL', reason: 'DESKTOP_MANUAL_CLOSE_ALL' })
+          body: JSON.stringify({ symbol: symbol, reason: `DESKTOP_MANUAL_CLOSE_${symbol}` })
         });
-        alert("已發出全盤手動平倉指令 (MES + MNQ)！");
-        setTimeout(refreshData, 500);
+        if (!res) return;
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.status === 'ok') {
+          alert(`✅ ${data.message || `已成功發送 ${symbol} 手動平倉指令！`}`);
+          setTimeout(refreshData, 600);
+        } else {
+          alert(`❌ 平倉指令失敗: ${data.message || `HTTP ${res.status}`}`);
+        }
       } catch (e) {
-        alert("平倉指令已送出！");
+        alert(`❌ 平倉請求連線異常: ${e.message}`);
       }
+    }
+
+    // 4. 一鍵全平 (全倉)
+    function emergencyFlatAll() {
+      executeManualClose('ALL', '全部 (MES + MNQ)');
     }
 
     // 5. 單平 MES
-    async function emergencyFlatV43() {
-      if (!confirm("⚠️ 確定要立即以市價平掉 MES (V4.3) 持倉並撤銷其掛單嗎？")) return;
-      try {
-        await fetch('/api/positions/close', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbol: 'MES', reason: 'DESKTOP_MANUAL_CLOSE_MES' })
-        });
-        alert("已發出 MES 手動平倉指令！");
-        setTimeout(refreshData, 500);
-      } catch (e) {
-        alert("平倉指令已送出！");
-      }
+    function emergencyFlatV43() {
+      executeManualClose('MES', 'MES (V4.3)');
     }
 
     // 6. 單平 MNQ
-    async function emergencyFlatV50() {
-      if (!confirm("⚠️ 確定要立即以市價平掉 MNQ (V5.0) 持倉並撤銷其掛單嗎？")) return;
-      try {
-        await fetch('/api/positions/close', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbol: 'MNQ', reason: 'DESKTOP_MANUAL_CLOSE_MNQ' })
-        });
-        alert("已發出 MNQ 手動平倉指令！");
-        setTimeout(refreshData, 500);
-      } catch (e) {
-        alert("平倉指令已送出！");
-      }
+    function emergencyFlatV50() {
+      executeManualClose('MNQ', 'MNQ (V5.0)');
     }
 
     // 手機端 QR Code 監控彈窗控制 (支援內網 Wi-Fi + 外出 Cloudflare 公網切換)
@@ -1685,6 +1789,7 @@
     }
 
     // 每 2 秒自動拉取
+    updatePinButtonUI();
     setInterval(pollTradeStatus, 2000);
     setInterval(() => loadPnlCalendar(CALENDAR_MONTH), 30000);
     pollTradeStatus();

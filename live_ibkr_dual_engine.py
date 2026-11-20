@@ -467,19 +467,33 @@ class LiveIBKRDualEngine:
             target_oid = int(req_id or 0)
             if not hasattr(self, "_dead_order_ids"):
                 self._dead_order_ids = set()
+            found_ids = set()
             if target_oid > 0:
-                self._dead_order_ids.add(target_oid)
-                self._cancel_attempt_ts[target_oid] = time.time() + 86400.0  # 凍結後續重試
-                if self.ib:
-                    try:
-                        for t in self.ib.trades():
-                            if int(getattr(t.order, "orderId", 0) or 0) == target_oid:
-                                if hasattr(t, "orderStatus") and t.orderStatus:
-                                    t.orderStatus.status = "Cancelled"
-                                break
-                    except Exception:
-                        pass
-                logger.info(f"👻 [幽靈掛單終結] OrderId={target_oid} 經紀商已不存在此單 ({error_string})，已自動自活躍掛單快取中排除。")
+                found_ids.add(target_oid)
+            try:
+                import re
+                m = re.search(r"OrderId\s+(\d+)", error_string, re.IGNORECASE)
+                if m:
+                    parsed_id = int(m.group(1))
+                    if parsed_id > 0:
+                        found_ids.add(parsed_id)
+            except Exception:
+                pass
+
+            for dead_id in found_ids:
+                self._dead_order_ids.add(dead_id)
+                self._cancel_attempt_ts[dead_id] = time.time() + 86400.0  # 凍結後續重試
+
+            if self.ib and found_ids:
+                try:
+                    for t in self.ib.trades():
+                        t_oid = int(getattr(t.order, "orderId", 0) or 0)
+                        if t_oid in found_ids:
+                            if hasattr(t, "orderStatus") and t.orderStatus:
+                                t.orderStatus.status = "Cancelled"
+                except Exception:
+                    pass
+            logger.info(f"👻 [幽靈掛單終結] IDs={found_ids} 經紀商已不存在此單 ({error_string})，已自動自活躍掛單快取中排除。")
 
     @staticmethod
     def _safe_float(val: Any, default: float = 0.0, decimals: int = 2) -> float:
@@ -1117,6 +1131,7 @@ class LiveIBKRDualEngine:
 
         orders_v43 = []
         orders_v50 = []
+        dead_ids = getattr(self, "_dead_order_ids", set())
 
         try:
             open_trades = self.ib.openTrades()
@@ -1124,8 +1139,12 @@ class LiveIBKRDualEngine:
                 sym = t.contract.symbol
                 if sym not in ("MES", "MNQ"):
                     continue
+                oid = int(getattr(t.order, "orderId", 0) or 0)
+                perm_id = int(getattr(t.order, "permId", 0) or 0)
+                if oid in dead_ids or perm_id in dead_ids:
+                    continue
                 status_str = getattr(t.orderStatus, "status", "") or ""
-                if status_str in ("Cancelled", "ApiCancelled", "Filled", "Inactive"):
+                if status_str in ("Cancelled", "ApiCancelled", "Filled", "Inactive", "PendingCancel"):
                     continue
 
                 act_zh = "買入 BUY" if t.order.action == "BUY" else "沽出 SELL"
@@ -1601,7 +1620,7 @@ class LiveIBKRDualEngine:
             if oid in dead_ids or perm_id in dead_ids:
                 continue
             status_str = getattr(getattr(t, "orderStatus", None), "status", "") or ""
-            if status_str in ("Cancelled", "ApiCancelled", "Filled", "Inactive"):
+            if status_str in ("Cancelled", "ApiCancelled", "Filled", "Inactive", "PendingCancel"):
                 continue
             active.append(t)
         return active
@@ -2585,10 +2604,15 @@ class LiveIBKRDualEngine:
 
             # 1. 撤銷該標的所有現存掛單
             cancelled_count = 0
+            dead_ids = getattr(self, "_dead_order_ids", set())
             for t in self.ib.openTrades():
                 sym_match = getattr(t.contract, "symbol", "") == symbol
                 cid_match = target_con_id and getattr(t.contract, "conId", 0) == target_con_id
                 if sym_match or cid_match:
+                    oid = int(getattr(t.order, "orderId", 0) or 0)
+                    perm_id = int(getattr(t.order, "permId", 0) or 0)
+                    if oid in dead_ids or perm_id in dead_ids:
+                        continue
                     try:
                         self.ib.cancelOrder(t.order)
                         cancelled_count += 1
