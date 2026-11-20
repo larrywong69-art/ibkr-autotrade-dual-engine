@@ -128,8 +128,8 @@ class IncidentManager:
             except Exception as e:
                 logger.error(f"寫入 incidents.log 失敗: {e}")
 
-        # 方案 C：自動透過 Telegram Bot 推播警告或錯誤 (非阻塞，略過 162/2109 等低風險無害代碼)
-        ignored_codes = {162, 326, 2103, 2104, 2105, 2106, 2107, 2108, 2109, 2119, 2158, 2219, 10167, 10168}
+        # 方案 C：自動透過 Telegram Bot 推播警告或錯誤 (非阻塞，略過 162/2109/10147 等低風險無害代碼)
+        ignored_codes = {162, 326, 2103, 2104, 2105, 2106, 2107, 2108, 2109, 2119, 2158, 2219, 10147, 10148, 10167, 10168}
         if severity.upper() in ("WARNING", "ERROR", "CRITICAL") and code not in ignored_codes:
             try:
                 from telegram_notifier import notifier
@@ -195,6 +195,12 @@ class IncidentManager:
         # 低風險或無害常規代碼 (162: HMDS查詢取消/臨時IP佔用衝突, 2103/2105/2107/2108/2119/2219: 數據農場波動)
         elif error_code in (162, 2103, 2105, 2107, 2108, 2119, 2219):
             category = "DATA"
+            severity = "INFO"
+
+        # 幽靈掛單撤銷常規回報 (10147: OrderId not found, 10148: already cancelled)
+        # 代表伺服器端早已經不存在該掛單 (已在撮合中心自動撤除或成交)，降為 INFO 避免誤報警報洗版
+        elif error_code in (10147, 10148):
+            category = "TRADING"
             severity = "INFO"
 
         # 連線相關代碼

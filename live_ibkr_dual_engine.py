@@ -361,6 +361,7 @@ class LiveIBKRDualEngine:
         self._last_hmds_recovery_ts: float = 0.0
         self._last_scan_log_ts: Dict[str, float] = {}
         self._warned_uncancellable_ids: set = set()
+        self._dead_order_ids: Set[int] = set()
         self._cancel_attempt_ts: Dict[int, float] = {}
         self._stop_breach_first_seen: Dict[str, float] = {}
         self._last_soft_stop_ts: Dict[str, float] = {}
@@ -460,13 +461,23 @@ class LiveIBKRDualEngine:
         elif error_code == 162 and "different IP address" in error_string.lower():
             self.status_message = "⚠️ 偵測到另一裝置 (如手機 IBKR Mobile 或網頁) 正在登入該帳戶，搶奪了連線權限！請退出手機 App 並重啟 Gateway。"
             logger.warning(f"⚠️ [IP 衝突攔截] 收到 IBKR 代碼 162: {error_string}。偵測到另一裝置正在連線同一帳號，導致本機 Session IP 衝突。")
-        elif error_code == 162 and "query cancelled" in error_string.lower():
-            now_ts = time.time()
-            if now_ts - getattr(self, "_last_162_log_ts", 0.0) >= 180.0:
-                self._last_162_log_ts = now_ts
-                logger.info(
-                    f"⏳ [HMDS 數據節流保護] IBKR 歷史數據查詢逾時取消 ({error_string})，系統將自動退避冷卻；持倉保護與即時報價不受影響。"
-                )
+        elif error_code in (10147, 10148, 135, 136):
+            # 撤銷幽靈單自癒：經紀商確認 OrderId 已不存在/已撤銷/已終止
+            # 自動標記為死單並更新本地狀態，徹底根除 30 秒重複撤銷與洗版死循環
+            target_oid = int(req_id or 0)
+            if target_oid > 0:
+                self._dead_order_ids.add(target_oid)
+                self._cancel_attempt_ts[target_oid] = time.time() + 86400.0  # 凍結後續重試
+                if self.ib:
+                    try:
+                        for t in self.ib.trades():
+                            if int(getattr(t.order, "orderId", 0) or 0) == target_oid:
+                                if hasattr(t, "orderStatus") and t.orderStatus:
+                                    t.orderStatus.status = "Cancelled"
+                                break
+                    except Exception:
+                        pass
+                logger.info(f"👻 [幽靈掛單終結] OrderId={target_oid} 經紀商已不存在此單 ({error_string})，已自動自活躍掛單快取中排除。")
 
     @staticmethod
     def _safe_float(val: Any, default: float = 0.0, decimals: int = 2) -> float:
@@ -1575,12 +1586,16 @@ class LiveIBKRDualEngine:
         return fallback_atr
 
     def _get_symbol_open_trades(self, symbol: str) -> List[Any]:
-        """取得指定標的仍在掛單中的 IBKR Trade 物件 (過濾已終結狀態)"""
+        """取得指定標的仍在掛單中的 IBKR Trade 物件 (過濾已終結狀態與幽靈單)"""
         if not self.ib or not self.ib.isConnected():
             return []
         active = []
         for t in self.ib.openTrades():
             if getattr(t.contract, "symbol", "") != symbol:
+                continue
+            oid = int(getattr(t.order, "orderId", 0) or 0)
+            perm_id = int(getattr(t.order, "permId", 0) or 0)
+            if oid in self._dead_order_ids or perm_id in self._dead_order_ids:
                 continue
             status_str = getattr(getattr(t, "orderStatus", None), "status", "") or ""
             if status_str in ("Cancelled", "ApiCancelled", "Filled", "Inactive"):
@@ -1594,6 +1609,8 @@ class LiveIBKRDualEngine:
         perm_id = int(getattr(trade.order, "permId", 0) or 0)
         cid = int(getattr(trade.order, "clientId", 0) or 0)
         cancel_key = oid if oid > 0 else perm_id
+        if cancel_key in self._dead_order_ids or oid in self._dead_order_ids or perm_id in self._dead_order_ids:
+            return False
         now_ts = time.time()
         if cancel_key > 0 and (now_ts - self._cancel_attempt_ts.get(cancel_key, 0.0) < 30.0):
             return False
