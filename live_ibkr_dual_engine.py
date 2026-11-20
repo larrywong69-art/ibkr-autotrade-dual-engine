@@ -533,9 +533,9 @@ class LiveIBKRDualEngine:
                     entry_rule = self._active_trade_meta.get(sym, {}).get("rule_desc", "")
                 if not entry_rule:
                     if sym == "MNQ":
-                        entry_rule = "規則 2：極端邊界反彈 (頂 1 口)"
+                        entry_rule = "規則 2：箱體邊界反彈 (頂 1 口)"
                     elif side == "SLD" and not is_closing:
-                        entry_rule = "規則 3：微突破反轉 (頂 1 口)"
+                        entry_rule = "規則 3：假突破反轉 (頂 1 口)"
                     else:
                         entry_rule = "規則 1：順勢波 3 回踩"
 
@@ -1373,14 +1373,14 @@ class LiveIBKRDualEngine:
         if rule_code == "R1":
             rule_desc = "規則 1：順勢波 3 回踩"
         elif rule_code == "R2":
-            rule_desc = "規則 2：極端邊界反彈 (頂 1 口)"
+            rule_desc = "規則 2：箱體邊界反彈 (頂 1 口)"
         elif rule_code == "R3":
-            rule_desc = "規則 3：微突破反轉 (頂 1 口)"
+            rule_desc = "規則 3：假突破反轉 (頂 1 口)"
         else:
             if symbol == "MNQ":
-                rule_desc = "規則 2：極端邊界反彈 (頂 1 口)"
+                rule_desc = "規則 2：箱體邊界反彈 (頂 1 口)"
             elif signal.direction == Direction.SHORT:
-                rule_desc = "規則 3：微突破反轉 (頂 1 口)"
+                rule_desc = "規則 3：假突破反轉 (頂 1 口)"
             else:
                 rule_desc = "規則 1：順勢波 3 回踩"
 

@@ -72,7 +72,7 @@ class TestTelegramTradeNotifications(unittest.TestCase):
             tp_price=5985.00,
             sl_price=6010.00,
             is_closing=False,
-            entry_rule="規則 3：微突破反轉 (頂 1 口)",
+            entry_rule="規則 3：假突破反轉 (頂 1 口)",
             sync=True
         )
 
@@ -80,7 +80,7 @@ class TestTelegramTradeNotifications(unittest.TestCase):
 
         self.assertIn("【AutoTrade 交易成交通報 - 開倉 (淡倉)】", text)
         self.assertIn("沽出開倉 (淡倉 / SHORT)", text)
-        self.assertIn("規則 3：微突破反轉 (頂 1 口)", text)
+        self.assertIn("規則 3：假突破反轉 (頂 1 口)", text)
 
     @patch.object(TelegramNotifier, "send_message_sync")
     def test_close_take_profit_notification(self, mock_send):
@@ -133,7 +133,7 @@ class TestTelegramTradeNotifications(unittest.TestCase):
             pnl_hkd=-272.30,
             commission=1.24,
             is_closing=True,
-            entry_rule="規則 2：極端邊界反彈 (頂 1 口)",
+            entry_rule="規則 2：箱體邊界反彈 (頂 1 口)",
             exit_reason="🛑 原生止損 (Stop Loss)",
             fx_rate=7.78,
             sync=True
@@ -146,7 +146,7 @@ class TestTelegramTradeNotifications(unittest.TestCase):
         self.assertIn("出場原因", text)
         self.assertIn("原生止損 (Stop Loss)", text)
         self.assertIn("-35.00 USD (-HK$272.30)", text)
-        self.assertIn("規則 2：極端邊界反彈 (頂 1 口)", text)
+        self.assertIn("規則 2：箱體邊界反彈 (頂 1 口)", text)
 
     @patch.object(TelegramNotifier, "notify_trade")
     def test_engine_on_exec_details_integration(self, mock_notify):

@@ -195,18 +195,18 @@ def classify_trade_strategy_rule(trade: Dict[str, Any]) -> str:
     ref = str(trade.get("order_ref", "")).upper()
     combined = f"{strat} {reason} {ref} {symbol}"
 
-    if any(k in combined for k in ["微突破", "破位", "做空", "反轉", "RULE_3", "RULE 3", "SHORT", "SLD"]):
-        return "規則 3：微突破反轉 (頂 1 口)"
-    elif any(k in combined for k in ["5.0", "MNQ", "極端", "邊界", "動量", "RULE_2", "RULE 2", "BOUNCE", "EXTREME"]):
-        return "規則 2：極端邊界反彈 (頂 1 口)"
+    if any(k in combined for k in ["假突破", "微突破", "破位", "做空", "反轉", "RULE_3", "RULE 3", "SHORT", "SLD"]):
+        return "規則 3：假突破反轉 (頂 1 口)"
+    elif any(k in combined for k in ["箱體", "5.0", "MNQ", "極端", "邊界", "動量", "RULE_2", "RULE 2", "BOUNCE", "EXTREME"]):
+        return "規則 2：箱體邊界反彈 (頂 1 口)"
     else:
         return "規則 1：順勢波 3 回踩"
 
 
 def classify_trading_session(timestamp_str: str) -> str:
-    """分類所屬交易時段 (美盤 RTH / 歐盤倫敦 / 亞盤夜盤 - 精確匹配回測報表截圖格式)"""
+    """分類所屬交易時段 (美盤 RTH / 歐盤倫敦 / 亞盤微盤 - 精確匹配回測報表截圖格式)"""
     if not timestamp_str:
-        return "☀️ 美盤 RTH (09:30-16:00 ET)"
+        return "🌐 美盤 RTH (09:30-16:00 ET)"
     try:
         t_clean = timestamp_str.replace("T", " ")[:19]
         dt = datetime.strptime(t_clean, "%Y-%m-%d %H:%M:%S")
@@ -215,21 +215,21 @@ def classify_trading_session(timestamp_str: str) -> str:
         et_hour = (hkt_hour - 13.0) % 24.0
 
         if 9.5 <= et_hour < 16.0:
-            return "☀️ 美盤 RTH (09:30-16:00 ET)"
+            return "🌐 美盤 RTH (09:30-16:00 ET)"
         elif 2.0 <= et_hour < 9.5:
-            return "☕ 歐盤倫敦 (02:00-09:30 ET)"
+            return "🌐 歐盤倫敦 (02:00-09:30 ET)"
         else:
-            return "🌙 亞盤夜盤 (18:00-02:00 ET)"
+            return "🌐 亞盤微盤 (18:00-02:00 ET)"
     except Exception:
-        return "☀️ 美盤 RTH (09:30-16:00 ET)"
+        return "🌐 美盤 RTH (09:30-16:00 ET)"
 
 
 def compute_multidimensional_stats(trades: List[Dict[str, Any]], fx_rate: float = 7.78) -> Dict[str, Any]:
     """計算符合用戶指定格式的多維度統計 (進場規則、出場原因、交易時段)"""
     standard_rules = [
         "規則 1：順勢波 3 回踩",
-        "規則 2：極端邊界反彈 (頂 1 口)",
-        "規則 3：微突破反轉 (頂 1 口)",
+        "規則 2：箱體邊界反彈 (頂 1 口)",
+        "規則 3：假突破反轉 (頂 1 口)",
     ]
     standard_exit_reasons = [
         "🎯 第一止盈 (TP1 1.55R)",
@@ -244,9 +244,9 @@ def compute_multidimensional_stats(trades: List[Dict[str, Any]], fx_rate: float 
         "🔄 策略動態出場 (Dynamic Exit)",
     ]
     standard_sessions = [
-        "☀️ 美盤 RTH (09:30-16:00 ET)",
-        "☕ 歐盤倫敦 (02:00-09:30 ET)",
-        "🌙 亞盤夜盤 (18:00-02:00 ET)",
+        "🌐 美盤 RTH (09:30-16:00 ET)",
+        "🌐 歐盤倫敦 (02:00-09:30 ET)",
+        "🌐 亞盤微盤 (18:00-02:00 ET)",
     ]
 
     dim_buckets: Dict[str, List[Dict[str, Any]]] = {}
@@ -607,13 +607,13 @@ class GoogleSheetsSyncManager:
             style_data_cell(c_curr, is_even, align="center")
 
             c_st = ws.cell(row=r, column=4, value=st_eq)
-            style_data_cell(c_st, is_even, align="right", num_format="HK$#,##0.00")
+            style_data_cell(c_st, is_even, align="right", num_format="\"HK$\"#,##0.00")
 
             c_end = ws.cell(row=r, column=5, value=end_eq)
-            style_data_cell(c_end, is_even, align="right", is_bold=True, num_format="HK$#,##0.00")
+            style_data_cell(c_end, is_even, align="right", is_bold=True, num_format="\"HK$\"#,##0.00")
 
             c_pnl = ws.cell(row=r, column=6, value=f"=E{r}-D{r}")
-            style_data_cell(c_pnl, is_even, align="right", is_bold=True, num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=d_pnl)
+            style_data_cell(c_pnl, is_even, align="right", is_bold=True, num_format="\"HK$\"#,##0.00;[Red](\"HK$\"#,##0.00);\"HK$0.00\"", pnl_val=d_pnl)
 
             c_ret = ws.cell(row=r, column=7, value=f"=F{r}/D{r}")
             style_data_cell(c_ret, is_even, align="right", num_format="+0.00%;-0.00%;0.00%", pnl_val=d_pnl)
@@ -622,22 +622,22 @@ class GoogleSheetsSyncManager:
                 c_cpnl = ws.cell(row=r, column=8, value=f"=F{r}")
             else:
                 c_cpnl = ws.cell(row=r, column=8, value=f"=H{r-1}+F{r}")
-            style_data_cell(c_cpnl, is_even, align="right", is_bold=True, num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=cum_pnl)
+            style_data_cell(c_cpnl, is_even, align="right", is_bold=True, num_format="\"HK$\"#,##0.00;[Red](\"HK$\"#,##0.00);\"HK$0.00\"", pnl_val=cum_pnl)
 
             c_cret = ws.cell(row=r, column=9, value=f"=H{r}/$D$4")
             style_data_cell(c_cret, is_even, align="right", is_bold=True, num_format="+0.00%;-0.00%;0.00%", pnl_val=cum_pnl)
 
             mes_p = float(rec.get("mes_pnl", 0.0))
             c_mes = ws.cell(row=r, column=10, value=mes_p)
-            style_data_cell(c_mes, is_even, align="right", num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=mes_p)
+            style_data_cell(c_mes, is_even, align="right", num_format="\"HK$\"#,##0.00;[Red](\"HK$\"#,##0.00);\"HK$0.00\"", pnl_val=mes_p)
 
             mnq_p = float(rec.get("mnq_pnl", 0.0))
             c_mnq = ws.cell(row=r, column=11, value=mnq_p)
-            style_data_cell(c_mnq, is_even, align="right", num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=mnq_p)
+            style_data_cell(c_mnq, is_even, align="right", num_format="\"HK$\"#,##0.00;[Red](\"HK$\"#,##0.00);\"HK$0.00\"", pnl_val=mnq_p)
 
             comm = float(rec.get("commission", 0.0))
             c_comm = ws.cell(row=r, column=12, value=comm)
-            style_data_cell(c_comm, is_even, align="right", num_format="HK$#,##0.00")
+            style_data_cell(c_comm, is_even, align="right", num_format="\"HK$\"#,##0.00")
 
             dd = float(rec.get("drawdown", 0.0))
             c_dd = ws.cell(row=r, column=13, value=dd)
@@ -800,13 +800,13 @@ class GoogleSheetsSyncManager:
             style_data_cell(ws1.cell(row=r, column=5), is_even=(s_idx==1), align="right", num_format="0.0%")
 
             ws1.cell(row=r, column=6, value=s_gross)
-            style_data_cell(ws1.cell(row=r, column=6), is_even=(s_idx==1), align="right", num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=s_gross)
+            style_data_cell(ws1.cell(row=r, column=6), is_even=(s_idx==1), align="right", num_format="\"HK$\"#,##0.00;[Red](\"HK$\"#,##0.00);\"HK$0.00\"", pnl_val=s_gross)
 
             ws1.cell(row=r, column=7, value=s_comm)
-            style_data_cell(ws1.cell(row=r, column=7), is_even=(s_idx==1), align="right", num_format="HK$#,##0.00")
+            style_data_cell(ws1.cell(row=r, column=7), is_even=(s_idx==1), align="right", num_format="\"HK$\"#,##0.00")
 
             ws1.cell(row=r, column=8, value=s_net)
-            style_data_cell(ws1.cell(row=r, column=8), is_even=(s_idx==1), align="right", is_bold=True, num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=s_net)
+            style_data_cell(ws1.cell(row=r, column=8), is_even=(s_idx==1), align="right", is_bold=True, num_format="\"HK$\"#,##0.00;[Red](\"HK$\"#,##0.00);\"HK$0.00\"", pnl_val=s_net)
 
         # ----------------------------------------------------------------------
         # 區域 2：【規則進場原因與時段表現】 (精確符合用戶範例截圖格式，新增 exit_reason 統計)
@@ -858,10 +858,10 @@ class GoogleSheetsSyncManager:
 
             net_pnl = float(row_item.get("net_pnl_hkd", 0.0))
             c_pnl = ws1.cell(row=r, column=4, value=net_pnl)
-            # 格式：+HK$#,##0.00;-HK$#,##0.00;HK$0.00
+            # 格式："+HK$"#,##0.00;"-HK$"#,##0.00;"HK$0.00"
             style_data_cell(
                 c_pnl, is_even, align="right", is_bold=True,
-                num_format="+HK$#,##0.00;-HK$#,##0.00;HK$0.00",
+                num_format="\"+HK$\"#,##0.00;\"-HK$\"#,##0.00;\"HK$0.00\"",
                 pnl_val=net_pnl
             )
 
@@ -904,10 +904,10 @@ class GoogleSheetsSyncManager:
             style_data_cell(ws1.cell(row=r, column=2), align="center")
 
             ws1.cell(row=r, column=3, value=t_net_hkd)
-            style_data_cell(ws1.cell(row=r, column=3), align="right", num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=t_net_hkd)
+            style_data_cell(ws1.cell(row=r, column=3), align="right", num_format="\"HK$\"#,##0.00;[Red](\"HK$\"#,##0.00);\"HK$0.00\"", pnl_val=t_net_hkd)
 
             ws1.cell(row=r, column=4, value=c_pnl_val)
-            style_data_cell(ws1.cell(row=r, column=4), align="right", is_bold=True, num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=c_pnl_val)
+            style_data_cell(ws1.cell(row=r, column=4), align="right", is_bold=True, num_format="\"HK$\"#,##0.00;[Red](\"HK$\"#,##0.00);\"HK$0.00\"", pnl_val=c_pnl_val)
 
         data_last_row = data_first_row + len(data_trades) - 1
 
@@ -1052,13 +1052,13 @@ class GoogleSheetsSyncManager:
             style_data_cell(c_pr, is_even, align="right", num_format="$#,##0.00")
 
             c_gp = ws2.cell(row=r, column=8, value=gross_hkd)
-            style_data_cell(c_gp, is_even, align="right", num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=gross_hkd)
+            style_data_cell(c_gp, is_even, align="right", num_format="\"HK$\"#,##0.00;[Red](\"HK$\"#,##0.00);\"HK$0.00\"", pnl_val=gross_hkd)
 
             c_cm = ws2.cell(row=r, column=9, value=comm_hkd)
-            style_data_cell(c_cm, is_even, align="right", num_format="HK$#,##0.00")
+            style_data_cell(c_cm, is_even, align="right", num_format="\"HK$\"#,##0.00")
 
             c_np = ws2.cell(row=r, column=10, value=net_hkd)
-            style_data_cell(c_np, is_even, align="right", is_bold=True, num_format="HK$#,##0.00;[Red](HK$#,##0.00);\"HK$0.00\"", pnl_val=net_hkd)
+            style_data_cell(c_np, is_even, align="right", is_bold=True, num_format="\"HK$\"#,##0.00;[Red](\"HK$\"#,##0.00);\"HK$0.00\"", pnl_val=net_hkd)
 
             c_ex = ws2.cell(row=r, column=11, value=str(tr.get("exec_id", tr.get("trade_id", ""))))
             style_data_cell(c_ex, is_even, align="center")
@@ -1125,29 +1125,6 @@ class GoogleSheetsSyncManager:
             "fx_rate": fx_rate,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
-
-        try:
-            data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            req = urllib.request.Request(
-                webhook_url,
-                data=data_bytes,
-                headers={"Content-Type": "application/json"},
-                method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                res_body = resp.read().decode("utf-8")
-                res_json = json.loads(res_body) if res_body else {}
-                if res_json.get("status") == "ok":
-                    logger.info(
-                        f"✅ Webhook 同步成功！已更新結餘行數: {res_json.get('balances_synced', len(balances))}, "
-                        f"成交分錄數: {res_json.get('trades_synced', len(trades))}"
-                    )
-                    return True
-                else:
-                    logger.warning(f"Webhook 回傳非預期狀態: {res_body}")
-        except Exception as e:
-            logger.warning(f"Webhook 連線推送失敗: {e}")
-        return False
 
         try:
             data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
