@@ -155,6 +155,37 @@ bash cloud_deploy/setup.sh
 
 ---
 
+## 6.1 跨電腦本機量化回測實驗室（Backtest Lab）快速啟動
+
+專案已內建經過 CME 0.25 Tick 規範審計的 **10 年真實 1H / 4H / 1D 歷史快取數據**（位於 `data/ibkr_cache/`，含 ES/NQ），在任何新電腦上下載倉庫後，**無須連線 IB Gateway，即可秒級執行 10 年多策略回測與 K 線圖表檢視**：
+
+### 1. 取得專案與建立環境
+```bash
+git clone https://github.com/larrywong69-art/ibkr-autotrade-dual-engine.git
+cd ibkr-autotrade-dual-engine
+
+# 建立並啟動 Python 虛擬環境
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 2. 啟動本機伺服器
+```bash
+python server.py 8080
+```
+
+### 3. 開啟回測實驗室網頁
+在瀏覽器開啟：
+👉 **http://localhost:8080/backtest_lab.html**
+
+- **功能特點**：
+  - **核心策略寫死 1H 實盤執行**：支援 `v9.3.13`（最新黃金窗口+連輸降碼版）、`v9.3.10`（11-18定型版）、`v6.0` 宏觀對沖等多策略並排對比。
+  - **視角自由切換**：上方切換 `1小時` / `4小時` / `1日` 僅作為圖表檢視視角（開平倉標記投影顯示），完全不影響策略核心損益與勝率統計。
+  - **100% 真實 CME 規範**：所有點位精確符合 0.25 Tick，無未來函數偷看與插值污染。
+
+---
+
 ## 7. 常見問題 (FAQ)
 
 - **執行 `git fetch` 出現 `fatal: not a git repository`**：請先確認已 `cd ~/ibkr_paper_trading` 進入專案目錄再執行更新與重啟。

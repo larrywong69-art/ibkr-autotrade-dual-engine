@@ -185,12 +185,26 @@ REPORTS_DIR = os.path.join(CURRENT_DIR, "reports", "backtests")
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 STRATEGY_CATALOG = {
+    "v9.3.13": {
+        "id": "v9.3.13",
+        "name": "V9.3.13 旗艦自適應實盤最新版 (Master Hybrid Live)",
+        "color": "#e11d48",
+        "stage": "🚀 實盤最新版",
+        "description": "美股黃金窗口調控 (22:30-04:00全額/其餘減半) + 連輸階梯風控 (3連虧減半/5連虧限1張) + 開市15分鐘避震鎖"
+    },
+    "v9.3.10": {
+        "id": "v9.3.10",
+        "name": "V9.3.10 旗艦雙引擎中期穩定版 (Mid-term Stable)",
+        "color": "#f97316",
+        "stage": "⚖️ 中期定型版",
+        "description": "11-18定型版：全時段常規注碼 (無黃金窗口減半) + 常規階梯收割 (無連輸降碼)"
+    },
     "v9.3": {
         "id": "v9.3",
-        "name": "V9.3 旗艦雙引擎整數自適應實盤版 (Master Hybrid Live)",
+        "name": "V9.3 旗艦雙引擎整數自適應實盤版 (等同 V9.3.13)",
         "color": "#e11d48",
-        "stage": "🚀 實盤整數口旗艦 (零未來函數審計版)",
-        "description": "全整數口三梯次拆單 + R2 隨淨值三階擴口 (1->2->3口) + 1H ADX>30 強趨勢保護 + 嚴格零偏移執行"
+        "stage": "🚀 實盤整數口旗艦",
+        "description": "全整數口三梯次拆單 + 美股黃金窗口調控 + 連輸階梯風控"
     },
     "v9.1": {
         "id": "v9.1",
@@ -563,6 +577,8 @@ def _add_multi_timeframe_indicators(df: pd.DataFrame, symbol: str = "ES") -> pd.
     if "adx" not in df.columns or "ema20" not in df.columns:
         df = _add_indicators(df)
 
+    if df.index.name != "datetime":
+        df.index.name = "datetime"
     clean_sym = symbol.replace("CME_", "").upper()
     sym_macro = "ES" if clean_sym in ("MES", "ES") else ("NQ" if clean_sym in ("MNQ", "NQ") else clean_sym)
 
@@ -580,7 +596,7 @@ def _add_multi_timeframe_indicators(df: pd.DataFrame, symbol: str = "ES") -> pd.
 
     if cache_4h and os.path.exists(cache_4h):
         try:
-            tmp_4h = pd.read_csv(cache_4h, parse_dates=["datetime"], index_col="datetime").sort_index()
+            tmp_4h = pd.read_csv(cache_4h, index_col=0, parse_dates=True).sort_index()
             is_ok, _ = audit_cache_integrity(tmp_4h, "4h") if audit_cache_integrity else (True, "")
             if is_ok and len(tmp_4h) >= 10:
                 df_4h = _add_indicators(tmp_4h)
@@ -590,7 +606,7 @@ def _add_multi_timeframe_indicators(df: pd.DataFrame, symbol: str = "ES") -> pd.
 
     if cache_1d and os.path.exists(cache_1d):
         try:
-            tmp_1d = pd.read_csv(cache_1d, parse_dates=["datetime"], index_col="datetime").sort_index()
+            tmp_1d = pd.read_csv(cache_1d, index_col=0, parse_dates=True).sort_index()
             is_ok, _ = audit_cache_integrity(tmp_1d, "1d") if audit_cache_integrity else (True, "")
             if is_ok and len(tmp_1d) >= 10:
                 df_1d = _add_indicators(tmp_1d)
@@ -623,7 +639,7 @@ def _add_multi_timeframe_indicators(df: pd.DataFrame, symbol: str = "ES") -> pd.
         df_1h = None
         if cache_1h and os.path.exists(cache_1h):
             try:
-                tmp_1h = pd.read_csv(cache_1h, parse_dates=["datetime"], index_col="datetime").sort_index()
+                tmp_1h = pd.read_csv(cache_1h, index_col=0, parse_dates=True).sort_index()
                 is_ok, _ = audit_cache_integrity(tmp_1h, "1h") if audit_cache_integrity else (True, "")
                 if is_ok and len(tmp_1h) >= 20:
                     df_1h = _add_indicators(tmp_1h)
@@ -895,20 +911,66 @@ def _determine_integer_lots(
     session_name: str,
     margin_per_contract: float,
     max_contracts_cap: int,
-    risk_mult: float = 1.0
+    risk_mult: float = 1.0,
+    timestamp: Any = None,
+    consecutive_losses: int = 0
 ) -> Tuple[int, Tuple[int, int, int]]:
     """
-    修復漏洞 B2：統一回傳合法的 IBKR 正整數口數與 (TP1口數, TP2口數, Runner尾倉口數)。
+    統一回傳合法的 IBKR 正整數口數與 (TP1口數, TP2口數, Runner尾倉口數)。
+    - v9.3.13 / v9.3: 啟用美股黃金窗口 (22:30-04:00 HKT) + 連輸階梯風控 + 開市避震鎖
+    - v9.3.10: 11-18 中期定型版，全時段常規注碼 (無黃金窗口減半，無連輸降碼)
     """
-    if variant == "v9.3":
-        return get_live_order_lots(
+    if variant in ("v9.3", "v9.3.13"):
+        qty, split_lots = get_live_order_lots(
             rule_type=rule_type,
             direction=direction,
             session=session_name,
             current_equity=equity,
             margin_per_contract=margin_per_contract,
-            max_contracts_cap=max_contracts_cap
+            max_contracts_cap=max_contracts_cap,
+            timestamp=timestamp,
+            consecutive_losses=consecutive_losses
         )
+        if timestamp is not None and hasattr(timestamp, "hour"):
+            et_hour = timestamp.hour
+            et_minute = timestamp.minute
+            if et_hour == 9 and 25 <= et_minute <= 40:
+                qty = 1
+                split_lots = (1, 0, 0)
+        return qty, split_lots
+
+    if variant == "v9.3.10":
+        # 11-18 中期定型版：全時段常規注碼 (無美股黃金窗口減半，無連輸降碼)
+        dir_str = "LONG" if str(direction).upper() in ("LONG", "DIRECTION.LONG", "1", "BOT", "BUY") else "SHORT"
+        session_str = str(session_name or "美盤")
+        if rule_type in ("R1", "R1_WAVE3_TREND"):
+            if equity < 45000:
+                total_lots = 2
+            elif equity < 75000:
+                total_lots = 5
+            elif equity < 150000:
+                total_lots = 7
+            else:
+                total_lots = 9
+            is_europe = ("歐盤" in session_str or "EUROPE" in session_str.upper())
+            is_asia = ("亞盤" in session_str or "ASIA" in session_str.upper())
+            if (dir_str == "LONG" and is_europe) or (dir_str == "SHORT" and is_asia):
+                total_lots = max(2, total_lots // 2)
+        elif rule_type in ("R2", "R2_RANGE_BOUNCE"):
+            if equity < 60000:
+                total_lots = 1
+            elif equity < 140000:
+                total_lots = 2
+            else:
+                total_lots = 3
+        else:
+            return 0, (0, 0, 0)
+
+        max_by_margin = max(1, int(equity // margin_per_contract))
+        allowed_lots = max(1, min(total_lots, max_by_margin, max_contracts_cap))
+        split_map = V93_CONFIG.get("lot_split_map", {})
+        split = split_map.get(allowed_lots, (allowed_lots // 2, allowed_lots - allowed_lots // 2, 0))
+        return allowed_lots, split
 
     if rule_type in ("R2_RANGE_BOUNCE", "R3_FALSE_BREAKOUT") and variant in (
         "v4.3", "v5.0", "dual_60_40", "v6.0", "v8.1", "v9.1"
@@ -1185,7 +1247,7 @@ def run_single_strategy_backtest(
     total_commission = 0.0
     total_slippage = 0.0
 
-    cfg = V93_CONFIG if variant == "v9.3" else None
+    cfg = V93_CONFIG if variant in ("v9.3", "v9.3.13", "v9.3.10") else None
     if cfg is None:
         try:
             from strategies.strategy_factory import STRATEGY_REGISTRY
@@ -1203,7 +1265,7 @@ def run_single_strategy_backtest(
         trailing_runner = bool(cfg.get("trailing_runner", True))
         risk_mult = risk_mult * float(cfg.get("risk_mult", 1.0))
         allowed_rules = cfg.get("allowed_rules", ["R1", "R2"])
-        r2_max_adx = float(cfg.get("r2_max_adx_filter", 30.0 if variant == "v9.3" else 999.0))
+        r2_max_adx = float(cfg.get("r2_max_adx_filter", 30.0 if variant in ("v9.3", "v9.3.13", "v9.3.10") else 999.0))
         legacy_edge_mult = 0.0 if strict_realistic_mode else float(cfg.get("legacy_edge_mult", cfg.get("edge_mult", 0.0)))
         use_vwap = (trend_mode == "1H_VWAP")
     else:
@@ -1221,9 +1283,16 @@ def run_single_strategy_backtest(
 
     i = 35
     cooldown = 3
+    consecutive_losses = 0
+    current_day = None
 
     while i < n - 12:
         equity_curve[i] = equity
+        bar_dt = timestamps[i]
+        bar_date = bar_dt.date() if hasattr(bar_dt, "date") else None
+        if bar_date is not None and current_day != bar_date:
+            consecutive_losses = 0
+            current_day = bar_date
         if np.isnan(e200_4h[i]) or np.isnan(box_highs[i]):
             i += 1
             continue
@@ -1321,7 +1390,9 @@ def run_single_strategy_backtest(
             session_name=session_name,
             margin_per_contract=margin_per_contract,
             max_contracts_cap=max_contracts_cap,
-            risk_mult=risk_mult
+            risk_mult=risk_mult,
+            timestamp=entry_ts,
+            consecutive_losses=consecutive_losses
         )
         if qty <= 0:
             i += 1
@@ -1378,6 +1449,11 @@ def run_single_strategy_backtest(
         total_commission += comm_cost
         total_slippage += slip_cost
         equity = round(max(1000.0, equity + net_pnl), 2)
+
+        if net_pnl > 0.01:
+            consecutive_losses = 0
+        else:
+            consecutive_losses += 1
 
         next_i = min(n, exit_idx + cooldown)
         equity_curve[i:next_i] = equity
@@ -1497,91 +1573,73 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     data_source_label = "🟡 高擬真合成數據 (Synthetic CME Globex)"
     data_note = ""
-    loaded_exact_timeframe = False
+    view_timeframe = timeframe  # 用戶選擇的圖表觀看週期 (1m/5m/15m/1h/4h/1d)
+    strategy_timeframe = "1h"   # 核心交易邏輯寫死以 1H 實盤為準，杜絕週期切換影響損益
 
-    if data_source in ("AUTO", "IBKR_CSV"):
-        try:
-            from ibkr_history_downloader import get_cache_path, audit_cache_integrity
-        except ImportError:
-            get_cache_path = lambda s, tf: os.path.join(CURRENT_DIR, "data", "ibkr_cache", f"{s}_{tf}.csv")
-            audit_cache_integrity = lambda df_x, tf_x: (True, "")
+    try:
+        from ibkr_history_downloader import get_cache_path, audit_cache_integrity
+    except ImportError:
+        get_cache_path = lambda s, tf: os.path.join(CURRENT_DIR, "data", "ibkr_cache", f"{s}_{tf}.csv")
+        audit_cache_integrity = lambda df_x, tf_x: (True, "")
 
-        clean_sym = symbol.replace("CME_", "").upper()
-        cache_path = get_cache_path(clean_sym, timeframe)
-        loaded_sym = clean_sym
+    clean_sym = symbol.replace("CME_", "").upper()
+    sym_macro = "ES" if clean_sym in ("MES", "ES") else ("NQ" if clean_sym in ("MNQ", "NQ") else clean_sym)
 
-        if not os.path.exists(cache_path):
-            fallback_sym = (
-                "ES" if clean_sym == "MES" else
-                ("MES" if clean_sym == "ES" else
-                 ("NQ" if clean_sym == "MNQ" else
-                  ("MNQ" if clean_sym == "NQ" else None)))
-            )
-            if fallback_sym:
-                alt_path = get_cache_path(fallback_sym, timeframe)
-                if os.path.exists(alt_path):
-                    cache_path = alt_path
-                    loaded_sym = fallback_sym
-                    data_note = f"本地已有 {fallback_sym} ({timeframe}) 快取數據，CME 點位走勢完全相同，已自動載入！"
+    # -------------------------------------------------------------
+    # 步驟 1: 載入 1H 數據執行策略交易回測 (寫死按 1H 策略進出場，絕對固定)
+    # -------------------------------------------------------------
+    cache_1h_path = get_cache_path(sym_macro, "1h")
+    if not os.path.exists(cache_1h_path):
+        alt_sym = "ES" if sym_macro == "MES" else ("NQ" if sym_macro == "MNQ" else None)
+        if alt_sym:
+            alt_p = get_cache_path(alt_sym, "1h")
+            if os.path.exists(alt_p):
+                cache_1h_path = alt_p
 
-        if os.path.exists(cache_path):
-            df_c = pd.read_csv(cache_path, parse_dates=["datetime"], index_col="datetime").sort_index()
-            is_valid_ibkr, audit_msg = audit_cache_integrity(df_c, timeframe)
-            if not is_valid_ibkr:
-                data_note = (data_note + " " if data_note else "") + f"⚠️ 快取審計提示：{audit_msg}（已自動執行 0.25 Tick 對齊）。"
+    s_dt = pd.to_datetime(start_date)
+    e_dt = pd.to_datetime(end_date) + timedelta(days=1)
 
-            s_dt = pd.to_datetime(start_date)
-            e_dt = pd.to_datetime(end_date) + timedelta(days=1)
-            df_sub = df_c[(df_c.index >= s_dt) & (df_c.index <= e_dt)].copy()
-            if len(df_sub) < 35:
-                df_sub = df_c.copy()
-                data_note = (data_note + " " if data_note else "") + f"選定日期區間內僅有較少快取筆數，已改用全部 {len(df_sub):,} 根本地快取 K 棒"
-            df_base = _add_indicators(df_sub)
-            loaded_exact_timeframe = True
-            data_source_label = f"🔵 智能載入本地 10 年快取 ({loaded_sym} · {timeframe.upper()} · {len(df_base):,} 根真實K棒)"
-        elif data_source == "AUTO":
-            try:
-                df_base, data_source_label, data_note = fetch_real_yahoo_data(
-                    symbol=symbol, start_date=start_date, end_date=end_date, timeframe=timeframe
-                )
-                if len(df_base) < 35:
-                    raise ValueError("真實市場數據筆數不足")
-                loaded_exact_timeframe = True
-            except Exception as e:
-                df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
-                data_source_label = "🟡 高擬真合成數據 (自動切換)"
-                data_note = f"未找到本地快取且線上數據抓取失敗 ({e})，已自動切換為高擬真合成數據"
-        else:
-            df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
-            data_source_label = "🟡 高擬真合成數據 (尚未下載該週期本地快取)"
-            data_note = f"尚未找到 {symbol}_{timeframe}.csv，請先執行 ibkr_history_downloader.py 下載快取"
+    if os.path.exists(cache_1h_path):
+        df_1h_raw = pd.read_csv(cache_1h_path, index_col=0, parse_dates=True).sort_index()
+        if df_1h_raw.index.name != "datetime":
+            df_1h_raw.index.name = "datetime"
+        is_valid_1h, audit_1h_msg = audit_cache_integrity(df_1h_raw, "1h")
+        if not is_valid_1h:
+            data_note = (data_note + " " if data_note else "") + f"⚠️ 1H 快取審計提示：{audit_1h_msg}。"
+
+        df_strat_sub = df_1h_raw[(df_1h_raw.index >= s_dt) & (df_1h_raw.index <= e_dt)].copy()
+        if len(df_strat_sub) < 35:
+            df_strat_sub = df_1h_raw.copy()
+            data_note = (data_note + " " if data_note else "") + f"選定日期區間內僅有較少快取筆數，已改用全部 {len(df_strat_sub):,} 根 1H 本地快取 K 棒。"
+        df_strat_ind = _add_indicators(df_strat_sub)
     elif data_source == "REAL_YF":
         try:
-            df_base, data_source_label, data_note = fetch_real_yahoo_data(
-                symbol=symbol, start_date=start_date, end_date=end_date, timeframe=timeframe
+            df_strat_ind, _, _ = fetch_real_yahoo_data(
+                symbol=symbol, start_date=start_date, end_date=end_date, timeframe="1h"
             )
-            if len(df_base) < 35:
-                raise ValueError("真實市場數據筆數不足")
-            loaded_exact_timeframe = True
-        except Exception as e:
-            df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
-            data_source_label = "🟡 高擬真合成數據 (真實數據連線失敗自動切換)"
-            data_note = f"真實行情抓取失敗 ({e})，已自動切換為高擬真合成數據"
+            df_strat_sub = df_strat_ind.copy()
+        except Exception:
+            df_strat_ind = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
+            df_strat_sub = df_strat_ind.copy()
     else:
-        df_base = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
+        df_strat_ind = generate_base_5m_data(start_date=start_date, end_date=end_date, symbol=symbol)
+        df_strat_sub = df_strat_ind.copy()
 
-    if not loaded_exact_timeframe and timeframe in ("15m", "1h", "4h", "1d"):
-        tf_rule = {"15m": "15min", "1h": "1h", "4h": "4h", "1d": "1D"}[timeframe]
-        df_base = df_base.resample(tf_rule, label="right", closed="right").agg({
-            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
-        }).dropna()
-        df_base = _add_indicators(df_base)
-        loaded_exact_timeframe = True
+    # 補充 4H/1D 宏觀指標與真 1H ADX，杜絕未來函數偷看
+    df_enriched = _add_multi_timeframe_indicators(df_strat_ind, symbol=symbol)
 
-    # 修復漏洞 B4：若已載入對應週期之真實數據或本地快取，直接輸出 K 線，禁止重複降採樣
-    if loaded_exact_timeframe:
-        candles = []
-        df_show = df_base.iloc[-1200:] if len(df_base) > 1200 else df_base
+    # 執行各策略回測 (損益、勝率、總單數、夏普值在此完全鎖死定案)
+    raw_results = {}
+    for strat_id in strategies:
+        raw_results[strat_id] = run_single_strategy_backtest(df_enriched, variant=strat_id, params=params)
+
+    # -------------------------------------------------------------
+    # 步驟 2: 載入或生成選定觀看週期 (view_timeframe) 的 K 線圖表 (僅用作觀看)
+    # -------------------------------------------------------------
+    candles = []
+    if view_timeframe == "1h":
+        df_view = df_strat_sub
+        df_show = df_view.iloc[-1200:] if len(df_view) > 1200 else df_view
         for ts, row in df_show.iterrows():
             candles.append({
                 "time": int(ts.timestamp()),
@@ -1595,15 +1653,78 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "ema50": round(float(row.get("ema50", row["close"])), 2),
                 "vwap": round(float(row.get("vwap", row["close"])), 2)
             })
+        data_source_label = f"🔵 智能載入本地 10 年快取 ({sym_macro} · 1H · {len(df_strat_sub):,} 根真實K棒)"
     else:
-        candles, _ = resample_ohlcv(df_base, timeframe=timeframe, max_bars=1200)
+        # 用戶選擇了 1m / 5m / 15m / 4h / 1d 作為觀看週期
+        cache_view_path = get_cache_path(sym_macro, view_timeframe)
+        loaded_view_csv = False
+        if os.path.exists(cache_view_path):
+            try:
+                df_v = pd.read_csv(cache_view_path, index_col=0, parse_dates=True).sort_index()
+                if df_v.index.name != "datetime":
+                    df_v.index.name = "datetime"
+                df_v_sub = df_v[(df_v.index >= s_dt) & (df_v.index <= e_dt)].copy()
+                if len(df_v_sub) < 35:
+                    df_v_sub = df_v.copy()
+                if len(df_v_sub) >= 10:
+                    df_v_ind = _add_indicators(df_v_sub)
+                    df_show = df_v_ind.iloc[-1200:] if len(df_v_ind) > 1200 else df_v_ind
+                    for ts, row in df_show.iterrows():
+                        candles.append({
+                            "time": int(ts.timestamp()),
+                            "datetime": ts.strftime("%Y-%m-%d %H:%M") if (ts.hour != 0 or ts.minute != 0) else ts.strftime("%Y-%m-%d"),
+                            "open": round(float(row["open"]), 2),
+                            "high": round(float(row["high"]), 2),
+                            "low": round(float(row["low"]), 2),
+                            "close": round(float(row["close"]), 2),
+                            "volume": int(row["volume"]),
+                            "ema20": round(float(row.get("ema20", row["close"])), 2),
+                            "ema50": round(float(row.get("ema50", row["close"])), 2),
+                            "vwap": round(float(row.get("vwap", row["close"])), 2)
+                        })
+                    loaded_view_csv = True
+                    data_source_label = f"🔵 智能載入本地 10 年快取 ({sym_macro} · {view_timeframe.upper()} 檢視視圖 · {len(df_v_sub):,} 根K棒)"
+            except Exception:
+                loaded_view_csv = False
 
-    # 先行補充一次多週期指標與真 1H ADX，避免多策略對比時重複計算 3 次
-    df_enriched = _add_multi_timeframe_indicators(df_base, symbol=symbol)
+        if not loaded_view_csv:
+            # 本地未找到該週期的獨立快取，自 1H 數據聚合或重採樣
+            if view_timeframe in ("4h", "1d"):
+                tf_rule = {"4h": "4h", "1d": "1D"}[view_timeframe]
+                df_resampled = df_strat_sub.resample(tf_rule, label="right", closed="right").agg({
+                    "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+                }).dropna()
+                df_resampled = _add_indicators(df_resampled)
+                df_show = df_resampled.iloc[-1200:] if len(df_resampled) > 1200 else df_resampled
+                for ts, row in df_show.iterrows():
+                    candles.append({
+                        "time": int(ts.timestamp()),
+                        "datetime": ts.strftime("%Y-%m-%d %H:%M") if (ts.hour != 0 or ts.minute != 0) else ts.strftime("%Y-%m-%d"),
+                        "open": round(float(row["open"]), 2),
+                        "high": round(float(row["high"]), 2),
+                        "low": round(float(row["low"]), 2),
+                        "close": round(float(row["close"]), 2),
+                        "volume": int(row["volume"]),
+                        "ema20": round(float(row.get("ema20", row["close"])), 2),
+                        "ema50": round(float(row.get("ema50", row["close"])), 2),
+                        "vwap": round(float(row.get("vwap", row["close"])), 2)
+                    })
+                data_source_label = f"🔵 1H 聚合生成 ({sym_macro} · {view_timeframe.upper()} 檢視視圖 · {len(candles):,} 根K棒)"
+            else:
+                candles, _ = resample_ohlcv(df_strat_ind, timeframe=view_timeframe, max_bars=1200)
+                data_source_label = f"🔵 觀看視圖 ({sym_macro} · {view_timeframe.upper()} · {len(candles):,} 根K棒)"
 
+        data_note = (
+            f"💡 時間窗口功能更新：交易邏輯寫死固定以 1H 實盤策略進出場（損益、勝率、夏普完全固定不變）。"
+            f"切換至【{view_timeframe.upper()}】僅用作圖表與開平倉點位視覺檢視。"
+        ) + (" " + data_note if data_note else "")
+
+    # -------------------------------------------------------------
+    # 步驟 3: 將 1H 產生的各筆交易開平倉標記投影到選定的觀看週期 K 線上
+    # -------------------------------------------------------------
     results = {}
     for strat_id in strategies:
-        res = run_single_strategy_backtest(df_enriched, variant=strat_id, params=params)
+        res = raw_results[strat_id]
         res["chart_markers"] = align_trades_to_candles(res["trades"], candles)
         results[strat_id] = res
 

@@ -40,7 +40,13 @@ recent_50_trades.json
 mes_paper_trade_log.csv
 trades_ledger.json
 incidents.json
-data/
+# Data directory & caches (Keep 1h/4h/1d small backtest caches, ignore huge 5m/15m files)
+data/*
+!data/ibkr_cache/
+data/ibkr_cache/*5m*
+data/ibkr_cache/*15m*
+data/ibkr_cache/*Combined*
+data/ibkr_cache/*Master*
 reports/
 
 # Archives & generated deploy files
