@@ -385,6 +385,7 @@ class LiveIBKRDualEngine:
         self.market_data_status = "REAL_TIME"
         self._competing_session_ts: float = 0.0
         self._last_10197_log_ts: float = 0.0
+        self._last_competing_notify_ts: float = 0.0
         self._last_live_quote_sig: Optional[Tuple[float, float, float, float, float, float]] = None
 
         # 異常稽核與每日結算報告管理器
@@ -393,6 +394,70 @@ class LiveIBKRDualEngine:
         self.report_scheduler = ReportScheduler()
         self.report_scheduler.start()
         self.last_snapshot_time = 0.0
+
+    def _handle_competing_session_detected(self, error_code: int, error_string: str):
+        """處理 IBKR 搶線異常 (10197 或 162)：主動安全暫停策略開倉、更新狀態檔案並發送 Telegram 警報"""
+        now_ts = time.time()
+        self._competing_session_ts = now_ts
+        self.market_data_status = "COMPETING_SESSION"
+
+        # 1. 紀錄前次狀態並立即置為暫停
+        was_enabled = bool(getattr(self, "trading_enabled_global", True))
+        self.trading_enabled_global = False
+
+        # 2. 持久化寫入 trade_control.json，使系統與儀表板徹底鎖定暫停
+        try:
+            ctrl = {}
+            if os.path.exists(CONTROL_FILE):
+                try:
+                    with open(CONTROL_FILE, "r", encoding="utf-8") as f:
+                        ctrl = json.load(f)
+                except Exception:
+                    ctrl = {}
+            ctrl["trading_enabled"] = False
+            ctrl["pause_reason"] = f"COMPETING_SESSION_{error_code}"
+            ctrl["pause_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ctrl["pause_detail"] = f"偵測到其他裝置搶線 (代碼 {error_code}): {error_string}"
+            with open(CONTROL_FILE, "w", encoding="utf-8") as fw:
+                json.dump(ctrl, fw, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.warning(f"寫入搶線暫停控制檔案異常: {e}")
+
+        # 3. 記錄日誌與狀態訊息
+        self.status_message = (
+            f"🚨 系統已自動暫停：偵測到其他裝置搶線 (代碼 {error_code})！"
+            "為防行情中斷與誤操作已阻斷新開倉。請退出手機 IBKR Mobile / 網頁版，確認後可於儀表板手動點擊【恢復交易】。"
+        )
+        logger.critical(
+            f"🚨 [搶線阻斷守護] 偵測到其他裝置登入搶線 (代碼 {error_code}: {error_string})！"
+            "系統已自動將 trading_enabled 設置為 False 暫停開倉守護。"
+        )
+
+        # 立即刷新狀態檔案
+        try:
+            self.write_status_file()
+        except Exception:
+            pass
+
+        # 4. 推播高優先級 Telegram 告警 (10 分鐘內不重複洗版)
+        last_notify = getattr(self, "_last_competing_notify_ts", 0.0)
+        if was_enabled or (now_ts - last_notify >= 600.0):
+            self._last_competing_notify_ts = now_ts
+            try:
+                from telegram_notifier import notifier
+                msg = (
+                    f"🚨 <b>【交易安全守護：自動暫停交易】</b>\n\n"
+                    f"⚠️ <b>偵測到其他裝置搶線登入！</b>\n"
+                    f"• <b>錯誤代碼</b>: <code>{error_code}</code>\n"
+                    f"• <b>原因說明</b>: 另一台裝置（如手機 IBKR Mobile、網頁 Client Portal 或其他 TWS）正在使用同一個帳號登入，導致本機連線或行情被搶佔。\n"
+                    f"• <b>安全處置</b>: <b>系統已立即自動暫停所有新開倉！</b>（既有在場持倉與 IBKR 伺服器端原生止損單仍有效生效）\n\n"
+                    f"👉 <b>後續恢復步驟</b>：\n"
+                    f"1. 請完全退出手機 App 或關閉網頁版登入。\n"
+                    f"2. 確認無其他裝置搶線後，登入儀表板點擊頂部【恢復交易】按鈕即可繼續運行。"
+                )
+                notifier.send_message_async(msg)
+            except Exception as te:
+                logger.warning(f"發送搶線 Telegram 通知失敗: {te}")
 
     def on_disconnected(self):
         """IBKR 連線中斷回呼（如被另一裝置登入踢出、Gateway 重啟或網絡斷線）"""
@@ -445,22 +510,12 @@ class LiveIBKRDualEngine:
         elif error_code == 10167:
             self.market_data_type = 3
             self.market_data_status = "DELAYED"
-        elif error_code == 10197:
-            now_ts = time.time()
-            self._competing_session_ts = now_ts
-            self.market_data_status = "COMPETING_SESSION"
-            self.status_message = (
-                "⚠️ IBKR 行情被其他裝置登入搶佔 (代碼 10197)：請關閉手機 IBKR Mobile / 網頁 Client Portal / 其他 TWS，關閉後報價會自動恢復。"
-            )
-            if now_ts - getattr(self, "_last_10197_log_ts", 0.0) >= 120.0:
-                self._last_10197_log_ts = now_ts
-                logger.warning(
-                    "⚠️ [行情工作階段衝突 10197] IBKR 回報 No market data during competing live session，"
-                    "代表另一裝置正同時使用相同帳號查看行情；已暫緩新開倉，請關閉手機 App / 網頁版後恢復。"
-                )
-        elif error_code == 162 and "different IP address" in error_string.lower():
-            self.status_message = "⚠️ 偵測到另一裝置 (如手機 IBKR Mobile 或網頁) 正在登入該帳戶，搶奪了連線權限！請退出手機 App 並重啟 Gateway。"
-            logger.warning(f"⚠️ [IP 衝突攔截] 收到 IBKR 代碼 162: {error_string}。偵測到另一裝置正在連線同一帳號，導致本機 Session IP 衝突。")
+        elif error_code == 10197 or "competing live session" in error_string.lower():
+            # 行情被其他裝置搶佔，觸發自動暫停交易與警報
+            self._handle_competing_session_detected(error_code, error_string)
+        elif error_code == 162 and any(k in error_string.lower() for k in ("different ip address", "competing live session", "competing")):
+            # 連線 IP 衝突或搶線，觸發自動暫停交易與警報
+            self._handle_competing_session_detected(error_code, error_string)
         elif error_code in (10147, 10148, 135, 136):
             # 撤銷幽靈單自癒：經紀商確認 OrderId 已不存在/已撤銷/已終止
             # 自動標記為死單並更新本地狀態，徹底根除 30 秒重複撤銷與洗版死循環

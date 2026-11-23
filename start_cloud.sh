@@ -15,6 +15,14 @@ fi
 
 PYTHON_BIN="$(which python3)"
 
+# 確保 IB Gateway Docker 容器運行中 (若尚未啟動或開機延遲則自動喚醒)
+if command -v docker &> /dev/null; then
+    if [ "$(docker inspect -f '{{.State.Running}}' ib-gateway-service 2>/dev/null)" != "true" ]; then
+        echo "🐳 正在啟動 IB Gateway Docker 容器..."
+        docker start ib-gateway-service 2>/dev/null || true
+    fi
+fi
+
 # 終止舊 session (如有) 並清理殘留進程
 tmux kill-session -t autotrade 2>/dev/null || true
 pkill -9 -f "server.py 8080" 2>/dev/null || true
