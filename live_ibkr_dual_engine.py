@@ -386,6 +386,10 @@ class LiveIBKRDualEngine:
         self._competing_session_ts: float = 0.0
         self._last_10197_log_ts: float = 0.0
         self._last_competing_notify_ts: float = 0.0
+        self._competing_session_paused: bool = False
+        self._last_competing_refresh_ts: float = 0.0
+        self._competing_healthy_ticks: int = 0
+        self._last_gateway_restart_ts: float = 0.0
         self._last_live_quote_sig: Optional[Tuple[float, float, float, float, float, float]] = None
 
         # 異常稽核與每日結算報告管理器
@@ -399,6 +403,8 @@ class LiveIBKRDualEngine:
         """處理 IBKR 搶線異常 (10197 或 162)：主動安全暫停策略開倉、更新狀態檔案並發送 Telegram 警報"""
         now_ts = time.time()
         self._competing_session_ts = now_ts
+        self._competing_session_paused = True
+        self._competing_healthy_ticks = 0
         self.market_data_status = "COMPETING_SESSION"
 
         # 1. 紀錄前次狀態並立即置為暫停
@@ -426,7 +432,7 @@ class LiveIBKRDualEngine:
         # 3. 記錄日誌與狀態訊息
         self.status_message = (
             f"🚨 系統已自動暫停：偵測到其他裝置搶線 (代碼 {error_code})！"
-            "為防行情中斷與誤操作已阻斷新開倉。請退出手機 IBKR Mobile / 網頁版，確認後可於儀表板手動點擊【恢復交易】。"
+            "為防行情中斷已阻斷新開倉。其他裝置用完關閉後，系統將自動重啟連接並恢復交易！"
         )
         logger.critical(
             f"🚨 [搶線阻斷守護] 偵測到其他裝置登入搶線 (代碼 {error_code}: {error_string})！"
@@ -451,13 +457,117 @@ class LiveIBKRDualEngine:
                     f"• <b>錯誤代碼</b>: <code>{error_code}</code>\n"
                     f"• <b>原因說明</b>: 另一台裝置（如手機 IBKR Mobile、網頁 Client Portal 或其他 TWS）正在使用同一個帳號登入，導致本機連線或行情被搶佔。\n"
                     f"• <b>安全處置</b>: <b>系統已立即自動暫停所有新開倉！</b>（既有在場持倉與 IBKR 伺服器端原生止損單仍有效生效）\n\n"
-                    f"👉 <b>後續恢復步驟</b>：\n"
-                    f"1. 請完全退出手機 App 或關閉網頁版登入。\n"
-                    f"2. 確認無其他裝置搶線後，登入儀表板點擊頂部【恢復交易】按鈕即可繼續運行。"
+                    f"👉 <b>全自動復原說明</b>：\n"
+                    f"1. 當您於手機 App 或網頁版使用完畢並關閉後，系統將會<b>自動探測、重新連線並刷新報價流</b>。\n"
+                    f"2. 報價與連線穩定後，將<b>自動解除暫停並推播通知</b>，無須手動重啟！"
                 )
                 notifier.send_message_async(msg)
             except Exception as te:
                 logger.warning(f"發送搶線 Telegram 通知失敗: {te}")
+
+    def check_and_recover_competing_session(self):
+        """巡檢搶線狀態：當其他裝置使用完畢退出後，自動重啟連接、刷新行情訂閱並恢復自動交易"""
+        # 1. 檢查是否處於搶線暫停狀態 (記憶體標記或持久化控制檔案)
+        is_paused = getattr(self, "_competing_session_paused", False)
+        if not is_paused:
+            if os.path.exists(CONTROL_FILE):
+                try:
+                    with open(CONTROL_FILE, "r", encoding="utf-8") as f:
+                        ctrl = json.load(f)
+                    if str(ctrl.get("pause_reason", "")).startswith("COMPETING_SESSION_"):
+                        is_paused = True
+                        self._competing_session_paused = True
+                except Exception:
+                    pass
+
+        if not is_paused:
+            return
+
+        now_ts = time.time()
+        last_comp = float(getattr(self, "_competing_session_ts", 0.0) or 0.0)
+
+        # 2. 定期 (每 15 秒) 主動向 IBKR 發送行情重新訂閱請求，探測其他裝置是否已釋放連線與報價
+        last_refresh = float(getattr(self, "_last_competing_refresh_ts", 0.0) or 0.0)
+        if now_ts - last_refresh >= 15.0:
+            self._last_competing_refresh_ts = now_ts
+            if self.ib and self.ib.isConnected():
+                try:
+                    logger.info("🔄 [搶線自癒探測] 正在發送行情重新訂閱請求，探測其他裝置是否已釋放連線與報價權限...")
+                    self.ib.reqMarketDataType(1)
+                    if self.contract_mes:
+                        self.ticker_mes = self.ib.reqMktData(self.contract_mes, '', False, False)
+                    if self.contract_mnq:
+                        self.ticker_mnq = self.ib.reqMktData(self.contract_mnq, '', False, False)
+                except Exception as e:
+                    logger.warning(f"搶線自癒探測刷新行情異常: {e}")
+
+        # 3. 檢查自上次搶線報錯後是否已冷卻足夠時間 (至少 20 秒，避免手機切換背景引起頻繁震盪)
+        if last_comp > 0.0 and (now_ts - last_comp) < 20.0:
+            return
+
+        # 4. 檢查連線狀態
+        if not (self.is_connected and self.ib and self.ib.isConnected()):
+            return
+
+        # 5. 檢查 MES 與 MNQ 實時報價是否已正常恢復
+        mes_ok = False
+        mnq_ok = False
+        if self.ticker_mes and ((self.ticker_mes.last and self.ticker_mes.last > 0) or (self.ticker_mes.close and self.ticker_mes.close > 0) or (self.ticker_mes.bid and self.ticker_mes.bid > 0)):
+            mes_ok = True
+        if self.ticker_mnq and ((self.ticker_mnq.last and self.ticker_mnq.last > 0) or (self.ticker_mnq.close and self.ticker_mnq.close > 0) or (self.ticker_mnq.bid and self.ticker_mnq.bid > 0)):
+            mnq_ok = True
+
+        if mes_ok and mnq_ok and self.market_data_status != "COMPETING_SESSION":
+            self._competing_healthy_ticks = getattr(self, "_competing_healthy_ticks", 0) + 1
+        else:
+            self._competing_healthy_ticks = 0
+
+        # 6. 連續 3 次輪詢 (約 6 秒) 確認報價數據流持續健康且無任何 10197/162 錯誤 -> 執行自動恢復！
+        if self._competing_healthy_ticks >= 3:
+            self._competing_session_paused = False
+            self._competing_session_ts = 0.0
+            self._competing_healthy_ticks = 0
+            self.market_data_status = "REAL_TIME"
+            self.trading_enabled_global = True
+
+            # 更新持久化控制檔案
+            ctrl = {}
+            if os.path.exists(CONTROL_FILE):
+                try:
+                    with open(CONTROL_FILE, "r", encoding="utf-8") as f:
+                        ctrl = json.load(f)
+                except Exception:
+                    ctrl = {}
+            ctrl["trading_enabled"] = True
+            ctrl["pause_reason"] = None
+            ctrl["resumed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ctrl["resume_note"] = "其他裝置已離線，實時報價流穩定重啟，系統已自動重啟連接並恢復交易"
+            try:
+                with open(CONTROL_FILE, "w", encoding="utf-8") as fw:
+                    json.dump(ctrl, fw, indent=2, ensure_ascii=False)
+            except Exception as e:
+                logger.warning(f"更新自動恢復控制檔案異常: {e}")
+
+            self.status_message = "🟢 其他裝置已結束使用，實時行情與連線已自動重啟，交易守護已全面恢復！"
+            logger.info("🟢 [搶線自癒完成] 偵測到其他裝置已退出，報價數據流已穩定恢復，系統已自動重啟連接並恢復雙策略交易！")
+            try:
+                self.write_status_file()
+            except Exception:
+                pass
+
+            # 推播 Telegram 恢復通知
+            try:
+                from telegram_notifier import notifier
+                msg = (
+                    f"🟢 <b>【AutoTrade 守護已自動重啟連接】</b>\n\n"
+                    f"✅ <b>偵測到其他裝置已結束使用！</b>\n"
+                    f"• <b>連線狀態</b>: IB Gateway 已正常連通 (Port: 4002)\n"
+                    f"• <b>市場報價</b>: MES 與 MNQ 實時報價流已穩定恢復\n"
+                    f"• <b>交易狀態</b>: <b>已自動解除暫停，雙策略交易守護已全面恢復運作！</b>"
+                )
+                notifier.send_message_async(msg)
+            except Exception as te:
+                logger.warning(f"發送自動恢復 Telegram 通知失敗: {te}")
 
     def on_disconnected(self):
         """IBKR 連線中斷回呼（如被另一裝置登入踢出、Gateway 重啟或網絡斷線）"""
@@ -931,6 +1041,20 @@ class LiveIBKRDualEngine:
         self.is_connected = False
         retry_tip = f" (已重試 {self.reconnect_attempts} 次，將於 {int(self.reconnect_delay)} 秒後再次重試)" if self.reconnect_attempts > 0 else ""
         self.status_message = f"⚠️ 尚未連線至 IB Gateway / TWS{retry_tip}。若另一裝置正在登入，系統將持續自動守護重連。"
+
+        # 若連續重試多次 (>= 6 次) 仍無法連線，且處於搶線或 Gateway 假死狀態，嘗試自動重啟 Docker Gateway 容器
+        now_gw = time.time()
+        last_gw_restart = float(getattr(self, "_last_gateway_restart_ts", 0.0) or 0.0)
+        if self.reconnect_attempts >= 6 and (now_gw - last_gw_restart >= 300.0):
+            if sys.platform.startswith("linux"):
+                self._last_gateway_restart_ts = now_gw
+                logger.warning("⚠️ [Gateway 容器自癒] 連續重連多次失敗，正在嘗試自動重啟 IB Gateway 容器以修復連線死鎖...")
+                try:
+                    subprocess.run(["docker", "restart", "ib-gateway-service"], check=False, timeout=30)
+                    time.sleep(10)
+                except Exception as de:
+                    logger.warning(f"自動重啟 Docker Gateway 異常: {de}")
+
         return False
 
     def _qualify_dual_contracts(self):
@@ -3378,11 +3502,16 @@ class LiveIBKRDualEngine:
                 if self.is_connected and self.ib and self.ib.isConnected():
                     self.ib.sleep(0.5)
                     self.sync_account_and_market()
+                    # 搶線自癒檢查：若此前因搶線暫停，在此檢查其他裝置是否已退出並自動重啟交易
+                    self.check_and_recover_competing_session()
                     self.ensure_position_protection()
                     # 先評估優先權最高的 V4.3
                     self.evaluate_v43_bar()
                     # 後評估受限的 V5.0
                     self.evaluate_v50_bar()
+                else:
+                    # 未連線狀態下亦進行搶線自癒巡檢與探測
+                    self.check_and_recover_competing_session()
 
                 # 3. 輸出狀態
                 self.write_status_file()
