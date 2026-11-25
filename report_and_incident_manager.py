@@ -192,8 +192,8 @@ class IncidentManager:
             category = "MARGIN"
             severity = "CRITICAL"
 
-        # 低風險或無害常規代碼 (162: HMDS查詢取消/臨時IP佔用衝突, 2103/2105/2107/2108/2119/2219: 數據農場波動)
-        elif error_code in (162, 2103, 2105, 2107, 2108, 2119, 2219):
+        # 低風險或無害常規代碼 (162: HMDS查詢取消/臨時IP佔用衝突, 366: HMDS查詢逾時或已清理, 2103/2105/2107/2108/2119/2219: 數據農場波動)
+        elif error_code in (162, 366, 2103, 2105, 2107, 2108, 2119, 2219):
             category = "DATA"
             severity = "INFO"
 

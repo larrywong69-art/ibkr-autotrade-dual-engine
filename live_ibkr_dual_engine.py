@@ -598,6 +598,7 @@ class LiveIBKRDualEngine:
             logger.info(f"🟢 收到 IBKR 恢復代碼 {error_code}: {error_string}，立即執行帳戶同步與持倉止損對帳補單...")
             self.is_connected = True
             self.is_reconnecting = False
+            self.status_message = f"🟢 雙策略守護運行中 (帳戶: {self.account_id} | MES 60% + MNQ 40%)"
             try:
                 self.sync_account_and_market()
                 self.ensure_position_protection()
@@ -930,6 +931,7 @@ class LiveIBKRDualEngine:
         if self.ib and self.ib.isConnected():
             self.is_connected = True
             self.is_reconnecting = False
+            self.status_message = f"🟢 雙策略守護運行中 (帳戶: {self.account_id} | MES 60% + MNQ 40%)"
             return True
 
         # 若之前有殘留的連線實例，先清理監聽器並強制斷開
