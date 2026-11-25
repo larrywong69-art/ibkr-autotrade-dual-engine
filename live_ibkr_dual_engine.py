@@ -286,6 +286,46 @@ def pair_executions_fifo(executions: List[Dict[str, Any]], fx_rate: float = 7.78
 
 
 class LiveIBKRDualEngine:
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    realized_pnl_hkd: float = 0.0
+    realized_pnl_usd: float = 0.0
+    futures_pnl_hkd: float = 0.0
+    futures_pnl_usd: float = 0.0
+    net_liquidation: float = 0.0
+    cash_balance: float = 0.0
+    available_funds: float = 0.0
+    init_margin_req: float = 0.0
+    equity_usd_total: float = 0.0
+    pool_v43_usd: float = 0.0
+    pool_v50_usd: float = 0.0
+    price_mes: float = 0.0
+    bid_mes: float = 0.0
+    ask_mes: float = 0.0
+    price_mnq: float = 0.0
+    bid_mnq: float = 0.0
+    ask_mnq: float = 0.0
+    symbol_mes: str = "MES"
+    symbol_mnq: str = "MNQ"
+    trading_enabled_global: bool = True
+    trading_enabled_v43: bool = True
+    trading_enabled_v50: bool = True
+    market_paused: bool = False
+    account_id: str = ""
+    usd_hkd_rate: float = 7.78
+    currency: str = "HKD"
+    ticker_mes: Any = None
+    ticker_mnq: Any = None
+    last_snapshot_time: float = 0.0
+    _force_golden_window: Optional[bool] = None
+    market_data_status: str = "REAL_TIME"
+    market_data_type: int = 1
+    is_connected: bool = False
+    is_reconnecting: bool = False
+    reconnect_attempts: int = 0
+    reconnect_delay: float = 5.0
+    status_message: str = "系統待命"
+
     def __init__(self, check_interval_sec: float = 2.0):
         self.interval = check_interval_sec
         # 旗艦 V9.3 策略引擎實例 (MES 享有 60% 優先池，MNQ 享有 40% 防飢餓池)
@@ -342,6 +382,10 @@ class LiveIBKRDualEngine:
         self.init_margin_req = 0.0
         self.realized_pnl = 0.0
         self.unrealized_pnl = 0.0
+        self.realized_pnl_usd = 0.0
+        self.realized_pnl_hkd = 0.0
+        self.futures_pnl_usd = 0.0
+        self.futures_pnl_hkd = 0.0
 
         # 資金池 (6:4 比例)
         self.equity_usd_total = 0.0
@@ -1136,17 +1180,76 @@ class LiveIBKRDualEngine:
                     self.available_funds = float(item.value)
                 elif item.tag == "InitMarginReq":
                     self.init_margin_req = float(item.value)
+                elif item.tag == "$LEDGER-RealizedPnL":
+                    curr = getattr(item, "currency", "")
+                    try:
+                        val = float(item.value)
+                        if curr == "USD":
+                            self.realized_pnl_usd = val
+                        elif curr in ("BASE", "HKD"):
+                            self.realized_pnl_hkd = val
+                    except (ValueError, TypeError):
+                        pass
                 elif item.tag == "RealizedPnL":
-                    self.realized_pnl = float(item.value)
+                    curr = getattr(item, "currency", "")
+                    try:
+                        val = float(item.value)
+                        if val != 0.0:
+                            if curr == "USD" and self.realized_pnl_usd == 0.0:
+                                self.realized_pnl_usd = val
+                            elif curr in ("BASE", "HKD") and self.realized_pnl_hkd == 0.0:
+                                self.realized_pnl_hkd = val
+                    except (ValueError, TypeError):
+                        pass
+                elif item.tag == "$LEDGER-FuturesPNL":
+                    curr = getattr(item, "currency", "")
+                    try:
+                        val = float(item.value)
+                        if curr == "USD":
+                            self.futures_pnl_usd = val
+                        elif curr in ("BASE", "HKD"):
+                            self.futures_pnl_hkd = val
+                    except (ValueError, TypeError):
+                        pass
+                elif item.tag == "FuturesPNL":
+                    curr = getattr(item, "currency", "")
+                    try:
+                        val = float(item.value)
+                        if val != 0.0:
+                            if curr == "USD" and self.futures_pnl_usd == 0.0:
+                                self.futures_pnl_usd = val
+                            elif curr in ("BASE", "HKD") and self.futures_pnl_hkd == 0.0:
+                                self.futures_pnl_hkd = val
+                    except (ValueError, TypeError):
+                        pass
                 elif item.tag == "UnrealizedPnL":
-                    self.unrealized_pnl = float(item.value)
-                elif item.tag == "ExchangeRate" and getattr(item, "currency", "") == "USD":
+                    try:
+                        self.unrealized_pnl = float(item.value)
+                    except (ValueError, TypeError):
+                        pass
+                elif item.tag in ("$LEDGER-ExchangeRate", "ExchangeRate") and getattr(item, "currency", "") == "USD":
                     try:
                         fx = float(item.value)
                         if 6.5 <= fx <= 9.0:
                             self.usd_hkd_rate = round(fx, 4)
                     except (TypeError, ValueError):
                         pass
+
+            # 跨幣種損益補齊 (若其中一方未設定則依即時匯率換算)
+            if self.realized_pnl_hkd != 0.0 and self.realized_pnl_usd == 0.0:
+                self.realized_pnl_usd = round(self.realized_pnl_hkd / self.usd_hkd_rate, 2)
+            elif self.realized_pnl_usd != 0.0 and self.realized_pnl_hkd == 0.0:
+                self.realized_pnl_hkd = round(self.realized_pnl_usd * self.usd_hkd_rate, 2)
+
+            if self.futures_pnl_hkd != 0.0 and self.futures_pnl_usd == 0.0:
+                self.futures_pnl_usd = round(self.futures_pnl_hkd / self.usd_hkd_rate, 2)
+            elif self.futures_pnl_usd != 0.0 and self.futures_pnl_hkd == 0.0:
+                self.futures_pnl_hkd = round(self.futures_pnl_usd * self.usd_hkd_rate, 2)
+
+            if self.currency == "HKD" and self.realized_pnl_hkd != 0.0:
+                self.realized_pnl = self.realized_pnl_hkd
+            elif self.currency == "USD" and self.realized_pnl_usd != 0.0:
+                self.realized_pnl = self.realized_pnl_usd
 
             # 從官方 reqPnL() 訂閱更新即時每日已實現與未實現損益
             try:
@@ -1175,7 +1278,7 @@ class LiveIBKRDualEngine:
 
             # 每 60 秒記錄一次官方淨值歷史快照
             now_ts = time.time()
-            if now_ts - self.last_snapshot_time >= 60.0:
+            if hasattr(self, "ledger_mgr") and now_ts - getattr(self, "last_snapshot_time", 0.0) >= 60.0:
                 self.last_snapshot_time = now_ts
                 self.ledger_mgr.record_equity_snapshot({
                     "equity": self.net_liquidation,
@@ -1191,7 +1294,7 @@ class LiveIBKRDualEngine:
             logger.warning(f"同步資金異常: {e}")
 
         # 2. MES 最新市價
-        if self.ticker_mes:
+        if getattr(self, "ticker_mes", None):
             p = self.ticker_mes.marketPrice()
             if p and not math.isnan(p) and p > 0:
                 self.price_mes = round(float(p), 2)
@@ -1206,7 +1309,7 @@ class LiveIBKRDualEngine:
                 self.ask_mes = round(float(self.ticker_mes.ask), 2)
 
         # 3. MNQ 最新市價
-        if self.ticker_mnq:
+        if getattr(self, "ticker_mnq", None):
             p = self.ticker_mnq.marketPrice()
             if p and not math.isnan(p) and p > 0:
                 self.price_mnq = round(float(p), 2)
@@ -1407,9 +1510,9 @@ class LiveIBKRDualEngine:
                     "is_live": True
                 }
 
-                if sym == "MES" and len(trades_v43) < 40:
+                if sym == "MES":
                     trades_v43.append(item)
-                elif sym == "MNQ" and len(trades_v50) < 40:
+                elif sym == "MNQ":
                     trades_v50.append(item)
         except Exception as e:
             logger.warning(f"讀取成交異常: {e}")
@@ -1630,8 +1733,11 @@ class LiveIBKRDualEngine:
         except Exception:
             hkt_now = datetime.now()
 
-        hm_hkt = hkt_now.hour * 60 + hkt_now.minute
-        is_golden_window = (hm_hkt >= 1350 or hm_hkt < 240)
+        if getattr(self, "_force_golden_window", None) is not None:
+            is_golden_window = bool(self._force_golden_window)
+        else:
+            hm_hkt = hkt_now.hour * 60 + hkt_now.minute
+            is_golden_window = (hm_hkt >= 1350 or hm_hkt < 240)
 
         if not is_golden_window:
             if qty > 1:
@@ -3090,17 +3196,37 @@ class LiveIBKRDualEngine:
             2
         )
         calc_unrealized_hkd = round(calc_unrealized * fx, 2)
+        # 計算由今日成交全量加總的備援已實現損益 (包含 MES/MNQ 全量成交)
         calc_realized = round(sum(float(t.get("realized_pnl", 0.0)) for t in (trades_v43 + trades_v50)), 2)
         calc_realized_hkd = round(calc_realized * fx, 2)
 
+        # 已實現損益：優先採用 IBKR 官方帳本 $LEDGER-RealizedPnL (精準對齊官方結算)
+        if self.realized_pnl_hkd != 0.0:
+            display_realized_hkd = round(self.realized_pnl_hkd, 2)
+            display_realized_usd = round(self.realized_pnl_usd if self.realized_pnl_usd != 0.0 else (self.realized_pnl_hkd / fx), 2)
+        elif self.realized_pnl_usd != 0.0:
+            display_realized_usd = round(self.realized_pnl_usd, 2)
+            display_realized_hkd = round(self.realized_pnl_usd * fx, 2)
+        elif self.realized_pnl != 0.0:
+            if self.currency == "HKD":
+                display_realized_hkd = round(self.realized_pnl, 2)
+                display_realized_usd = round(self.realized_pnl / fx, 2)
+            else:
+                display_realized_usd = round(self.realized_pnl, 2)
+                display_realized_hkd = round(self.realized_pnl * fx, 2)
+        else:
+            # 降級使用全量今日成交明細加總
+            display_realized_usd = calc_realized
+            display_realized_hkd = calc_realized_hkd
+
+        display_futures_pnl_hkd = round(self.futures_pnl_hkd, 2) if self.futures_pnl_hkd != 0.0 else round(self.futures_pnl_usd * fx, 2)
+        display_futures_pnl_usd = round(self.futures_pnl_usd, 2) if self.futures_pnl_usd != 0.0 else round(self.futures_pnl_hkd / fx, 2)
+
         if self.currency == "HKD":
             display_unrealized_hkd = self.unrealized_pnl if self.unrealized_pnl != 0.0 else calc_unrealized_hkd
-            display_realized_hkd = self.realized_pnl if self.realized_pnl != 0.0 else calc_realized_hkd
         else:
             raw_u = self.unrealized_pnl if self.unrealized_pnl != 0.0 else calc_unrealized
-            raw_r = self.realized_pnl if self.realized_pnl != 0.0 else calc_realized
             display_unrealized_hkd = round(raw_u * fx, 2)
-            display_realized_hkd = round(raw_r * fx, 2)
 
         all_recent_trades = sorted(
             trades_v43 + trades_v50,
@@ -3162,13 +3288,16 @@ class LiveIBKRDualEngine:
                 )
             ),
 
-            # 全局帳戶總覽（Unrealized / Realized 統一以 HKD 提供）
+            # 全局帳戶總覽（提供精準 HKD 與 USD 雙幣對齊）
             "equity": self.net_liquidation,
             "cash_balance": self.cash_balance,
             "available_funds": self.available_funds,
             "margin_requirement": self.init_margin_req,
             "realized_pnl": display_realized_hkd,
             "realized_pnl_hkd": display_realized_hkd,
+            "realized_pnl_usd": display_realized_usd,
+            "futures_pnl_hkd": display_futures_pnl_hkd,
+            "futures_pnl_usd": display_futures_pnl_usd,
             "unrealized_pnl": display_unrealized_hkd,
             "unrealized_pnl_hkd": display_unrealized_hkd,
             "unrealized_pnl_usd": calc_unrealized,
@@ -3200,7 +3329,7 @@ class LiveIBKRDualEngine:
                 "allocated_pool_usd": round(self.pool_v43_usd, 2),
                 "active_position": pos_v43,
                 "open_orders": orders_v43,
-                "recent_trades": trades_v43
+                "recent_trades": trades_v43[:40]
             },
 
             # V9.3 MNQ 實況子樹 (兼容 v50 key 以免舊版前端讀取不到)
@@ -3216,7 +3345,7 @@ class LiveIBKRDualEngine:
                 "allocated_pool_usd": round(self.pool_v50_usd, 2),
                 "active_position": pos_v50,
                 "open_orders": orders_v50,
-                "recent_trades": trades_v50
+                "recent_trades": trades_v50[:40]
             },
 
             # V9.3 主視圖索引
@@ -3240,7 +3369,7 @@ class LiveIBKRDualEngine:
             "trading_enabled": self.trading_enabled_global,
             "active_position": pos_v43 or pos_v50,
             "open_orders": orders_v43 + orders_v50,
-            "recent_trades": all_recent_trades,
+            "recent_trades": all_recent_trades[:60],
             "paired_trades": paired_trades,
         }
 

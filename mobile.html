@@ -633,7 +633,11 @@
       const rPnlHkd = data.realized_pnl_hkd !== undefined
         ? (Number(data.realized_pnl_hkd) || 0)
         : (curr === "HKD" ? (Number(data.realized_pnl) || 0) : ((Number(data.realized_pnl) || 0) * fxRate));
-      document.getElementById("val-realized-pnl").textContent = `已實現: ${fmtHkd(rPnlHkd)}`;
+      const rPnlUsd = data.realized_pnl_usd !== undefined
+        ? (Number(data.realized_pnl_usd) || 0)
+        : (rPnlHkd / (fxRate || 7.84));
+      const signUsd = rPnlUsd >= 0 ? "+" : "";
+      document.getElementById("val-realized-pnl").textContent = `已實現: ${fmtHkd(rPnlHkd)} (${signUsd}$${rPnlUsd.toFixed(2)} USD)`;
 
       const avail = data.available_funds || 0;
       document.getElementById("val-avail").textContent = "$" + avail.toLocaleString('en-US', {maximumFractionDigits: 0});

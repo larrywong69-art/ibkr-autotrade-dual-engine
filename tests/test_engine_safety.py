@@ -13,7 +13,9 @@ import shutil
 import unittest
 import logging
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
@@ -253,9 +255,64 @@ class TestLiveEngineOrderHygiene(unittest.TestCase):
         # With live FX 7.85 and 30,000 HKD (~$3,821 USD) available, 5 MES gets downsized to 2 lots (1800 * 2 <= 3821)
         self.eng.net_liquidation = 250000.0
         self.eng.available_funds = 30000.0
+        self.eng._force_golden_window = True
         self.eng.place_v93_bracket_order("MES", sig)
         self.assertEqual(sig.contracts, 2)
         self.assertEqual(len(self.placed_orders), 6)  # 2 tranches * 3 orders, runner_price=None safe
+
+    def test_sync_account_and_market_ledger_pnl_alignment(self):
+        """驗證官方 $LEDGER-RealizedPnL 與 $LEDGER-FuturesPNL 正確同步至港幣與美金"""
+        self.eng.account_id = "DU999999"
+        self.eng.ib.isConnected.return_value = True
+        self.eng.ib.accountValues.return_value = [
+            SimpleNamespace(tag="NetLiquidation", value="1044882.29", currency="HKD"),
+            SimpleNamespace(tag="$LEDGER-RealizedPnL", value="15986.40", currency="BASE"),
+            SimpleNamespace(tag="$LEDGER-RealizedPnL", value="2039.30", currency="USD"),
+            SimpleNamespace(tag="$LEDGER-FuturesPNL", value="15599.93", currency="BASE"),
+            SimpleNamespace(tag="$LEDGER-FuturesPNL", value="1990.00", currency="USD"),
+            SimpleNamespace(tag="$LEDGER-ExchangeRate", value="7.8392", currency="USD"),
+            SimpleNamespace(tag="RealizedPnL", value="0.00", currency="HKD"),
+        ]
+        self.eng.ib.pnl.return_value = []
+        self.eng.sync_account_and_market()
+
+        self.assertAlmostEqual(self.eng.realized_pnl_hkd, 15986.40, places=2)
+        self.assertAlmostEqual(self.eng.realized_pnl_usd, 2039.30, places=2)
+        self.assertAlmostEqual(self.eng.futures_pnl_hkd, 15599.93, places=2)
+        self.assertAlmostEqual(self.eng.futures_pnl_usd, 1990.00, places=2)
+        self.assertAlmostEqual(self.eng.realized_pnl, 15986.40, places=2)
+        self.assertAlmostEqual(self.eng.usd_hkd_rate, 7.8392, places=4)
+
+        # 驗證輸出至 status 檔案時雙幣與純利對齊
+        import live_ibkr_dual_engine as eng_mod
+        import json
+        self.eng.is_connected = True
+        self.eng.status_message = "OK"
+        self.eng.market_paused = False
+        self.eng.symbol_mes = "MESZ6"
+        self.eng.symbol_mnq = "MNQZ6"
+        self.eng.trading_enabled_global = True
+        self.eng.trading_enabled_v43 = True
+        self.eng.trading_enabled_v50 = True
+        self.eng.get_real_positions = lambda: (None, None)
+        self.eng.get_real_open_orders = lambda: ([], [])
+        self.eng.get_real_executions = lambda: ([], [])
+        self.eng._merge_with_historical_trades = lambda trades: []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_status = os.path.join(tmp, "trade_status.json")
+            orig_status = eng_mod.STATUS_FILE
+            try:
+                eng_mod.STATUS_FILE = tmp_status
+                self.eng.write_status_file()
+                with open(tmp_status, "r", encoding="utf-8") as f:
+                    st_data = json.load(f)
+                self.assertAlmostEqual(st_data["realized_pnl_hkd"], 15986.40, places=2)
+                self.assertAlmostEqual(st_data["realized_pnl_usd"], 2039.30, places=2)
+                self.assertAlmostEqual(st_data["futures_pnl_hkd"], 15599.93, places=2)
+                self.assertAlmostEqual(st_data["futures_pnl_usd"], 1990.00, places=2)
+            finally:
+                eng_mod.STATUS_FILE = orig_status
 
     def test_emergency_flat_sets_market_order_outside_rth(self):
         self.eng.account_id = "DU999999"

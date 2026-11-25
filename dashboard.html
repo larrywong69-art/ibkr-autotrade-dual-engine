@@ -192,11 +192,14 @@
       <!-- 卡片 3: 今日累計已實現損益 -->
       <div class="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-4 sm:p-5 shadow-sm">
         <div class="flex items-center justify-between text-xs text-[var(--muted-foreground)] mb-2">
-          <span>已實現損益 (Realized PnL · HKD)</span>
+          <span>已實現損益 (Realized PnL · HKD / USD)</span>
           <span class="text-emerald-500 font-medium bg-emerald-500/10 px-1.5 py-0.5 rounded" id="realized-pnl-pct">+0.00%</span>
         </div>
         <div class="text-2xl font-black text-slate-300 tracking-tight font-mono" id="realized-pnl">
           HK$ 0.00
+        </div>
+        <div class="text-xs font-medium text-[var(--muted-foreground)] mt-0.5 font-mono" id="realized-pnl-usd">
+          ≈ $0.00 USD
         </div>
         <div class="flex items-center justify-between mt-2 pt-2 border-t border-[var(--border)] text-xs text-[var(--muted-foreground)]">
           <span>雙引擎成交紀錄:</span>
@@ -1391,15 +1394,32 @@
           }
         }
 
-        // 2. 已實現損益（統一以 HKD 表示）
+        // 2. 已實現損益（統一以 HKD 與 USD 雙幣精準對齊顯示）
         if (data.realized_pnl !== undefined || data.realized_pnl_hkd !== undefined) {
           const realizedHkd = data.realized_pnl_hkd !== undefined
             ? (Number(data.realized_pnl_hkd) || 0)
             : (curr === 'HKD' ? (Number(data.realized_pnl) || 0) : (Number(data.realized_pnl) || 0) * fxRate);
+          const realizedUsd = data.realized_pnl_usd !== undefined
+            ? (Number(data.realized_pnl_usd) || 0)
+            : (realizedHkd / (fxRate || 7.84));
+          const futuresHkd = data.futures_pnl_hkd !== undefined ? Number(data.futures_pnl_hkd) : null;
+          const futuresUsd = data.futures_pnl_usd !== undefined ? Number(data.futures_pnl_usd) : null;
+
           const realEl = document.getElementById('realized-pnl');
           if (realEl) {
             realEl.innerText = formatSignedHkd(realizedHkd);
             realEl.className = realizedHkd > 0 ? 'text-2xl font-black text-emerald-500 tracking-tight font-mono' : (realizedHkd < 0 ? 'text-2xl font-black text-rose-500 tracking-tight font-mono' : 'text-2xl font-black text-slate-300 tracking-tight font-mono');
+          }
+          const realUsdEl = document.getElementById('realized-pnl-usd');
+          if (realUsdEl) {
+            const sign = realizedUsd >= 0 ? '+' : '';
+            let usdText = `≈ ${sign}$${realizedUsd.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} USD`;
+            if (futuresUsd !== null && Math.abs(futuresUsd - realizedUsd) > 0.01) {
+              const fSign = futuresUsd >= 0 ? '+' : '';
+              usdText += ` · 扣費純利: ${fSign}$${futuresUsd.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+            }
+            realUsdEl.innerText = usdText;
+            realUsdEl.className = realizedUsd > 0 ? 'text-xs font-medium text-emerald-400 mt-0.5 font-mono' : (realizedUsd < 0 ? 'text-xs font-medium text-rose-400 mt-0.5 font-mono' : 'text-xs font-medium text-[var(--muted-foreground)] mt-0.5 font-mono');
           }
           const pctEl = document.getElementById('realized-pnl-pct');
           if (pctEl && equityHkd > 0) {
