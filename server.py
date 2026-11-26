@@ -745,7 +745,9 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path == "/api/diagnostics/download":
-            fmt = str(query.get("format", ["html"])[0]).lower().strip()
+            download_type = str(query.get("type", ["trades"])[0]).lower().strip()
+            if download_type not in ("trades", "incidents"):
+                download_type = "trades"
             try:
                 limit_trades = int(query.get("limit_trades", [100])[0])
             except ValueError:
@@ -773,10 +775,14 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                     status_snapshot=status_snapshot,
                     log_lines=log_lines
                 )
-                target_path = gen_info["csv_path"] if fmt == "csv" else gen_info["html_path"]
-                content_type = "text/csv; charset=utf-8" if fmt == "csv" else "text/html; charset=utf-8"
-                ext = "csv" if fmt == "csv" else "html"
-                ascii_name = f"AutoTrade_diagnostics_{gen_info['ts_tag']}.{ext}"
+                if download_type == "incidents":
+                    target_path = gen_info["incidents_csv_path"]
+                    ascii_name = f"AutoTrade_incidents_{gen_info['ts_tag']}.csv"
+                else:
+                    target_path = gen_info["trades_csv_path"]
+                    ascii_name = f"AutoTrade_trades_{gen_info['ts_tag']}.csv"
+
+                content_type = "text/csv; charset=utf-8"
                 utf8_name = quote(os.path.basename(target_path))
 
                 with open(target_path, "rb") as df:
@@ -942,6 +948,16 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+            return
+
+        if parsed.path == "/api/reports/sync_master_tracker":
+            try:
+                from gdrive_report_manager import GoogleDriveReportManager
+                mgr = GoogleDriveReportManager()
+                res = mgr.sync_master_tracker_to_gdrive()
+                self._send_json(200, res)
+            except Exception as e:
+                self._send_json(500, {"status": "error", "message": f"同步累計追蹤總表失敗: {str(e)}"})
             return
 
         if parsed.path == "/api/diagnostics/export_gdrive":

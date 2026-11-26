@@ -1009,11 +1009,24 @@ class DailyReportGenerator:
 
         # 若已同步至 Google Drive，增加直接訪問快捷鏈結
         gdrive_sync = data.get("gdrive_sync")
-        if gdrive_sync and gdrive_sync.get("doc_url"):
+        if gdrive_sync and (gdrive_sync.get("trades_sheet_url") or gdrive_sync.get("sheet_url") or gdrive_sync.get("folder_url")):
+            trades_url = gdrive_sync.get("trades_sheet_url") or gdrive_sync.get("sheet_url", "")
+            incidents_url = gdrive_sync.get("incidents_sheet_url", "")
+            master_url = gdrive_sync.get("master_sheet_url", "")
+            folder_url = gdrive_sync.get("folder_url", "")
+            links = []
+            if trades_url:
+                links.append(f"[📊 在 Google Sheets 開啟交易明細]({trades_url})")
+            if incidents_url:
+                links.append(f"[⚠️ 在 Google Sheets 開啟異常報告]({incidents_url})")
+            if master_url:
+                links.append(f"[📈 累計追蹤總表]({master_url})")
+            if folder_url:
+                links.append(f"[📁 雲端資料夾]({folder_url})")
             lines.extend([
                 "",
                 f"> [!TIP]",
-                f"> **☁️ Google Drive 雲端同步**：[📄 在 Google Docs 開啟報告文件]({gdrive_sync.get('doc_url')}) | [📊 在 Google Sheets 開啟明細試算表]({gdrive_sync.get('sheet_url')}) | [📈 累計追蹤總表]({gdrive_sync.get('master_sheet_url', '')}) | [📁 雲端資料夾]({gdrive_sync.get('folder_url', '')})",
+                f"> **☁️ Google Drive 雲端同步**：{' | '.join(links)}",
             ])
 
         lines.extend([

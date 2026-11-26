@@ -33,9 +33,25 @@ GDRIVE_TEMP_DIR = os.path.join(REPORTS_DIR, "gdrive_exports")
 MASTER_TRACKER_CSV = os.path.join(DATA_DIR, "master_performance_tracker.csv")
 GDRIVE_SYNC_INDEX = os.path.join(DATA_DIR, "gdrive_sync_index.json")
 
+# 子目錄設定：交易明細與異常報告分開獨立存放
+TRADES_REPORT_DIR = os.path.join(REPORTS_DIR, "交易明細")
+INCIDENTS_REPORT_DIR = os.path.join(REPORTS_DIR, "異常報告")
+GDRIVE_TEMP_TRADES_DIR = os.path.join(GDRIVE_TEMP_DIR, "交易明細")
+GDRIVE_TEMP_INCIDENTS_DIR = os.path.join(GDRIVE_TEMP_DIR, "異常報告")
+
+# Google Drive 專屬子資料夾對應 ID (V9.3 根目錄: 1jsWI6h1Kd634fmnp98PMs7IX-Yey_naX)
+GDRIVE_SUBFOLDERS = {
+    "交易明細": "1qWCpVfJ_JN0GbvgaEbvFY9jXZHgU_6Rb",
+    "異常報告": "1Bfq3KSBxHAQjJGcNitx2ko8uDDyFo9d_",
+}
+
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(REPORTS_DIR, exist_ok=True)
 os.makedirs(GDRIVE_TEMP_DIR, exist_ok=True)
+os.makedirs(TRADES_REPORT_DIR, exist_ok=True)
+os.makedirs(INCIDENTS_REPORT_DIR, exist_ok=True)
+os.makedirs(GDRIVE_TEMP_TRADES_DIR, exist_ok=True)
+os.makedirs(GDRIVE_TEMP_INCIDENTS_DIR, exist_ok=True)
 
 # Google Drive 專屬資料夾 ID (V9.3 累積表現資料夾 ID: 1jsWI6h1Kd634fmnp98PMs7IX-Yey_naX，可透過環境變數 GDRIVE_FOLDER_ID 覆寫)
 DEFAULT_GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID", "1jsWI6h1Kd634fmnp98PMs7IX-Yey_naX").strip()
@@ -541,6 +557,60 @@ table.data-table tr:nth-child(even) {{
                 ])
 
     # --------------------------------------------------------------------------
+    # 2b. 當日異常報告 CSV 生成
+    # --------------------------------------------------------------------------
+    def generate_incidents_csv(
+        self,
+        report_data: Dict[str, Any],
+        output_path: str,
+        log_lines: Optional[List[str]] = None
+    ):
+        """
+        生成當日異常稽核結構化 CSV (支援 UTF-8 BOM 供試算表完美識別中文)
+        """
+        inc = report_data.get("incident_audit", {})
+        top_inc = inc.get("recent_top", []) or inc.get("incidents", []) or report_data.get("incidents", [])
+        by_sev = inc.get("by_severity", {})
+
+        with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            # 第一部分：異常稽核統計摘要
+            writer.writerow(["=== 異常稽核核心統計 ==="])
+            writer.writerow(["報告日期", report_data.get("report_date", "")])
+            writer.writerow(["異常總筆數", inc.get("total_count", len(top_inc))])
+            writer.writerow(["INFO筆數", by_sev.get("INFO", 0)])
+            writer.writerow(["WARNING筆數", by_sev.get("WARNING", 0)])
+            writer.writerow(["ERROR筆數", by_sev.get("ERROR", 0)])
+            writer.writerow(["CRITICAL筆數", by_sev.get("CRITICAL", 0)])
+            writer.writerow([])
+
+            # 第二部分：異常事件詳細記錄
+            writer.writerow(["=== 異常事件詳細記錄 ==="])
+            writer.writerow(["發生時間", "嚴重程度", "分類", "代碼", "來源", "異常描述", "詳細資訊"])
+            for item in top_inc:
+                details_val = item.get("details", {})
+                if isinstance(details_val, (dict, list)):
+                    details_str = json.dumps(details_val, ensure_ascii=False)
+                else:
+                    details_str = str(details_val or "")
+                writer.writerow([
+                    item.get("timestamp", ""),
+                    item.get("severity", ""),
+                    item.get("category", ""),
+                    item.get("code", ""),
+                    item.get("source", ""),
+                    item.get("message", ""),
+                    details_str
+                ])
+
+            # 第三部分：若有日誌片段則附加
+            if log_lines:
+                writer.writerow([])
+                writer.writerow(["=== 系統引擎運行日誌片段 (最新) ==="])
+                for line in log_lines[-100:]:
+                    writer.writerow([line.strip()])
+
+    # --------------------------------------------------------------------------
     # 3. 累積總表維護 (Master Performance Tracker Sheet)
     # --------------------------------------------------------------------------
     def update_master_tracker_csv(self, report_data: Dict[str, Any], doc_url: str = "", sheet_url: str = "") -> str:
@@ -668,10 +738,15 @@ table.data-table tr:nth-child(even) {{
             return f"https://docs.google.com/spreadsheets/d/{file_id}/edit"
         return f"https://drive.google.com/file/d/{file_id}/view"
 
-    def _upload_via_rclone(self, remote: str, file_path: str) -> Tuple[str, str, str]:
-        """使用 rclone copyto 上傳檔案至指定 Google Drive 資料夾，並嘗試解析 Drive File ID"""
+    def _upload_via_rclone(self, remote: str, file_path: str, subfolder: str = "") -> Tuple[str, str, str]:
+        """使用 rclone copyto 上傳檔案至指定 Google Drive 資料夾或子資料夾，並嘗試解析 Drive File ID"""
         filename = os.path.basename(file_path)
-        remote_target = f"{remote}{filename}"
+        subfolder_clean = subfolder.strip().strip("/")
+        if subfolder_clean:
+            remote_target = f"{remote}{subfolder_clean}/{filename}"
+        else:
+            remote_target = f"{remote}{filename}"
+
         cmd_copy = ["rclone", "copyto", file_path, remote_target]
         if self.folder_id:
             cmd_copy.extend(["--drive-root-folder-id", self.folder_id])
@@ -695,22 +770,33 @@ table.data-table tr:nth-child(even) {{
 
         if file_id:
             return file_id, f"https://drive.google.com/file/d/{file_id}/view", ""
-        return f"rclone:{filename}", self.folder_url, ""
 
-    def _upload_to_gdrive(self, file_path: str, mime_type: str = "", update_file_id: str = "") -> Tuple[str, str, str]:
+        subfolder_id = GDRIVE_SUBFOLDERS.get(subfolder_clean, "")
+        folder_link = f"https://drive.google.com/drive/folders/{subfolder_id}" if subfolder_id else self.folder_url
+        return f"rclone:{filename}", folder_link, ""
+
+    def _upload_to_gdrive(
+        self,
+        file_path: str,
+        mime_type: str = "",
+        update_file_id: str = "",
+        subfolder: str = ""
+    ) -> Tuple[str, str, str]:
         """統一執行 gdrive 或 rclone 上傳並回傳 (file_id, url, error_msg)"""
         backend, detail = self._detect_upload_backend()
         if not backend:
             return "", "", detail
 
         if backend == "rclone":
-            return self._upload_via_rclone(detail, file_path)
+            return self._upload_via_rclone(detail, file_path, subfolder=subfolder)
 
         mime_flag = f'--mime-type "{mime_type}" ' if mime_type else ""
         if update_file_id and not str(update_file_id).startswith("rclone:"):
             cmd = f'gdrive mutate update {update_file_id} "{file_path}" {mime_flag}--json'
         else:
-            parent_flag = f'--parent "{self.folder_id}" ' if self.folder_id else ""
+            subfolder_clean = subfolder.strip().strip("/")
+            target_parent_id = GDRIVE_SUBFOLDERS.get(subfolder_clean, self.folder_id)
+            parent_flag = f'--parent "{target_parent_id}" ' if target_parent_id else ""
             cmd = f'gdrive mutate upload "{file_path}" {parent_flag}{mime_flag}--json'
 
         code, out, err = self._run_gdrive_cmd(cmd)
@@ -718,6 +804,61 @@ table.data-table tr:nth-child(even) {{
             return "", "", (err or out or f"exit={code}")
         file_id = self._extract_gdrive_file_id(out) or update_file_id
         return file_id, self._build_drive_url(file_id, mime_type), ""
+
+    # --------------------------------------------------------------------------
+    # 3b. 累積追蹤總表同步至 Google Drive (根目錄)
+    # --------------------------------------------------------------------------
+    def sync_master_tracker_to_gdrive(self) -> Dict[str, Any]:
+        """
+        將本地 data/master_performance_tracker.csv 同步/覆寫至 Google Drive 根目錄。
+        每日推播自動執行，亦支援隨時手動/API 觸發。
+        """
+        if not os.path.exists(MASTER_TRACKER_CSV):
+            headers = [
+                "日期", "帳戶幣種", "期初淨值", "期末淨值", "當日淨損益", "當日收益率(%)",
+                "成交筆數", "勝率(%)", "獲利因子", "總佣金(USD)", "V4.3淨損益(USD)", "V5.0淨損益(USD)",
+                "異常事件數", "Google Doc 報告連結", "Google Sheet 明細連結"
+            ]
+            with open(MASTER_TRACKER_CSV, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+
+        master_upload_csv = os.path.join(GDRIVE_TEMP_DIR, "AutoTrade_每日績效累計追蹤總表.csv")
+        try:
+            shutil.copyfile(MASTER_TRACKER_CSV, master_upload_csv)
+        except Exception:
+            master_upload_csv = MASTER_TRACKER_CSV
+
+        master_file_id = self.sync_index.get("master_sheet_id", "")
+        if not master_file_id:
+            master_file_id = "1KD4cMabfeP9nek1jGxuLE4SVHBch_N1S"
+
+        file_id, sheet_url, err = self._upload_to_gdrive(
+            master_upload_csv,
+            mime_type="application/vnd.google-apps.spreadsheet",
+            update_file_id=master_file_id,
+            subfolder=""
+        )
+
+        if file_id:
+            self.sync_index["master_sheet_id"] = file_id
+            self.sync_index["master_sheet_url"] = sheet_url or self._build_drive_url(file_id, "application/vnd.google-apps.spreadsheet")
+            self._save_sync_index()
+            logger.info(f"📈 [累計總表同步成功] ID={file_id} URL={self.sync_index['master_sheet_url']}")
+            return {
+                "status": "ok",
+                "file_id": file_id,
+                "url": self.sync_index["master_sheet_url"],
+                "path": master_upload_csv,
+                "message": "累計追蹤總表已成功同步至 Google Drive 根目錄"
+            }
+        else:
+            logger.warning(f"累計總表同步失敗: {err}")
+            return {
+                "status": "error",
+                "message": f"累計總表同步失敗: {err}",
+                "path": master_upload_csv
+            }
 
     # --------------------------------------------------------------------------
     # 4. 核心上傳與推播動作 (Push Daily Report)
@@ -730,10 +871,11 @@ table.data-table tr:nth-child(even) {{
     ) -> Dict[str, Any]:
         """
         執行 Google Drive 每日推播與總表自動更新：
-        1. 匯出當日交易明細 CSV，統一命名格式為「{YYYY-MM-DD}交易明細.csv」。
-        2. 若 only_trade_detail=True（預設）：每日僅輸出上傳該交易明細檔案至 Google Drive，
-           避免資料夾產生冗餘 Google Doc 與額外追蹤表。
-        3. 同步觸發 GoogleSheetsSyncManager 自動更新「AutoTrade_交易紀錄與分析總表」與「AutoTrade_帳戶結餘表」。
+        1. 匯出當日交易明細 CSV，存入「reports/交易明細/」與「reports/gdrive_exports/交易明細/」，上傳至 Drive「交易明細」子資料夾。
+        2. 匯出當日異常報告 CSV，存入「reports/異常報告/」與「reports/gdrive_exports/異常報告/」，上傳至 Drive「異常報告」子資料夾。
+        3. 不再生成或上傳 HTML 診斷報告文件。
+        4. 必定每日自動更新並上傳 Google Drive 根目錄的「AutoTrade_每日績效累計追蹤總表.csv」。
+        5. 同步觸發 GoogleSheetsSyncManager 自動更新「AutoTrade_交易紀錄與分析總表」與「AutoTrade_帳戶結餘表」。
         """
         if isinstance(report_data, str):
             report_data = {"report_date": report_data}
@@ -752,6 +894,9 @@ table.data-table tr:nth-child(even) {{
             except Exception as e:
                 logger.warning(f"自動補全 {date_str} 報告失敗: {e}")
 
+        trades_folder_url = f"https://drive.google.com/drive/folders/{GDRIVE_SUBFOLDERS['交易明細']}"
+        incidents_folder_url = f"https://drive.google.com/drive/folders/{GDRIVE_SUBFOLDERS['異常報告']}"
+
         # 檢查是否已上傳且無需強制覆蓋
         existing_info = self.sync_index.get("dates", {}).get(date_str)
         if existing_info and not force_reupload:
@@ -760,14 +905,23 @@ table.data-table tr:nth-child(even) {{
                 "status": "ok",
                 "already_synced": True,
                 "date": date_str,
-                "doc_id": existing_info.get("doc_id", ""),
-                "doc_url": existing_info.get("doc_url", ""),
-                "sheet_id": existing_info.get("sheet_id", ""),
-                "sheet_url": existing_info.get("sheet_url", ""),
+                "doc_id": "",
+                "doc_url": "",
+                "sheet_id": existing_info.get("trades_sheet_id", "") or existing_info.get("sheet_id", ""),
+                "sheet_url": existing_info.get("trades_sheet_url", "") or existing_info.get("sheet_url", ""),
+                "trades_sheet_id": existing_info.get("trades_sheet_id", "") or existing_info.get("sheet_id", ""),
+                "trades_sheet_url": existing_info.get("trades_sheet_url", "") or existing_info.get("sheet_url", ""),
+                "incidents_sheet_id": existing_info.get("incidents_sheet_id", ""),
+                "incidents_sheet_url": existing_info.get("incidents_sheet_url", ""),
+                "csv_filename": existing_info.get("trades_csv_filename", f"{date_str}交易明細.csv"),
+                "trades_csv_filename": existing_info.get("trades_csv_filename", f"{date_str}交易明細.csv"),
+                "incidents_csv_filename": existing_info.get("incidents_csv_filename", f"{date_str}異常報告.csv"),
                 "master_sheet_id": self.sync_index.get("master_sheet_id", ""),
                 "master_sheet_url": self.sync_index.get("master_sheet_url", ""),
+                "trades_folder_url": trades_folder_url,
+                "incidents_folder_url": incidents_folder_url,
                 "folder_url": self.folder_url,
-                "message": f"[{date_str}] 報告已在 Google Drive 雲端就緒"
+                "message": f"[{date_str}] 交易明細與異常報告已在 Google Drive 雲端就緒"
             }
 
         backend, backend_detail = self._detect_upload_backend()
@@ -775,76 +929,66 @@ table.data-table tr:nth-child(even) {{
             logger.error(backend_detail)
             return {"status": "error", "message": backend_detail}
 
-        # 若強制重新上傳且使用 gdrive CLI，先將舊有檔案移入回收桶避免重複 (rclone 同檔名會直接覆寫)
-        if existing_info and force_reupload and backend == "gdrive":
-            old_doc = existing_info.get("doc_id")
-            old_sheet = existing_info.get("sheet_id")
-            if old_doc and not str(old_doc).startswith("rclone:"):
-                self._run_gdrive_cmd(f'gdrive mutate trash {old_doc}')
-            if old_sheet and not str(old_sheet).startswith("rclone:"):
-                self._run_gdrive_cmd(f'gdrive mutate trash {old_sheet}')
-            logger.info(f"[{date_str}] 已自動清理舊有 Google Drive 檔案 (Doc: {old_doc}, Sheet: {old_sheet})")
+        # 1. 產生並上傳交易明細 CSV 至「交易明細」子目錄
+        trades_csv_filename = f"{date_str}交易明細.csv"
+        trades_local_path = os.path.join(TRADES_REPORT_DIR, trades_csv_filename)
+        trades_export_path = os.path.join(GDRIVE_TEMP_TRADES_DIR, trades_csv_filename)
+        self.generate_executions_csv(report_data, trades_local_path)
+        try:
+            shutil.copyfile(trades_local_path, trades_export_path)
+        except Exception:
+            pass
 
-        doc_id = ""
-        doc_url = ""
-
-        # 1. 若非僅輸出明細模式，產生並上傳 Google Doc
-        if not only_trade_detail:
-            html_content = self.generate_styled_html(report_data)
-            doc_filename = f"AutoTrade_每日交易結算與審計報告_{date_str}.html"
-            html_path = os.path.join(GDRIVE_TEMP_DIR, doc_filename)
-            with open(html_path, "w", encoding="utf-8") as f:
-                f.write(html_content)
-
-            doc_id, doc_url, err_doc = self._upload_to_gdrive(html_path, "application/vnd.google-apps.document")
-            if doc_id:
-                logger.info(f"[Google Doc 上傳成功] ID={doc_id} URL={doc_url}")
-            else:
-                logger.error(f"[Google Doc 上傳失敗] Error={err_doc}")
-
-        # 2. 產生並上傳 Google Sheet (當日交易明細，嚴格依照 {date_str}交易明細.csv 格式命名)
-        csv_filename = f"{date_str}交易明細.csv"
-        csv_path = os.path.join(GDRIVE_TEMP_DIR, csv_filename)
-        self.generate_executions_csv(report_data, csv_path)
-
-        sheet_id, sheet_url, err_sheet = self._upload_to_gdrive(csv_path, "application/vnd.google-apps.spreadsheet")
-        if sheet_id:
-            logger.info(f"[Google Sheet 交易明細上傳成功] 檔名: {csv_filename} | ID={sheet_id} URL={sheet_url}")
+        trades_sheet_id, trades_sheet_url, err_trades = self._upload_to_gdrive(
+            trades_export_path,
+            mime_type="application/vnd.google-apps.spreadsheet",
+            subfolder="交易明細"
+        )
+        if trades_sheet_id:
+            logger.info(f"[Google Sheet 交易明細上傳成功] 檔名: {trades_csv_filename} | ID={trades_sheet_id} URL={trades_sheet_url}")
         else:
-            logger.error(f"[Google Sheet 交易明細上傳失敗] Error={err_sheet}")
+            logger.error(f"[Google Sheet 交易明細上傳失敗] Error={err_trades}")
 
-        # 3. 更新並同步累計總表 (Master Tracking Sheet)
-        master_csv_path = self.update_master_tracker_csv(report_data, doc_url=doc_url, sheet_url=sheet_url)
-        master_sheet_id = self.sync_index.get("master_sheet_id", "")
-        master_sheet_url = self.sync_index.get("master_sheet_url", "")
+        # 2. 產生並上傳異常報告 CSV 至「異常報告」子目錄
+        incidents_csv_filename = f"{date_str}異常報告.csv"
+        incidents_local_path = os.path.join(INCIDENTS_REPORT_DIR, incidents_csv_filename)
+        incidents_export_path = os.path.join(GDRIVE_TEMP_INCIDENTS_DIR, incidents_csv_filename)
+        self.generate_incidents_csv(report_data, incidents_local_path)
+        try:
+            shutil.copyfile(incidents_local_path, incidents_export_path)
+        except Exception:
+            pass
 
-        if not only_trade_detail:
-            master_upload_csv = os.path.join(GDRIVE_TEMP_DIR, "AutoTrade_每日績效累計追蹤總表.csv")
-            try:
-                shutil.copyfile(master_csv_path, master_upload_csv)
-            except Exception:
-                master_upload_csv = master_csv_path
+        inc_sheet_id, inc_sheet_url, err_inc = self._upload_to_gdrive(
+            incidents_export_path,
+            mime_type="application/vnd.google-apps.spreadsheet",
+            subfolder="異常報告"
+        )
+        if inc_sheet_id:
+            logger.info(f"[Google Sheet 異常報告上傳成功] 檔名: {incidents_csv_filename} | ID={inc_sheet_id} URL={inc_sheet_url}")
+        else:
+            logger.error(f"[Google Sheet 異常報告上傳失敗] Error={err_inc}")
 
-            if not master_sheet_id:
-                master_sheet_id, master_sheet_url, _ = self._upload_to_gdrive(
-                    master_upload_csv, "application/vnd.google-apps.spreadsheet"
-                )
-                if master_sheet_id:
-                    self.sync_index["master_sheet_id"] = master_sheet_id
-                    self.sync_index["master_sheet_url"] = master_sheet_url
-            else:
-                self._upload_to_gdrive(
-                    master_upload_csv, "application/vnd.google-apps.spreadsheet", update_file_id=master_sheet_id
-                )
+        # 3. 更新本地累計總表並必定同步至 Google Drive 根目錄
+        self.update_master_tracker_csv(report_data, doc_url="", sheet_url=trades_sheet_url)
+        master_res = self.sync_master_tracker_to_gdrive()
+        master_sheet_id = master_res.get("file_id") or self.sync_index.get("master_sheet_id", "")
+        master_sheet_url = master_res.get("url") or self.sync_index.get("master_sheet_url", "")
 
-        # 4. 更新同步索引
+        # 4. 更新同步索引 (不再記錄 doc_id / doc_url)
         self.sync_index.setdefault("dates", {})[date_str] = {
             "pushed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "doc_id": doc_id,
-            "doc_url": doc_url,
-            "sheet_id": sheet_id,
-            "sheet_url": sheet_url,
-            "filename": csv_filename
+            "doc_id": "",
+            "doc_url": "",
+            "sheet_id": trades_sheet_id,
+            "sheet_url": trades_sheet_url,
+            "trades_sheet_id": trades_sheet_id,
+            "trades_sheet_url": trades_sheet_url,
+            "incidents_sheet_id": inc_sheet_id,
+            "incidents_sheet_url": inc_sheet_url,
+            "filename": trades_csv_filename,
+            "trades_csv_filename": trades_csv_filename,
+            "incidents_csv_filename": incidents_csv_filename,
         }
         self._save_sync_index()
 
@@ -861,20 +1005,28 @@ table.data-table tr:nth-child(even) {{
         return {
             "status": "ok",
             "date": date_str,
-            "doc_id": doc_id,
-            "doc_url": doc_url,
-            "sheet_id": sheet_id,
-            "sheet_url": sheet_url,
-            "csv_filename": csv_filename,
+            "doc_id": "",
+            "doc_url": "",
+            "sheet_id": trades_sheet_id,
+            "sheet_url": trades_sheet_url,
+            "trades_sheet_id": trades_sheet_id,
+            "trades_sheet_url": trades_sheet_url,
+            "incidents_sheet_id": inc_sheet_id,
+            "incidents_sheet_url": inc_sheet_url,
+            "csv_filename": trades_csv_filename,
+            "trades_csv_filename": trades_csv_filename,
+            "incidents_csv_filename": incidents_csv_filename,
             "master_sheet_id": master_sheet_id,
             "master_sheet_url": master_sheet_url,
+            "trades_folder_url": trades_folder_url,
+            "incidents_folder_url": incidents_folder_url,
             "folder_url": self.folder_url,
             "sheets_sync": sheets_sync_res,
-            "message": f"成功產出 {csv_filename} 並全量更新 Google Sheets 交易紀錄與分析總表！"
+            "message": f"成功產出 {trades_csv_filename} 與 {incidents_csv_filename}，並更新累計追蹤總表！"
         }
 
     # --------------------------------------------------------------------------
-    # 5. 即時匯出最新成交紀錄與錯誤稽核報告 (本機下載 + Google Drive 上傳)
+    # 5. 即時匯出最新成交明細與異常報告 (本機下載 + Google Drive 上傳)
     # --------------------------------------------------------------------------
     def generate_diagnostics_files(
         self,
@@ -883,16 +1035,22 @@ table.data-table tr:nth-child(even) {{
         status_snapshot: Optional[Dict[str, Any]] = None,
         log_lines: Optional[List[str]] = None
     ) -> Dict[str, Any]:
-        """生成最新成交明細 CSV 與診斷報告 HTML (同時供網頁直接下載與上傳 Drive)"""
+        """
+        分開生成最新「交易明細」CSV 與「異常報告」CSV，分別存入對應子目錄。
+        完全不再生成 HTML 診斷報告文件。
+        """
         now_dt = datetime.now()
         ts_tag = now_dt.strftime("%Y%m%d_%H%M%S")
         ts_human = now_dt.strftime("%Y-%m-%d %H:%M:%S")
         status_snapshot = status_snapshot or {}
         log_lines = log_lines or []
 
-        csv_filename = f"AutoTrade_最新成交與異常診斷_{ts_tag}.csv"
-        csv_path = os.path.join(GDRIVE_TEMP_DIR, csv_filename)
-        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+        # 1. 生成交易明細 CSV (存於 reports/交易明細/ 與 reports/gdrive_exports/交易明細/)
+        trades_filename = f"AutoTrade_交易明細_{ts_tag}.csv"
+        trades_local_path = os.path.join(TRADES_REPORT_DIR, trades_filename)
+        trades_export_path = os.path.join(GDRIVE_TEMP_TRADES_DIR, trades_filename)
+
+        with open(trades_local_path, "w", encoding="utf-8-sig", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["=== 1. 系統與持倉掛單快照 ==="])
             writer.writerow(["匯出時間", ts_human])
@@ -925,8 +1083,8 @@ table.data-table tr:nth-child(even) {{
                     ])
 
             writer.writerow([])
-            writer.writerow([f"=== 2. 最新成交紀錄 (共 {len(trades)} 筆) ==="])
-            writer.writerow(["成交時間", "標的", "買賣/方向", "口數", "成交價", "已實現損益(USD)", "佣金(USD)", "淨損益(USD)"])
+            writer.writerow([f"=== 2. 最新成交審計紀錄 (共 {len(trades)} 筆) ==="])
+            writer.writerow(["成交時間", "標的", "買賣/方向", "口數", "成交價", "已實現損益(USD)", "佣金(USD)", "淨損益(USD)", "成交編號"])
             for t in trades:
                 price_val = t.get("price") or t.get("exit_price") or t.get("entry_price") or 0.0
                 net_val = t.get("net_pnl")
@@ -940,13 +1098,38 @@ table.data-table tr:nth-child(even) {{
                     price_val,
                     t.get("realized_pnl", 0.0),
                     t.get("commission", 0.0),
-                    net_val
+                    net_val,
+                    t.get("exec_id", "")
                 ])
 
+        try:
+            shutil.copyfile(trades_local_path, trades_export_path)
+        except Exception:
+            pass
+
+        # 2. 生成異常報告 CSV (存於 reports/異常報告/ 與 reports/gdrive_exports/異常報告/)
+        incidents_filename = f"AutoTrade_異常報告_{ts_tag}.csv"
+        incidents_local_path = os.path.join(INCIDENTS_REPORT_DIR, incidents_filename)
+        incidents_export_path = os.path.join(GDRIVE_TEMP_INCIDENTS_DIR, incidents_filename)
+
+        with open(incidents_local_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["=== 1. 異常稽核統計摘要 ==="])
+            writer.writerow(["匯出時間", ts_human])
+            writer.writerow(["異常總筆數", len(incidents)])
+            info_cnt = sum(1 for i in incidents if i.get("severity") == "INFO")
+            warn_cnt = sum(1 for i in incidents if i.get("severity") == "WARNING")
+            err_cnt = sum(1 for i in incidents if i.get("severity") in ("ERROR", "CRITICAL"))
+            writer.writerow(["嚴重度分佈", f"INFO: {info_cnt} | WARNING: {warn_cnt} | ERROR/CRITICAL: {err_cnt}"])
             writer.writerow([])
-            writer.writerow([f"=== 3. 最新錯誤與異常稽核紀錄 (共 {len(incidents)} 筆) ==="])
+            writer.writerow([f"=== 2. 最新錯誤與異常稽核紀錄 (共 {len(incidents)} 筆) ==="])
             writer.writerow(["發生時間", "嚴重程度", "分類", "代碼", "來源", "訊息", "詳細資料"])
             for inc in incidents:
+                details_val = inc.get("details", {})
+                if isinstance(details_val, (dict, list)):
+                    details_str = json.dumps(details_val, ensure_ascii=False)
+                else:
+                    details_str = str(details_val or "")
                 writer.writerow([
                     inc.get("timestamp", ""),
                     inc.get("severity", ""),
@@ -954,88 +1137,29 @@ table.data-table tr:nth-child(even) {{
                     inc.get("code", ""),
                     inc.get("source", ""),
                     inc.get("message", ""),
-                    json.dumps(inc.get("details", {}), ensure_ascii=False)
+                    details_str
                 ])
 
-        doc_filename = f"AutoTrade_最新成交與錯誤診斷報告_{ts_tag}.html"
-        html_path = os.path.join(GDRIVE_TEMP_DIR, doc_filename)
+            if log_lines:
+                writer.writerow([])
+                writer.writerow([f"=== 3. 實盤守護引擎尾部運行日誌 (最近 {min(len(log_lines), 200)} 行) ==="])
+                for line in log_lines[-200:]:
+                    writer.writerow([line.strip()])
 
-        trade_rows_html = ""
-        for t in trades:
-            price_val = float(t.get("price") or t.get("exit_price") or t.get("entry_price") or 0.0)
-            net_val = t.get("net_pnl")
-            if net_val is None:
-                net_val = t.get("pnl") if t.get("pnl") is not None else t.get("realized_pnl", 0.0)
-            net_f = float(net_val or 0.0)
-            net_color = "#10b981" if net_f > 0 else ("#ef4444" if net_f < 0 else "#64748b")
-            trade_rows_html += (
-                f"<tr><td>{html_lib.escape(str(t.get('timestamp', '')))}</td>"
-                f"<td><b>{html_lib.escape(str(t.get('symbol', '')))}</b></td>"
-                f"<td>{html_lib.escape(str(t.get('direction') or t.get('side', '')))}</td>"
-                f"<td>{html_lib.escape(str(t.get('contracts') or t.get('shares') or 1))}</td>"
-                f"<td>{price_val:.2f}</td>"
-                f"<td style='color:{net_color};font-weight:bold;'>${net_f:.2f}</td></tr>"
-            )
-        if not trade_rows_html:
-            trade_rows_html = "<tr><td colspan='6'>目前尚無成交紀錄</td></tr>"
-
-        inc_rows_html = ""
-        for inc in incidents:
-            sev = str(inc.get("severity", "INFO"))
-            sev_color = "#ef4444" if sev in ("ERROR", "CRITICAL") else ("#f59e0b" if sev == "WARNING" else "#3b82f6")
-            inc_rows_html += (
-                f"<tr><td>{html_lib.escape(str(inc.get('timestamp', '')))}</td>"
-                f"<td style='color:{sev_color};font-weight:bold;'>{html_lib.escape(sev)}</td>"
-                f"<td>{html_lib.escape(str(inc.get('category', '')))} / {html_lib.escape(str(inc.get('code', '')))}</td>"
-                f"<td>{html_lib.escape(str(inc.get('message', '')))}</td></tr>"
-            )
-        if not inc_rows_html:
-            inc_rows_html = "<tr><td colspan='4'>目前無錯誤或異常稽核紀錄</td></tr>"
-
-        log_tail_escaped = html_lib.escape("\n".join(log_lines[-200:])) if log_lines else "(無近期日誌檔案)"
-
-        html_doc = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>AutoTrade 最新成交與錯誤診斷報告 ({ts_human})</title>
-<style>
-body {{ font-family: Arial, sans-serif; color: #1e293b; margin: 28px; line-height: 1.5; }}
-h1 {{ color: #0f172a; border-bottom: 2px solid #2563eb; padding-bottom: 6px; font-size: 20px; }}
-h2 {{ color: #1e40af; margin-top: 22px; font-size: 15px; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; }}
-table {{ width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }}
-th, td {{ border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; }}
-th {{ background-color: #f1f5f9; }}
-pre {{ background: #0f172a; color: #e2e8f0; padding: 12px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }}
-</style>
-</head>
-<body>
-<h1>AutoTrade 最新成交與錯誤診斷報告</h1>
-<p><b>匯出時間：</b>{html_lib.escape(ts_human)} ｜ <b>IBKR 連線：</b>{'已連線' if status_snapshot.get('ibkr_connected') else '未連線'} ｜ <b>成交筆數：</b>{len(trades)} ｜ <b>異常紀錄：</b>{len(incidents)}</p>
-
-<h2>一、最新成交紀錄 (最近 {len(trades)} 筆)</h2>
-<table>
-<thead><tr><th>成交時間</th><th>標的</th><th>方向</th><th>口數</th><th>成交價</th><th>淨損益 (USD)</th></tr></thead>
-<tbody>{trade_rows_html}</tbody>
-</table>
-
-<h2>二、錯誤與異常稽核紀錄 (最近 {len(incidents)} 筆)</h2>
-<table>
-<thead><tr><th>發生時間</th><th>等級</th><th>分類 / 代碼</th><th>事件說明</th></tr></thead>
-<tbody>{inc_rows_html}</tbody>
-</table>
-
-<h2>三、實盤守護引擎尾部運行日誌 (最近 {len(log_lines)} 行)</h2>
-<pre>{log_tail_escaped}</pre>
-</body>
-</html>"""
-
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(html_doc)
+        try:
+            shutil.copyfile(incidents_local_path, incidents_export_path)
+        except Exception:
+            pass
 
         return {
-            "csv_path": csv_path,
-            "html_path": html_path,
+            "trades_csv_path": trades_local_path,
+            "trades_export_path": trades_export_path,
+            "trades_filename": trades_filename,
+            "incidents_csv_path": incidents_local_path,
+            "incidents_export_path": incidents_export_path,
+            "incidents_filename": incidents_filename,
+            "csv_path": trades_local_path,  # 相容舊調用
+            "html_path": None,             # 停止生成 HTML
             "exported_at": ts_human,
             "ts_tag": ts_tag,
             "trades_count": len(trades),
@@ -1050,8 +1174,8 @@ pre {{ background: #0f172a; color: #e2e8f0; padding: 12px; font-size: 11px; whit
         log_lines: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
-        匯出最新成交明細、持倉/掛單狀態、錯誤異常稽核與引擎尾部日誌，
-        並透過 gdrive CLI 或 rclone 上傳至 Google Drive。
+        匯出最新交易明細與異常報告 CSV，分別上傳至 Google Drive 的「交易明細」與「異常報告」子資料夾。
+        不再生成或上傳任何 HTML 檔案。
         """
         gen_info = self.generate_diagnostics_files(
             trades=trades,
@@ -1059,44 +1183,65 @@ pre {{ background: #0f172a; color: #e2e8f0; padding: 12px; font-size: 11px; whit
             status_snapshot=status_snapshot,
             log_lines=log_lines
         )
-        csv_path = gen_info["csv_path"]
-        html_path = gen_info["html_path"]
+        trades_path = gen_info["trades_export_path"]
+        incidents_path = gen_info["incidents_export_path"]
         ts_human = gen_info["exported_at"]
 
         backend, backend_detail = self._detect_upload_backend()
         if not backend:
             return {
                 "status": "error",
-                "message": f"檔案已生成於本機（可先直接點選網頁下載），但尚無法上傳雲端：{backend_detail}",
-                "local_csv_path": csv_path,
-                "local_html_path": html_path,
+                "message": f"檔案已分開生成於本機對應子資料夾，但雲端上傳尚未可用：{backend_detail}",
+                "local_trades_path": trades_path,
+                "local_incidents_path": incidents_path,
                 "folder_url": self.folder_url,
                 "trades_count": len(trades),
                 "incidents_count": len(incidents)
             }
 
-        sheet_id, sheet_url, err_s = self._upload_to_gdrive(csv_path, "application/vnd.google-apps.spreadsheet")
-        doc_id, doc_url, err_d = self._upload_to_gdrive(html_path, "application/vnd.google-apps.document")
+        # 1. 交易明細上傳至「交易明細」子資料夾
+        trades_sheet_id, trades_sheet_url, err_t = self._upload_to_gdrive(
+            trades_path,
+            mime_type="application/vnd.google-apps.spreadsheet",
+            subfolder="交易明細"
+        )
 
-        if not sheet_id and not doc_id:
+        # 2. 異常報告上傳至「異常報告」子資料夾
+        inc_sheet_id, inc_sheet_url, err_i = self._upload_to_gdrive(
+            incidents_path,
+            mime_type="application/vnd.google-apps.spreadsheet",
+            subfolder="異常報告"
+        )
+
+        if not trades_sheet_id and not inc_sheet_id:
             return {
                 "status": "error",
                 "backend": backend,
-                "message": f"Google Drive 上傳失敗：{err_s or err_d}",
-                "local_csv_path": csv_path,
-                "local_html_path": html_path,
+                "message": f"Google Drive 上傳失敗：{err_t or err_i}",
+                "local_trades_path": trades_path,
+                "local_incidents_path": incidents_path,
                 "folder_url": self.folder_url,
                 "trades_count": len(trades),
                 "incidents_count": len(incidents)
             }
+
+        trades_folder_url = f"https://drive.google.com/drive/folders/{GDRIVE_SUBFOLDERS['交易明細']}"
+        incidents_folder_url = f"https://drive.google.com/drive/folders/{GDRIVE_SUBFOLDERS['異常報告']}"
 
         diag_info = {
             "exported_at": ts_human,
             "backend": backend,
-            "sheet_id": sheet_id,
-            "sheet_url": sheet_url,
-            "doc_id": doc_id,
-            "doc_url": doc_url,
+            "trades_sheet_id": trades_sheet_id,
+            "trades_sheet_url": trades_sheet_url,
+            "incidents_sheet_id": inc_sheet_id,
+            "incidents_sheet_url": inc_sheet_url,
+            # 相容字段
+            "sheet_id": trades_sheet_id,
+            "sheet_url": trades_sheet_url,
+            "doc_id": "",
+            "doc_url": "",
+            "trades_folder_url": trades_folder_url,
+            "incidents_folder_url": incidents_folder_url,
             "folder_url": self.folder_url,
             "trades_count": len(trades),
             "incidents_count": len(incidents)
@@ -1106,7 +1251,7 @@ pre {{ background: #0f172a; color: #e2e8f0; padding: 12px; font-size: 11px; whit
 
         return {
             "status": "ok",
-            "message": f"已透過 {backend} 成功匯出 {len(trades)} 筆成交與 {len(incidents)} 筆異常診斷紀錄至 Google Drive！",
+            "message": f"已成功將 {len(trades)} 筆交易明細與 {len(incidents)} 筆異常報告分別匯出至 Drive 對應資料夾！",
             **diag_info
         }
 

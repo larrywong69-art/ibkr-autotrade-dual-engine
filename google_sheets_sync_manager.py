@@ -609,11 +609,13 @@ class GoogleSheetsSyncManager:
             except Exception as e:
                 logger.warning(f"讀取 trades.jsonl 失敗: {e}")
 
-        # 2. 補充讀取歷史每日交易明細 CSV (reports/gdrive_imports 與 reports/gdrive_exports)
+        # 2. 補充讀取歷史每日交易明細 CSV (reports/gdrive_imports, reports/gdrive_exports, 以及 交易明細 子目錄)
         import glob
         candidate_csv_patterns = [
             os.path.join(REPORTS_DIR, "gdrive_imports", "*交易明細*.csv"),
             os.path.join(EXPORTS_DIR, "*交易明細*.csv"),
+            os.path.join(REPORTS_DIR, "交易明細", "*交易明細*.csv"),
+            os.path.join(EXPORTS_DIR, "交易明細", "*交易明細*.csv"),
         ]
         for pat in candidate_csv_patterns:
             for csv_path in sorted(glob.glob(pat)):
