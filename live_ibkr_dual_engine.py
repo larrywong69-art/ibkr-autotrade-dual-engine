@@ -127,7 +127,11 @@ def calculate_session_vwap(df: pd.DataFrame) -> pd.Series:
     return vwap.fillna(df['close'])
 
 
-def pair_executions_fifo(executions: List[Dict[str, Any]], fx_rate: float = 7.78) -> List[Dict[str, Any]]:
+def pair_executions_fifo(
+    executions: List[Dict[str, Any]],
+    fx_rate: float = 7.78,
+    current_positions: Optional[Dict[str, int]] = None,
+) -> List[Dict[str, Any]]:
     """依標的採 FIFO 配對開倉與平倉成交，組成『開倉在上、平倉次級子單在下』的交易組（盈虧已含手續費）。"""
     if not executions:
         return []
@@ -150,15 +154,22 @@ def pair_executions_fifo(executions: List[Dict[str, Any]], fx_rate: float = 7.78
         except (TypeError, ValueError):
             return default
 
-    # 按時間升序排列；同秒先處理含已實現損益的平倉單，再處理新開倉單
-    ordered = sorted(
-        executions,
-        key=lambda x: (
-            str(x.get("timestamp") or ""),
-            0 if abs(_safe_num(x.get("realized_pnl"))) > 1e-6 else 1,
-            str(x.get("exec_id") or ""),
-        ),
-    )
+    # 按時間升序排列；同秒先處理明確開倉單 (ENTRY/OPEN)，次處理已實現損益結算單，平倉單 (SL/TP/FLAT/CLOSE) 在後，次級由 IBKR exec_id 遞增保證撮合順序
+    def _sort_key(x: Dict[str, Any]):
+        ts = str(x.get("timestamp") or "")
+        ref = str(x.get("order_ref") or x.get("tranche") or "").upper()
+        realized = _safe_num(x.get("realized_pnl"), 0.0)
+        if "ENTRY" in ref or "OPEN" in ref:
+            priority = 0
+        elif any(k in ref for k in ("SL", "TP", "FLAT", "CLOSE")):
+            priority = 2
+        elif abs(realized) > 1e-6:
+            priority = 1
+        else:
+            priority = 3
+        return (ts, priority, str(x.get("exec_id") or ""))
+
+    ordered = sorted(executions, key=_sort_key)
 
     open_lots: Dict[str, List[Dict[str, Any]]] = {}
     groups: List[Dict[str, Any]] = []
@@ -274,6 +285,15 @@ def pair_executions_fifo(executions: List[Dict[str, Any]], fx_rate: float = 7.78
                     "remaining_qty": remaining,
                     "open_comm": comm * (remaining / qty),
                 })
+
+    # Position Grounding 雙保險：若已知當前經紀商持倉為 0，強行將殘留的 OPEN 群組校準為 CLOSED
+    if current_positions is not None:
+        for sym, pos_qty in current_positions.items():
+            if pos_qty == 0:
+                for grp in groups:
+                    if grp.get("symbol") == sym and grp.get("status") == "OPEN":
+                        grp["status"] = "CLOSED"
+                        grp["closed_contracts"] = grp.get("contracts", 1)
 
     groups.sort(
         key=lambda g: (
@@ -3138,7 +3158,7 @@ class LiveIBKRDualEngine:
         return pos
 
     @staticmethod
-    def _merge_with_historical_trades(live_trades: List[Dict[str, Any]], max_hist: int = 250) -> List[Dict[str, Any]]:
+    def _merge_with_historical_trades(live_trades: List[Dict[str, Any]], max_hist: int = 1000) -> List[Dict[str, Any]]:
         """將今日即時成交與 data/trades.jsonl 近期紀錄去重合併，使跨日持倉平倉時可對應原開倉單。"""
         base_dir = os.path.dirname(os.path.abspath(STATUS_FILE))
         hist_path = os.path.join(base_dir, "data", "trades.jsonl")
@@ -3228,13 +3248,17 @@ class LiveIBKRDualEngine:
             raw_u = self.unrealized_pnl if self.unrealized_pnl != 0.0 else calc_unrealized
             display_unrealized_hkd = round(raw_u * fx, 2)
 
+        cur_positions = {
+            "MES": int(pos_v43.get("contracts", 0)) if pos_v43 else 0,
+            "MNQ": int(pos_v50.get("contracts", 0)) if pos_v50 else 0,
+        }
         all_recent_trades = sorted(
             trades_v43 + trades_v50,
             key=lambda x: x.get("timestamp", ""),
             reverse=True
         )
         merged_for_pairing = self._merge_with_historical_trades(all_recent_trades)
-        paired_trades = pair_executions_fifo(merged_for_pairing, fx_rate=fx)[:60]
+        paired_trades = pair_executions_fifo(merged_for_pairing, fx_rate=fx, current_positions=cur_positions)[:30]
 
         try:
             hkt_now_st = datetime.now(ZoneInfo("Asia/Hong_Kong"))

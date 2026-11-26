@@ -948,9 +948,17 @@
         const ta = String(a?.timestamp || '');
         const tb = String(b?.timestamp || '');
         if (ta !== tb) return ta.localeCompare(tb);
-        const ra = Math.abs(toNum(a?.realized_pnl)) > 1e-6 ? 0 : 1;
-        const rb = Math.abs(toNum(b?.realized_pnl)) > 1e-6 ? 0 : 1;
-        if (ra !== rb) return ra - rb;
+        const getPri = (x) => {
+          const ref = String(x?.order_ref || x?.tranche || '').toUpperCase();
+          const realized = toNum(x?.realized_pnl, 0);
+          if (ref.includes('ENTRY') || ref.includes('OPEN')) return 0;
+          if (['SL', 'TP', 'FLAT', 'CLOSE'].some(k => ref.includes(k))) return 2;
+          if (Math.abs(realized) > 1e-6) return 1;
+          return 3;
+        };
+        const pa = getPri(a);
+        const pb = getPri(b);
+        if (pa !== pb) return pa - pb;
         return String(a?.exec_id || '').localeCompare(String(b?.exec_id || ''));
       });
 
@@ -1075,7 +1083,7 @@
         const tb = String(b.latest_timestamp || b.open_timestamp || '');
         if (ta !== tb) return tb.localeCompare(ta);
         return (b.status === 'OPEN' ? 1 : 0) - (a.status === 'OPEN' ? 1 : 0);
-      });
+      }).slice(0, 30);
     }
 
     function formatSignedUsd(val) {
@@ -1599,7 +1607,9 @@
         // 7. 合併成交紀錄
         const trades = data.recent_trades || [];
         LIVE_TRADES_DATA = trades;
-        LIVE_PAIRED_TRADES = Array.isArray(data.paired_trades) ? data.paired_trades : pairExecutionTrades(trades, fxRate);
+        LIVE_PAIRED_TRADES = (Array.isArray(data.paired_trades) && data.paired_trades.length > 0)
+          ? data.paired_trades.slice(0, 30)
+          : pairExecutionTrades(trades, fxRate).slice(0, 30);
         const totCountEl = document.getElementById('total-trades-count');
         if (totCountEl) totCountEl.innerText = `${LIVE_PAIRED_TRADES.length} 組 (${trades.length} 筆)`;
         renderTable();

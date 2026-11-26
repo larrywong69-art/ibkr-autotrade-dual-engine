@@ -1581,5 +1581,111 @@ class TestProductionOptimizationsP0P2(unittest.TestCase):
         self.assertIn("V9.3 旗艦雙引擎整數自適應 (MES 60% 優先池)", md)
 
 
+class TestFifoPairingAndCalendarReconciliation(unittest.TestCase):
+    """驗證同秒開倉/止損 FIFO 撮合順序、持倉基準校準與日曆防重複計入。"""
+
+    def test_fifo_same_second_entry_sl_ordering(self):
+        from live_ibkr_dual_engine import pair_executions_fifo
+
+        entry_exec = {
+            "timestamp": "2026-11-25 13:39:53",
+            "symbol": "MNQ",
+            "side": "SLD",
+            "contracts": 1,
+            "price": 25484.75,
+            "order_ref": "V93_MNQ_ENTRY_TP2",
+            "realized_pnl": 0.0,
+            "exec_id": "0001f2.d3a9",
+        }
+        sl_exec = {
+            "timestamp": "2026-11-25 13:39:53",
+            "symbol": "MNQ",
+            "side": "BOT",
+            "contracts": 1,
+            "price": 25487.00,
+            "order_ref": "V93_MNQ_SL_TP2",
+            "realized_pnl": -4.72,
+            "exec_id": "0001f2.d3aa",
+        }
+
+        # 即使輸入順序顛倒（SL 在前），_sort_key 亦能依 ENTRY=0/SL=2 優先權在先撮合開倉
+        groups = pair_executions_fifo([sl_exec, entry_exec], fx_rate=7.8)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["status"], "CLOSED")
+        self.assertEqual(groups[0]["total_pnl"], -4.72)
+        self.assertEqual(len(groups[0]["close_orders"]), 1)
+
+    def test_position_grounding_clears_residual_open(self):
+        from live_ibkr_dual_engine import pair_executions_fifo
+
+        unclosed_entry = {
+            "timestamp": "2026-11-25 16:47:25",
+            "symbol": "MNQ",
+            "side": "SLD",
+            "contracts": 1,
+            "price": 25400.0,
+            "order_ref": "V93_MNQ_ENTRY_RUNNER",
+            "realized_pnl": 0.0,
+            "exec_id": "0001f2.e001",
+        }
+
+        # 若未傳入 current_positions，該單呈現 OPEN
+        groups_raw = pair_executions_fifo([unclosed_entry], fx_rate=7.8)
+        self.assertEqual(groups_raw[0]["status"], "OPEN")
+
+        # 傳入經紀商持倉基準 current_positions={"MNQ": 0}，雙保險強制校準為 CLOSED
+        groups_grounded = pair_executions_fifo([unclosed_entry], fx_rate=7.8, current_positions={"MNQ": 0})
+        self.assertEqual(groups_grounded[0]["status"], "CLOSED")
+        self.assertEqual(groups_grounded[0]["closed_contracts"], 1)
+
+    def test_calendar_no_duplicate_live_status_day(self):
+        import json
+        from server import build_daily_pnl_calendar
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = os.path.join(tmp_dir, "data")
+            os.makedirs(data_dir, exist_ok=True)
+
+            trades_file = os.path.join(data_dir, "trades.jsonl")
+            with open(trades_file, "w", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "timestamp": "2026-11-25 10:00:00",
+                    "symbol": "MES",
+                    "side": "BOT",
+                    "contracts": 1,
+                    "price": 6000.0,
+                    "order_ref": "V93_MES_ENTRY_TP1",
+                    "realized_pnl": 0.0,
+                    "exec_id": "test_e1",
+                }) + "\n")
+                f.write(json.dumps({
+                    "timestamp": "2026-11-25 10:05:00",
+                    "symbol": "MES",
+                    "side": "SLD",
+                    "contracts": 1,
+                    "price": 6010.0,
+                    "order_ref": "V93_MES_TP_TP1",
+                    "realized_pnl": 50.0,
+                    "exec_id": "test_e2",
+                }) + "\n")
+
+            # status_snapshot 具有 UTC 跨日 11-26 的 last_update 與當日已實現損益
+            status_file = os.path.join(tmp_dir, "trade_status.json")
+            with open(status_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "last_update": "2026-11-26 00:30:00",
+                    "realized_pnl_hkd": 390.0,
+                    "fx_rate_usd_hkd": 7.8,
+                    "recent_trades": [],
+                }, f)
+
+            res = build_daily_pnl_calendar("2026-11", base_dir=tmp_dir)
+            days = res["days"]
+            self.assertIn("2026-11-25", days)
+            # 確保不會產生虛假雙重計入的 2026-11-26 live_status 卡片
+            self.assertNotIn("2026-11-26", days)
+            self.assertEqual(res["monthly_summary"]["net_pnl_usd"], 50.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -281,7 +281,13 @@ def build_daily_pnl_calendar(month_str: str = None, base_dir: str = CURRENT_DIR)
 
     all_trades, status_snapshot = _load_deduped_executions(base_dir=base_dir)
     fx_rate = float(status_snapshot.get("fx_rate_usd_hkd") or 7.78)
-    paired_groups = pair_executions_fifo(all_trades, fx_rate=fx_rate)
+    cur_pos = {}
+    v93 = status_snapshot.get("v93") or {}
+    mes_pos = v93.get("mes") or (status_snapshot.get("v43") or {}).get("active_position")
+    mnq_pos = v93.get("mnq") or (status_snapshot.get("v50") or {}).get("active_position")
+    cur_pos["MES"] = int(mes_pos.get("contracts", 0)) if isinstance(mes_pos, dict) else 0
+    cur_pos["MNQ"] = int(mnq_pos.get("contracts", 0)) if isinstance(mnq_pos, dict) else 0
+    paired_groups = pair_executions_fifo(all_trades, fx_rate=fx_rate, current_positions=cur_pos)
 
     days_map = {}
     available_months = set([datetime.now().strftime("%Y-%m"), target_month])
@@ -398,11 +404,11 @@ def build_daily_pnl_calendar(month_str: str = None, base_dir: str = CURRENT_DIR)
             except Exception:
                 pass
 
-    # 3. 若當日尚無配對成交紀錄，但 trade_status.json 已有即時已實現損益 (HKD)，補齊當日卡片
+    # 3. 兜底保護：若全月尚無任何歷史報告或成交紀錄（例如極早期全新啟動），以 trade_status.json 即時損益補齊當日卡片
     status_date = str(status_snapshot.get("last_update") or "")[:10]
-    if len(status_date) == 10 and status_date.startswith(target_month):
+    if len(status_date) == 10 and status_date.startswith(target_month) and not days_map:
         live_r_hkd = float(status_snapshot.get("realized_pnl_hkd") if status_snapshot.get("realized_pnl_hkd") is not None else (status_snapshot.get("realized_pnl") or 0.0))
-        if abs(live_r_hkd) > 1e-6 and status_date not in days_map:
+        if abs(live_r_hkd) > 1e-6:
             entry = _ensure_day(status_date)
             entry["pnl_hkd"] = round(live_r_hkd, 2)
             entry["pnl_usd"] = round(live_r_hkd / fx_rate, 2)
