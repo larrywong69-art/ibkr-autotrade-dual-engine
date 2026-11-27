@@ -8,7 +8,7 @@
   <meta name="apple-mobile-web-app-title" content="AutoTrade">
   <meta name="theme-color" content="#0b0f19">
   <link rel="manifest" href="/manifest.json">
-  <title>AutoTrade 雙引擎手機監控</title>
+  <title>AutoTrade V9.9 弱點優化實盤監控</title>
   <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
   <style>
     :root {
@@ -50,7 +50,7 @@
         </div>
         <div>
           <div class="flex items-center gap-1.5">
-            <h1 class="text-sm font-bold tracking-tight text-white">AutoTrade</h1>
+            <h1 class="text-sm font-bold tracking-tight text-white">AutoTrade V9.9</h1>
             <span id="account-badge" class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-500/15 text-blue-400 border border-blue-500/30">
               IBKR-PAPER
             </span>
@@ -148,7 +148,7 @@
       </div>
     </div>
 
-    <!-- 策略 1: V9.3 旗艦自適應擴口實盤版 (MES 60%) -->
+    <!-- 策略 1: V9.9 旗艦動態擴口實盤版 (MES 60%) -->
     <div class="bg-[var(--card)] border border-blue-500/20 rounded-xl p-3.5 shadow-sm space-y-2.5 relative overflow-hidden">
       <div class="absolute top-0 right-0 w-24 h-24 bg-blue-500/5 rounded-full blur-xl pointer-events-none"></div>
 
@@ -158,7 +158,7 @@
           <span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span>
           <div>
             <div class="text-xs font-bold text-white flex items-center gap-1.5">
-              <span>V9.3 旗艦自適應擴口 (MES)</span>
+              <span>V9.9 旗艦動態擴口 (MES)</span>
               <span class="px-1.5 py-0.2 rounded text-[10px] bg-blue-500/15 text-blue-400 border border-blue-500/25">
                 權重 60% • 優先權
               </span>
@@ -201,7 +201,7 @@
       </div>
     </div>
 
-    <!-- 策略 2: V9.3 旗艦自適應擴口實盤版 (MNQ 40%) -->
+    <!-- 策略 2: V9.9 旗艦動態擴口實盤版 (MNQ 40%) -->
     <div class="bg-[var(--card)] border border-emerald-500/20 rounded-xl p-3.5 shadow-sm space-y-2.5 relative overflow-hidden">
       <div class="absolute top-0 right-0 w-24 h-24 bg-emerald-500/5 rounded-full blur-xl pointer-events-none"></div>
 
@@ -211,7 +211,7 @@
           <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
           <div>
             <div class="text-xs font-bold text-white flex items-center gap-1.5">
-              <span>V9.3 旗艦自適應擴口 (MNQ)</span>
+              <span>V9.9 旗艦動態擴口 (MNQ)</span>
               <span class="px-1.5 py-0.2 rounded text-[10px] bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">
                 權重 40% • 防飢餓約束
               </span>
@@ -291,7 +291,7 @@
         <div class="text-[var(--muted)] text-center py-5 text-xs bg-black/20 rounded-lg border border-white/5 space-y-1">
           <div class="text-base">☕</div>
           <div class="font-bold text-slate-300">目前尚無成交紀錄</div>
-          <div class="text-[10px] text-[var(--muted)]">雙策略全天候實時監控信號中</div>
+          <div class="text-[10px] text-[var(--muted)]">V9.9 弱點優化策略實盤全天候監控中</div>
         </div>
       </div>
     </div>
@@ -1022,7 +1022,7 @@
           <div class="text-[var(--muted)] text-center py-5 text-xs bg-black/20 rounded-lg border border-white/5 space-y-1">
             <div class="text-base">☕</div>
             <div class="font-bold text-slate-300">${currentTradeFilter === 'ALL' ? '目前尚無成交紀錄' : currentTradeFilter + ' 目前尚無成交紀錄'}</div>
-            <div class="text-[10px] text-[var(--muted)]">雙策略全天候實時監控信號中</div>
+            <div class="text-[10px] text-[var(--muted)]">V9.9 弱點優化策略實盤全天候監控中</div>
           </div>
         `;
         return;
@@ -1031,7 +1031,7 @@
       container.innerHTML = filtered.map(g => {
         const sym = String(g.symbol || "MES").toUpperCase();
         const isMes = sym.includes("MES");
-        const stratName = isMes ? "V9.3 MES" : "V9.3 MNQ";
+        const stratName = isMes ? "V9.9 MES" : "V9.9 MNQ";
         const stratBadge = isMes
           ? "bg-blue-500/15 text-blue-400 border border-blue-500/30"
           : "bg-indigo-500/15 text-indigo-400 border border-indigo-500/30";

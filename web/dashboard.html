@@ -6,7 +6,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <title>AutoTrade 旗艦守護交易系統 (V9.3 Master Hybrid Live) — 實體模擬監控儀表板</title>
+  <title>AutoTrade 旗艦守護交易系統 (V9.9 弱點優化實盤版) — 實體模擬監控儀表板</title>
   <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
   <style>
     :root {
@@ -49,16 +49,16 @@
         <div>
           <div class="flex items-center gap-2 flex-wrap">
             <h1 class="text-lg sm:text-xl font-bold text-[var(--foreground)] tracking-tight">
-              AutoTrade 旗艦守護引擎 (V9.3 Master Hybrid Live)
+              AutoTrade 旗艦守護引擎 (V9.9 弱點優化實盤版)
             </h1>
             <button id="app-version-badge" type="button" onclick="checkAppUpdates(true)" title="點擊檢查 GitHub 最新版本" class="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-[var(--accent)] hover:bg-blue-500/15 text-[var(--foreground)] border border-[var(--border)] transition-all cursor-pointer">
-              v9.3.3
+              v9.9.0
             </button>
             <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-500/15 text-blue-500 border border-blue-500/25">
-              🔥 V9.3 實盤整數自適應 (MES 60%)
+              🔥 V9.9 實盤動態擴口 (MES 60%)
             </span>
             <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-500 border border-emerald-500/25">
-              ⚡ V9.3 實盤整數自適應 (MNQ 40%)
+              ⚡ V9.9 實盤動態擴口 (MNQ 40%)
             </span>
             <span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-500/15 text-indigo-400 border border-indigo-500/25 flex items-center gap-1.5">
               <span class="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse"></span>
@@ -298,7 +298,7 @@
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
 
       <!-- ================================================================== -->
-      <!-- 左欄：🛡️ V4.3 標普防守力冠軍策略 (MES) -->
+      <!-- 左欄：🛡️ V9.9 弱點優化旗艦策略 (MES 60%) -->
       <!-- ================================================================== -->
       <div class="space-y-4">
         <div class="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-4 sm:p-5 shadow-sm space-y-4">
@@ -307,13 +307,13 @@
           <div class="flex items-center justify-between pb-3 border-b border-[var(--border)] flex-wrap gap-2">
             <div>
               <div class="flex items-center gap-2">
-                <span class="text-base font-bold text-blue-500">🔥 V9.3 旗艦自適應擴口 (MES)</span>
+                <span class="text-base font-bold text-blue-500">🔥 V9.9 旗艦動態擴口 (MES)</span>
                 <span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20" id="v43-contract-badge">
                   CME MESZ6
                 </span>
               </div>
               <div class="text-[11px] text-[var(--muted-foreground)] mt-0.5">
-                回撤 23.94% ｜ 卡瑪 10.60 ｜ 5年純利 +$16.58M ｜ 規則2/3限1口
+                年化 27.2% ｜ 最大回撤 13.3% ｜ 卡瑪 2.05 ｜ 10年真實回測弱點修復 ｜ MES 60% 優先
               </div>
             </div>
 
@@ -371,7 +371,7 @@
           <!-- 三梯次分注止賺規劃 (50% / 25% / 25%) -->
           <div class="p-3 rounded-xl bg-[var(--background)]/50 border border-[var(--border)] space-y-1.5">
             <div class="flex items-center justify-between text-xs">
-              <span class="font-semibold text-[var(--foreground)]">V9.3 旗艦三梯次獲利收割 (整數自適應)</span>
+              <span class="font-semibold text-[var(--foreground)]">V9.9 弱點優化三梯次獲利收割 (整數自適應)</span>
               <span class="text-[10px] text-blue-400 font-mono" id="v43-tranche-summary">等待信號</span>
             </div>
             <div class="w-full bg-[var(--border)] h-2 rounded-full overflow-hidden flex">
@@ -403,7 +403,7 @@
       </div>
 
       <!-- ================================================================== -->
-      <!-- 右欄：🚀 V5.0 納指雙劍合璧順勢防守策略 (MNQ) -->
+      <!-- 右欄：⚡ V9.9 弱點優化旗艦策略 (MNQ 40%) -->
       <!-- ================================================================== -->
       <div class="space-y-4">
         <div class="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-4 sm:p-5 shadow-sm space-y-4">
@@ -412,13 +412,13 @@
           <div class="flex items-center justify-between pb-3 border-b border-[var(--border)] flex-wrap gap-2">
             <div>
               <div class="flex items-center gap-2">
-                <span class="text-base font-bold text-emerald-500">⚡ V9.3 旗艦自適應擴口 (MNQ)</span>
+                <span class="text-base font-bold text-emerald-500">⚡ V9.9 旗艦動態擴口 (MNQ)</span>
                 <span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" id="v50-contract-badge">
                   CME MNQZ6
                 </span>
               </div>
               <div class="text-[11px] text-[var(--muted-foreground)] mt-0.5">
-                純利 +$26.79M (+61.5%) ｜ 卡瑪 9.42 ｜ 勝率 72.9% ｜ VWAP 順勢
+                年化 27.2% ｜ 最大回撤 13.3% ｜ 卡瑪 2.05 ｜ VWAP+ADX 動量共振 ｜ MNQ 40% 順勢
               </div>
             </div>
 
@@ -476,7 +476,7 @@
           <!-- 不對稱梯次收割 (60% / 25% / 15%) -->
           <div class="p-3 rounded-xl bg-[var(--background)]/50 border border-[var(--border)] space-y-1.5">
             <div class="flex items-center justify-between text-xs">
-              <span class="font-semibold text-[var(--foreground)]">V9.3 旗艦三梯次獲利收割 (整數自適應)</span>
+              <span class="font-semibold text-[var(--foreground)]">V9.9 弱點優化三梯次獲利收割 (整數自適應)</span>
               <span class="text-[10px] text-emerald-400 font-mono" id="v50-tranche-summary">等待信號</span>
             </div>
             <div class="w-full bg-[var(--border)] h-2 rounded-full overflow-hidden flex">
@@ -524,7 +524,7 @@
             </span>
           </div>
           <p class="text-xs text-[var(--muted-foreground)] mt-0.5">
-            實時同步 CME MES 與 CME MNQ (V9.3 旗艦自適應擴口) 官方成交流水 • 零模擬假數據
+            實時同步 CME MES 與 CME MNQ (V9.9 弱點優化實盤接管) 官方成交流水 • 零模擬假數據
           </p>
         </div>
 
@@ -565,9 +565,9 @@
               <td colspan="8" class="py-12 text-center">
                 <div class="max-w-md mx-auto space-y-2">
                   <div class="text-2xl">🏛️</div>
-                  <div class="text-sm font-bold text-[var(--foreground)]">雙策略守護引擎連線待命中</div>
+                  <div class="text-sm font-bold text-[var(--foreground)]">V9.9 弱點優化引擎連線待命中</div>
                   <div class="text-xs text-[var(--muted-foreground)] leading-relaxed">
-                    尚未有今日平倉紀錄。策略已鎖定 CME MES 及 CME MNQ 主力合約，一旦觸發信號將自動向 IBKR 下發真實委託。
+                    尚未有今日平倉紀錄。V9.9 策略已鎖定 CME MES 及 CME MNQ 主力合約，一旦觸發信號將自動向 IBKR 下發真實委託。
                   </div>
                 </div>
               </td>
@@ -831,12 +831,12 @@
 
     // 5. 單平 MES
     function emergencyFlatV43() {
-      executeManualClose('MES', 'MES (V4.3)');
+      executeManualClose('MES', 'MES (V9.9)');
     }
 
     // 6. 單平 MNQ
     function emergencyFlatV50() {
-      executeManualClose('MNQ', 'MNQ (V5.0)');
+      executeManualClose('MNQ', 'MNQ (V9.9)');
     }
 
     // 手機端 QR Code 監控彈窗控制 (支援內網 Wi-Fi + 外出 Cloudflare 公網切換)
@@ -1136,9 +1136,9 @@
           <td colspan="8" class="py-12 text-center">
             <div class="max-w-md mx-auto space-y-2">
               <div class="text-2xl">🏛️</div>
-              <div class="text-sm font-bold text-[var(--foreground)]">雙策略守護引擎連線待命中</div>
+              <div class="text-sm font-bold text-[var(--foreground)]">V9.9 弱點優化引擎連線待命中</div>
               <div class="text-xs text-[var(--muted-foreground)] leading-relaxed">
-                尚未有此篩選條件下的成交紀錄。系統正全天候監控 CME MES 及 CME MNQ 訊號。
+                尚未有此篩選條件下的成交紀錄。V9.9 系統正全天候監控 CME MES 及 CME MNQ 訊號。
               </div>
             </div>
           </td>
@@ -1152,8 +1152,8 @@
         const hasClose = closeOrders.length > 0;
         const sym = String(g.symbol || 'MES').toUpperCase();
         const symBadge = sym.includes('MNQ')
-          ? '<span class="px-2 py-0.5 rounded text-[11px] font-bold bg-indigo-500/15 text-indigo-400 border border-indigo-500/30">⚡ V9.3 MNQ</span>'
-          : '<span class="px-2 py-0.5 rounded text-[11px] font-bold bg-rose-500/15 text-rose-400 border border-rose-500/30">🔥 V9.3 MES</span>';
+          ? '<span class="px-2 py-0.5 rounded text-[11px] font-bold bg-indigo-500/15 text-indigo-400 border border-indigo-500/30">⚡ V9.9 MNQ</span>'
+          : '<span class="px-2 py-0.5 rounded text-[11px] font-bold bg-rose-500/15 text-rose-400 border border-rose-500/30">🔥 V9.9 MES</span>';
 
         const dirBadge = g.direction === 'LONG'
           ? '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">好倉 LONG</span>'
@@ -2078,7 +2078,7 @@
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-4 shadow-sm">
               <div class="flex items-center justify-between text-xs mb-2">
-                <span class="font-bold text-blue-500">🛡️ V4.3 防守力冠軍 (MES 60% 優先)</span>
+                <span class="font-bold text-blue-500">🛡️ V9.9 弱點優化版 (MES 60% 優先)</span>
                 <span class="text-xs font-mono font-bold">${(sb.v43_mes?.trades_count || 0)} 筆成交</span>
               </div>
               <div class="text-xl font-black font-mono ${(sb.v43_mes?.net_pnl || 0) >= 0 ? 'text-emerald-500' : 'text-rose-500'}">
@@ -2092,7 +2092,7 @@
 
             <div class="bg-[var(--card)] border border-[var(--border)] rounded-xl p-4 shadow-sm">
               <div class="flex items-center justify-between text-xs mb-2">
-                <span class="font-bold text-emerald-500">🚀 V5.0 雙劍合璧版 (MNQ 40% 順勢)</span>
+                <span class="font-bold text-emerald-500">⚡ V9.9 弱點優化版 (MNQ 40% 順勢)</span>
                 <span class="text-xs font-mono font-bold">${(sb.v50_mnq?.trades_count || 0)} 筆成交</span>
               </div>
               <div class="text-xl font-black font-mono ${(sb.v50_mnq?.net_pnl || 0) >= 0 ? 'text-emerald-500' : 'text-rose-500'}">
@@ -2654,7 +2654,7 @@
         const res = await fetch(`/api/version?check=${manual ? 1 : 0}&_t=` + Date.now());
         if (!res.ok) return;
         const info = await res.json();
-        const verLabel = info.tag || `v${info.version || '9.3.3'}`;
+        const verLabel = info.tag || `v${info.version || '9.9.0'}`;
         const commitSuffix = info.commit ? ` (${info.commit})` : '';
         if (badge) {
           if (info.update_available && info.latest_tag) {
@@ -2679,7 +2679,7 @@
           }
         }
       } catch (e) {
-        if (manual && badge) badge.innerText = 'v9.3.3';
+        if (manual && badge) badge.innerText = 'v9.9.0';
       }
     }
     checkAppUpdates(false);

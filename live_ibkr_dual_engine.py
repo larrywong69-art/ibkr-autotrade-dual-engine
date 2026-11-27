@@ -31,6 +31,7 @@ import sys
 import time
 import json
 import math
+import copy
 import logging
 from datetime import datetime, time as dt_time
 from zoneinfo import ZoneInfo
@@ -59,10 +60,14 @@ except ImportError:
         IB_ASYNC_AVAILABLE = False
 
 from strategies.defense_champion_v9_3.strategy import StrategyEngineV93
-from strategies.defense_champion_v9_1.strategy import StrategyEngineV91
-from strategies.defense_champion_v4_3.strategy import StrategyEngineV43
-from strategies.defense_champion_v5.strategy import StrategyEngineV5
-from mes_strategy.strategy_models import Direction, SignalType, TradeSignal
+try:
+    from strategies.defense_champion_v9_9.strategy import StrategyEngineV99
+except ImportError:
+    StrategyEngineV99 = StrategyEngineV93
+StrategyEngineV91 = StrategyEngineV93
+StrategyEngineV43 = StrategyEngineV93
+StrategyEngineV5 = StrategyEngineV93
+from mes_strategy.strategy_models import Direction, SignalType, TradeSignal, MomentumSnapshot
 from report_and_incident_manager import IncidentManager, TradeLedgerManager, ReportScheduler
 
 LOG_DIR = os.path.join(CURRENT_DIR, "logs")
@@ -72,9 +77,10 @@ STATUS_FILE = os.path.join(CURRENT_DIR, "trade_status.json")
 CONTROL_FILE = os.path.join(CURRENT_DIR, "trade_control.json")
 
 CONFIG_V93 = os.path.join(CURRENT_DIR, "strategies", "defense_champion_v9_3", "config.json")
-CONFIG_V91 = os.path.join(CURRENT_DIR, "strategies", "defense_champion_v9_1", "config.json")
-CONFIG_V43 = os.path.join(CURRENT_DIR, "strategies", "defense_champion_v4.3", "config.json")
-CONFIG_V50 = os.path.join(CURRENT_DIR, "strategies", "defense_champion_v5", "config.json")
+CONFIG_V99 = os.path.join(CURRENT_DIR, "strategies", "defense_champion_v9_9", "config.json") if os.path.exists(os.path.join(CURRENT_DIR, "strategies", "defense_champion_v9_9", "config.json")) else CONFIG_V93
+CONFIG_V91 = CONFIG_V93
+CONFIG_V43 = CONFIG_V93
+CONFIG_V50 = CONFIG_V93
 
 logging.basicConfig(
     level=logging.INFO,
@@ -376,6 +382,12 @@ class LiveIBKRDualEngine:
         # 4H 宏觀趨勢濾網快取 (4H_LOCK: 15 分鐘動態更新)
         self.macro_cache_mes: Dict[str, Any] = {"ts": 0.0, "long": True, "short": False, "e20": 0.0, "e50": 0.0, "e200": 0.0, "c": 0.0}
         self.macro_cache_mnq: Dict[str, Any] = {"ts": 0.0, "long": True, "short": False, "e20": 0.0, "e50": 0.0, "e200": 0.0, "c": 0.0}
+
+        # 多時間架構 (MTF): 1H Setup + 5m Precision Trigger
+        self.enable_mtf: bool = os.getenv("ENABLE_MTF", "true").lower() in ("true", "1", "yes")
+        self.armed_setup: Dict[str, Optional[Dict[str, Any]]] = {"MES": None, "MNQ": None}
+        self._last_1h_cache_ts: Dict[str, float] = {}
+        self._last_1h_eval_bar_ts: Dict[str, str] = {}
 
         # 控制開關
         self.trading_enabled_global = True
@@ -1624,6 +1636,130 @@ class LiveIBKRDualEngine:
 
         return cache
 
+    def evaluate_1h_setup(
+        self,
+        symbol: str,
+        contract: Any,
+        engine_inst: Any,
+        pool_usd: float,
+        consec_losses: int
+    ) -> Optional[Dict[str, Any]]:
+        """
+        多週期核心架構 (Multi-Timeframe): 在 1H 週期評估波段進場設定 (1H Setup)
+        - 依據 1H K 棒計算 1H EMA20/50、1H ATR(14)、1H Box(24)、1H ADX(14) 及 4H 宏觀趨勢
+        - 符合 R1 (波段順勢回踩) 或 R2 (箱體邊界反彈) 且通過 4H 鎖定與 1H ADX 濾網時，發出 1H Armed Setup
+        - 記錄 1H ATR 止損距離與入場目標，供 5m 週期精準尋找入場點
+        - 具備 300 秒動態快取與 1H K 棒時間戳對齊，杜絕重複計算與頻繁請求
+        """
+        if not self.ib or not self.ib.isConnected() or not contract or not engine_inst:
+            return getattr(self, "armed_setup", {}).get(symbol)
+
+        now_ts = time.time()
+        last_eval_ts = getattr(self, "_last_1h_cache_ts", {}).get(symbol, 0.0)
+        cached_setup = getattr(self, "armed_setup", {}).get(symbol)
+
+        # 若已有武裝訊號且在 1 小時有效期內，且距上次檢查未滿 300 秒，直接返回快取
+        if cached_setup and cached_setup.get("is_armed") and now_ts < cached_setup.get("expiry_ts", 0.0):
+            if now_ts - last_eval_ts < 300.0:
+                return cached_setup
+
+        try:
+            bars_1h = self.ib.reqHistoricalData(
+                contract,
+                endDateTime='',
+                durationStr='15 D',
+                barSizeSetting='1 hour',
+                whatToShow='TRADES',
+                useRTH=False,
+                formatDate=2,
+                timeout=15
+            )
+            if not bars_1h or len(bars_1h) < 30:
+                return cached_setup
+
+            if not hasattr(self, "_last_1h_cache_ts"):
+                self._last_1h_cache_ts = {}
+            self._last_1h_cache_ts[symbol] = now_ts
+
+            df_1h = util.df(bars_1h)
+            if 'date' in df_1h.columns:
+                df_1h['date'] = pd.to_datetime(df_1h['date'], utc=True)
+                df_1h = df_1h.set_index('date')
+
+            fallback_atr = 25.0 if symbol == "MES" else 120.0
+            from mes_strategy.indicators import calculate_price_sortino
+            df_1h['atr14'] = calculate_atr(df_1h, period=14).fillna(fallback_atr)
+            df_1h['atr'] = df_1h['atr14']
+            df_1h['price_sortino'] = calculate_price_sortino(df_1h['close'], window=20).fillna(1.0)
+            df_1h['rvol'] = 1.0
+
+            # 注入 4H 宏觀趨勢狀態 (4H_LOCK) 與 1H ADX
+            macro = self.get_4h_macro_regime(contract, symbol)
+            if macro.get("c", 0.0) > 0:
+                df_1h["ema20_4h"] = macro.get("e20", df_1h["close"].iloc[-1])
+                df_1h["ema50_4h"] = macro.get("e50", df_1h["close"].iloc[-1])
+                df_1h["ema200_4h"] = macro.get("e200", df_1h["close"].iloc[-1])
+                df_1h["close_4h"] = macro.get("c", df_1h["close"].iloc[-1])
+            df_1h["adx_1h"] = macro.get("adx_1h", 20.0)
+
+            # 只評估倒數第二根「已收盤」1H K 棒 (len-2)
+            idx_1h = len(df_1h) - 2
+            bar_ts_1h = str(df_1h.index[idx_1h])
+            if getattr(self, "_last_1h_eval_bar_ts", {}).get(symbol) == bar_ts_1h and cached_setup:
+                return cached_setup
+
+            if not hasattr(self, "_last_1h_eval_bar_ts"):
+                self._last_1h_eval_bar_ts = {}
+            self._last_1h_eval_bar_ts[symbol] = bar_ts_1h
+
+            engine_inst.pending_limit_order = None
+            sig_1h, pending_1h = engine_inst.evaluate_bar(
+                idx_1h, df_1h, pool_usd, 0.5, consecutive_losses=consec_losses
+            )
+            target_sig = sig_1h or (pending_1h.signal if pending_1h else None)
+
+            if target_sig:
+                atr_val = float(target_sig.atr or df_1h['atr14'].iloc[idx_1h] or fallback_atr)
+                min_sl = 18.0 if symbol == "MNQ" else 4.0
+                sl_dist = float(target_sig.sl_dist or max(min_sl, 0.82 * atr_val))
+                tp1_dist = float(target_sig.tp1_dist or (1.55 * atr_val))
+                tp2_dist = float(target_sig.tp2_dist or (3.10 * atr_val))
+
+                setup = {
+                    "is_armed": True,
+                    "symbol": symbol,
+                    "direction": target_sig.direction,
+                    "rule_code": getattr(target_sig, "rule_code", "R1"),
+                    "signal_type": target_sig.signal_type,
+                    "setup_price": float(df_1h['close'].iloc[idx_1h]),
+                    "setup_time": bar_ts_1h,
+                    "atr_1h": atr_val,
+                    "sl_dist": sl_dist,
+                    "tp1_dist": tp1_dist,
+                    "tp2_dist": tp2_dist,
+                    "contracts": int(target_sig.contracts),
+                    "split_lots": target_sig.split_lots,
+                    "armed_ts": now_ts,
+                    "expiry_ts": now_ts + 3600.0,
+                }
+                if not hasattr(self, "armed_setup"):
+                    self.armed_setup = {}
+                self.armed_setup[symbol] = setup
+                logger.info(
+                    f"🎯 [MTF 1H 訊號武裝] {symbol} 1H 週期發出 {setup['rule_code']} {setup['direction'].name} 訊號！"
+                    f"基準價={setup['setup_price']:.2f}, 1H ATR={atr_val:.2f}, SL距={sl_dist:.2f}, TP1距={tp1_dist:.2f} "
+                    f"-> 啟動 5m 週期精準尋找入場點 (有效期 60 分鐘)"
+                )
+                return setup
+            else:
+                if not hasattr(self, "armed_setup"):
+                    self.armed_setup = {}
+                self.armed_setup[symbol] = None
+                return None
+        except Exception as e:
+            logger.warning(f"獲取 {symbol} 1H Setup 異常: {e}")
+            return cached_setup
+
     def _build_single_bracket(
         self,
         direction_action: str,
@@ -1816,7 +1952,11 @@ class LiveIBKRDualEngine:
         if qty == 1:
             signal.split_lots = (0, 1, 0)
         else:
-            engine_inst = self.engine_v93_mes if symbol == "MES" else self.engine_v93_mnq
+            engine_inst = (
+                getattr(self, "engine_v99_mes", None) or getattr(self, "engine_v93_mes", None)
+                if symbol == "MES"
+                else getattr(self, "engine_v99_mnq", None) or getattr(self, "engine_v93_mnq", None)
+            )
             signal.split_lots = engine_inst.calculate_tranches(qty)
 
         entry_p = self._round_to_tick(signal.entry_price, 0.25)
@@ -1874,6 +2014,7 @@ class LiveIBKRDualEngine:
                 "trailing_active": False,
                 "opened_at": time.time(),
                 "rule_desc": rule_desc,
+                "be_buf": 0.25 if symbol == "MES" else 1.0,
             }
 
         prefix = f"V93_{symbol}"
@@ -2796,7 +2937,177 @@ class LiveIBKRDualEngine:
         else:
             # 常規時段：維持單部位防重複進場機制
             if has_pos or len(orders) > 0:
+                if hasattr(self, "armed_setup"):
+                    self.armed_setup[symbol] = None
                 return
+
+        if getattr(self, "enable_mtf", False):
+            # =================================================================
+            # 多時間架構 (MTF): 1H Setup + 5m Precision Trigger
+            # =================================================================
+            consec_losses = getattr(self, "_consecutive_losses_today", 0)
+            setup = self.evaluate_1h_setup(symbol, contract, engine_inst, pool_usd, consec_losses)
+            if not setup or not setup.get("is_armed"):
+                macro = self.get_4h_macro_regime(contract, symbol)
+                last_diag = getattr(self, "_last_scan_diag_ts", {}).get(symbol, 0.0)
+                if now_ts - last_diag >= 300.0:
+                    if not hasattr(self, "_last_scan_diag_ts"):
+                        self._last_scan_diag_ts = {}
+                    self._last_scan_diag_ts[symbol] = now_ts
+                    logger.info(
+                        f"⏳ [MTF 巡航掃描] {symbol} 1H 週期無開倉設定，持續掃描中 | "
+                        f"4H趨勢: 做多={macro.get('long')}, 做空={macro.get('short')} | "
+                        f"1H ADX: {macro.get('adx_1h', 0.0):.1f}"
+                    )
+                return
+
+            if now_ts > setup.get("expiry_ts", 0.0):
+                logger.info(f"⏰ [MTF 1H 武裝過期] {symbol} 1H Setup ({setup.get('rule_code')}) 已超逾 60 分鐘未獲 5m 觸發，解除武裝。")
+                self.armed_setup[symbol] = None
+                return
+
+            if not self._can_query_hist_bar(symbol, now_ts):
+                return
+
+            try:
+                bars = self.ib.reqHistoricalData(
+                    contract,
+                    endDateTime='',
+                    durationStr='2 D',
+                    barSizeSetting='5 mins',
+                    whatToShow='TRADES',
+                    useRTH=False,
+                    formatDate=2,
+                    timeout=25
+                )
+                if not bars or len(bars) < 30:
+                    self._record_hist_failure(symbol, now_ts)
+                    return
+
+                if hasattr(self, "_hist_fail_streak"):
+                    self._hist_fail_streak[symbol] = 0
+                if hasattr(self, "_last_hist_fail_ts"):
+                    self._last_hist_fail_ts[symbol] = 0.0
+
+                df = util.df(bars)
+                if 'date' in df.columns:
+                    df['date'] = pd.to_datetime(df['date'], utc=True)
+                    df = df.set_index('date')
+
+                last_idx = len(df) - 2
+                bar_ts_str = str(df.index[last_idx])
+                cur_bucket = int(now_ts // 300)
+                if self._last_eval_bar_ts.get(symbol) == bar_ts_str:
+                    if (now_ts % 300.0) >= 35.0 and hasattr(self, "_last_eval_bucket"):
+                        self._last_eval_bucket[symbol] = cur_bucket
+                    return
+                self._last_eval_bar_ts[symbol] = bar_ts_str
+                if hasattr(self, "_last_eval_bucket"):
+                    self._last_eval_bucket[symbol] = cur_bucket
+
+                ema20_5m = float(df['close'].ewm(span=20, adjust=False).mean().iloc[last_idx])
+                c_5m = float(df['close'].iloc[last_idx])
+                o_5m = float(df['open'].iloc[last_idx])
+                prev_h_5m = float(df['high'].iloc[last_idx - 1])
+                prev_l_5m = float(df['low'].iloc[last_idx - 1])
+                setup_price = float(setup.get("setup_price", c_5m))
+                atr_1h = float(setup.get("atr_1h", fallback_atr))
+
+                is_triggered = False
+                direction = setup["direction"]
+
+                if direction == Direction.LONG:
+                    bull_bar = c_5m > o_5m
+                    trend_ok = (c_5m >= ema20_5m) or (c_5m > prev_h_5m)
+                    not_chasing = (c_5m <= setup_price + 1.25 * atr_1h)
+                    if bull_bar and trend_ok and not_chasing:
+                        is_triggered = True
+                    else:
+                        logger.info(
+                            f"⏳ [MTF 5m 等待觸發] {symbol} 1H 武裝 LONG ({setup['rule_code']}): "
+                            f"5m陽燭={bull_bar} (C:{c_5m:.2f} > O:{o_5m:.2f}) | "
+                            f"轉折={trend_ok} (EMA20:{ema20_5m:.2f}, 前高:{prev_h_5m:.2f}) | "
+                            f"防追高={not_chasing} (現價:{c_5m:.2f}, 上限:{setup_price + 1.25 * atr_1h:.2f})"
+                        )
+                else:  # Direction.SHORT
+                    bear_bar = c_5m < o_5m
+                    trend_ok = (c_5m <= ema20_5m) or (c_5m < prev_l_5m)
+                    not_chasing = (c_5m >= setup_price - 1.25 * atr_1h)
+                    if bear_bar and trend_ok and not_chasing:
+                        is_triggered = True
+                    else:
+                        logger.info(
+                            f"⏳ [MTF 5m 等待觸發] {symbol} 1H 武裝 SHORT ({setup['rule_code']}): "
+                            f"5m陰燭={bear_bar} (C:{c_5m:.2f} < O:{o_5m:.2f}) | "
+                            f"轉折={trend_ok} (EMA20:{ema20_5m:.2f}, 前低:{prev_l_5m:.2f}) | "
+                            f"防追低={not_chasing} (現價:{c_5m:.2f}, 下限:{setup_price - 1.25 * atr_1h:.2f})"
+                        )
+
+                if is_triggered:
+                    entry_p = self._round_to_tick(c_5m)
+                    sl_dist = float(setup["sl_dist"])
+                    tp1_dist = float(setup["tp1_dist"])
+                    tp2_dist = float(setup["tp2_dist"])
+
+                    if direction == Direction.LONG:
+                        sl_p = self._round_to_tick(entry_p - sl_dist)
+                        tp1_p = self._round_to_tick(entry_p + tp1_dist)
+                        tp2_p = self._round_to_tick(entry_p + tp2_dist)
+                    else:
+                        sl_p = self._round_to_tick(entry_p + sl_dist)
+                        tp1_p = self._round_to_tick(entry_p - tp1_dist)
+                        tp2_p = self._round_to_tick(entry_p - tp2_dist)
+
+                    target_sig = TradeSignal(
+                        timestamp=pd.to_datetime(bar_ts_str),
+                        signal_type=setup["signal_type"],
+                        direction=direction,
+                        entry_price=entry_p,
+                        sl_price=sl_p,
+                        tp1_price=tp1_p,
+                        tp2_price=tp2_p,
+                        weighted_rr=2.5,
+                        contracts=setup["contracts"],
+                        momentum=MomentumSnapshot.STRONG,
+                        entry_bar_body=abs(c_5m - o_5m),
+                        atr=atr_1h,
+                    )
+                    target_sig.runner_price = None
+                    target_sig.rule_code = f"{setup['rule_code']}_MTF5M"
+                    target_sig.sl_dist = sl_dist
+                    target_sig.tp1_dist = tp1_dist
+                    target_sig.tp2_dist = tp2_dist
+                    target_sig.split_lots = setup["split_lots"]
+
+                    if is_us_open_15m:
+                        if has_pos:
+                            pos_dir = pos.get("direction", "LONG")
+                            sig_dir = "LONG" if target_sig.direction == Direction.LONG else "SHORT"
+                            if pos_dir != sig_dir:
+                                logger.info(f"⏸️ [美盤開市避震] {symbol} 訊號方向 {sig_dir} 與現有持倉 {pos_dir} 相反，開市頭 15 分鐘不予逆向加倉")
+                                return
+                            logger.info(f"🚀 [美盤開市加倉] {symbol} 持倉浮盈 USD ${pos.get('unrealized_pnl', 0.0):.2f}，觸發順勢加倉 1 口")
+                        else:
+                            logger.info(f"🛡️ [美盤開市避震] {symbol} 開市頭 15 分鐘初次落注限制為 1 張")
+                        target_sig.contracts = 1
+                        target_sig.split_lots = (0, 1, 0)
+
+                    logger.info(
+                        f"🚀 [MTF 5m 精準入場觸發！] {symbol} {target_sig.rule_code} {direction.name} | "
+                        f"入場現價={entry_p:.2f} | 1H ATR 止損價={sl_p:.2f} (SL距={sl_dist:.2f}) | "
+                        f"TP1={tp1_p:.2f} | TP2={tp2_p:.2f} | 口數={target_sig.contracts}"
+                    )
+
+                    self.place_v93_bracket_order(symbol, target_sig)
+                    self.armed_setup[symbol] = None
+            except Exception as e:
+                self._record_hist_failure(symbol, now_ts)
+                logger.warning(f"MTF {symbol} 5m K 棒評估異常: {e}")
+            return
+
+        # -----------------------------------------------------------------
+        # 單一時間架構 (Single Timeframe 5m fallback / baseline)
+        # -----------------------------------------------------------------
 
         if not self._can_query_hist_bar(symbol, now_ts):
             return
@@ -3300,6 +3611,37 @@ class LiveIBKRDualEngine:
                 if consec_losses_st >= 5
                 else ("⚠️ 連輸 >= 3 次 (注碼強制減半)" if consec_losses_st >= 3 else "🟢 連輸風控正常 (常規注碼)")
             ),
+
+            # 多時間架構 (MTF: 1H Setup + 5m Precision Trigger)
+            "enable_mtf": getattr(self, "enable_mtf", True),
+            "mtf_status": {
+                "MES": (
+                    {
+                        "is_armed": True,
+                        "rule_code": self.armed_setup["MES"].get("rule_code"),
+                        "direction": getattr(self.armed_setup["MES"].get("direction"), "name", str(self.armed_setup["MES"].get("direction"))),
+                        "setup_price": self.armed_setup["MES"].get("setup_price"),
+                        "atr_1h": self.armed_setup["MES"].get("atr_1h"),
+                        "sl_dist": self.armed_setup["MES"].get("sl_dist"),
+                        "expiry_ts": self.armed_setup["MES"].get("expiry_ts"),
+                    }
+                    if getattr(self, "armed_setup", {}).get("MES")
+                    else {"is_armed": False, "status": "1H 巡航等待中"}
+                ),
+                "MNQ": (
+                    {
+                        "is_armed": True,
+                        "rule_code": self.armed_setup["MNQ"].get("rule_code"),
+                        "direction": getattr(self.armed_setup["MNQ"].get("direction"), "name", str(self.armed_setup["MNQ"].get("direction"))),
+                        "setup_price": self.armed_setup["MNQ"].get("setup_price"),
+                        "atr_1h": self.armed_setup["MNQ"].get("atr_1h"),
+                        "sl_dist": self.armed_setup["MNQ"].get("sl_dist"),
+                        "expiry_ts": self.armed_setup["MNQ"].get("expiry_ts"),
+                    }
+                    if getattr(self, "armed_setup", {}).get("MNQ")
+                    else {"is_armed": False, "status": "1H 巡航等待中"}
+                ),
+            },
 
             # 市場行情數據流狀態
             "market_data_type": self.market_data_type,

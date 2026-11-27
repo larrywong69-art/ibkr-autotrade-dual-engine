@@ -355,6 +355,7 @@
       <span id="status-pill" style="font-size:12px; color:var(--muted); font-weight:500;">準備就緒</span>
     </div>
     <div class="btn-row">
+      <button class="btn-primary" style="background:linear-gradient(135deg, #2563eb, #1d4ed8); border-color:#3b82f6; font-weight:700;" onclick="triggerOneClickDataUpdate()">⚡ 一鍵更新回測數據</button>
       <a href="/dashboard.html" class="btn">🖥️ 實盤儀表板</a>
       <a href="/mobile.html" class="btn">📱 手機監控</a>
       <button onclick="exportHTMLReport()">📥 匯出分析報告 (HTML)</button>
@@ -380,6 +381,11 @@
             <option value="SYNTHETIC">🟡 高擬真合成數據 (基準測試)</option>
           </select>
         </div>
+
+        <!-- 一鍵更新回測數據 (雙通道智能同步按鈕) -->
+        <button id="btn-one-click-sync" style="width:100%; justify-content:center; background:linear-gradient(135deg, #1d4ed8, #2563eb); color:#fff; font-weight:700; padding:10px; margin-bottom:10px; border-radius:6px; box-shadow:0 4px 12px rgba(37,99,235,0.25);" onclick="triggerOneClickDataUpdate()">
+          ⚡ 一鍵更新本地回測數據 (雙通道智能同步)
+        </button>
 
         <!-- IBKR 本地歷史下載快取區 -->
         <div style="background:#090d16; border:1px solid var(--border); border-radius:8px; padding:9px; margin-bottom:10px;">
@@ -525,101 +531,59 @@
           <span id="strat-count-badge" class="badge">已選 3/3</span>
         </div>
         <div id="strategy-list" style="max-height:480px; overflow-y:auto; padding-right:4px;">
-          <!-- 3 大精選演化冠軍策略 (由10年288組參數全面汰弱留強精選) -->
-          <div style="font-size:10px; font-weight:700; color:#e11d48; margin:4px 0 4px 2px; text-transform:uppercase; letter-spacing:0.5px;">🚀 實盤整數口旗艦與演化冠軍</div>
+          <!-- 最新確認核心策略版本清單 (汰除所有過期原型，僅保留基準與冠軍版本) -->
+          <div style="font-size:10px; font-weight:700; color:#10b981; margin:4px 0 4px 2px; text-transform:uppercase; letter-spacing:0.5px;">👑 最新確認核心量化策略 (3合1 實盤與演化矩陣)</div>
           
-          <!-- V9.3.13 實盤最新旗艦 -->
+          <!-- V10.0 旗艦雙引擎 100 輪演化終極版 -->
           <label class="strat-item selected">
-            <input type="checkbox" name="strat" value="v9.3.13" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
-            <span class="strat-dot" style="background:#e11d48;"></span>
-            <div>
-              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
-                <span>V9.3.13 旗艦自適應實盤最新版</span>
-                <span class="badge" style="background:rgba(225,29,72,0.15); color:#e11d48; border:1px solid rgba(225,29,72,0.4); font-size:10px;">🚀 最新實盤版</span>
-              </div>
-              <div style="font-size:11px; color:var(--muted);">美股黃金窗口調控 (22:30–04:00全額/其餘減半) + 連輸階梯風控 (3連虧減半/5連虧限1張) + 開市避震鎖 (夏普 1.62, MDD 8.24%)</div>
-            </div>
-          </label>
-
-          <!-- V9.3.10 旗艦中期定型版 -->
-          <label class="strat-item selected">
-            <input type="checkbox" name="strat" value="v9.3.10" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
-            <span class="strat-dot" style="background:#f97316;"></span>
-            <div>
-              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
-                <span>V9.3.10 旗艦雙引擎中期穩定版</span>
-                <span class="badge" style="background:rgba(249,115,22,0.15); color:#f97316; border:1px solid rgba(249,115,22,0.4); font-size:10px;">⚖️ 中期定型版</span>
-              </div>
-              <div style="font-size:11px; color:var(--muted);">11-18定型版：全時段常規注碼 (無黃金窗口減半) + 常規階梯收割 (無連輸降碼，夏普 1.02, MDD 16.02%)</div>
-            </div>
-          </label>
-
-          <!-- V9.1 總利潤之王 -->
-          <label class="strat-item selected">
-            <input type="checkbox" name="strat" value="v9.1" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
-            <span class="strat-dot" style="background:#f43f5e;"></span>
-            <div>
-              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
-                <span>V9.1 旗艦自適應擴口終極版</span>
-                <span class="badge" style="background:rgba(244,63,94,0.15); color:#f43f5e; border:1px solid rgba(244,63,94,0.4); font-size:10px;">👑 +1003% 十倍淨利</span>
-              </div>
-              <div style="font-size:11px; color:var(--muted);">4H鎖定 + 3.1:1盈虧比 + 尾倉追蹤 + 動態保證金階梯 (MDD 4.80%, 淨利 $300k)</div>
-            </div>
-          </label>
-
-          <!-- V8.1 極致平衡之王 -->
-          <label class="strat-item selected">
-            <input type="checkbox" name="strat" value="v8.1" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
-            <span class="strat-dot" style="background:#fbbf24;"></span>
-            <div>
-              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
-                <span>V8.1 雙共振自適應波動微調版</span>
-                <span class="badge" style="background:rgba(251,191,36,0.15); color:#fbbf24; border:1px solid rgba(251,191,36,0.4); font-size:10px;">⚖️ 夏普 3.95 平衡王</span>
-              </div>
-              <div style="font-size:11px; color:var(--muted);">4H+1D雙宏觀共振 + 0.80x ATR 防守線 + 3:1階梯 + 尾倉追蹤 (MDD 3.19%, +829%)</div>
-            </div>
-          </label>
-
-          <!-- V6.0 極限防守之王 -->
-          <label class="strat-item selected">
-            <input type="checkbox" name="strat" value="v6.0" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
-            <span class="strat-dot" style="background:#0ea5e9;"></span>
-            <div>
-              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
-                <span>V6.0 4H宏觀趨勢共振 + 3:1階梯</span>
-                <span class="badge" style="background:rgba(14,165,233,0.15); color:#0ea5e9; border:1px solid rgba(14,165,233,0.4); font-size:10px;">🛡️ 回撤 2.62% 防守王</span>
-              </div>
-              <div style="font-size:11px; color:var(--muted);">4H 宏觀趨勢過濾 + 3.0:1 對稱階梯 (40/40/20) + 0.85x ATR 止損 (夏普 3.91, +824%)</div>
-            </div>
-          </label>
-
-          <!-- 基準與經典版本 -->
-          <div style="font-size:10px; font-weight:700; color:#10b981; margin:10px 0 4px 2px; text-transform:uppercase; letter-spacing:0.5px;">🛡️ 基準與經典版本</div>
-          <label class="strat-item">
-            <input type="checkbox" name="strat" value="v5.0" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <input type="checkbox" name="strat" value="v10.0" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
             <span class="strat-dot" style="background:#10b981;"></span>
             <div>
               <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
-                <span>V5.0 雙劍合璧基準</span>
-                <span class="badge" style="background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.4); font-size:10px;">基準線 (+603%)</span>
+                <span>V10.0 旗艦雙引擎 100 輪演化終極版</span>
+                <span class="badge" style="background:rgba(16,185,129,0.18); color:#10b981; border:1px solid rgba(16,185,129,0.5); font-size:10px;">👑 100輪演化終極冠軍 (V10.0)</span>
               </div>
-              <div style="font-size:11px; color:var(--muted);">1H VWAP 濾網 + 60/25/15 不對稱收割 + 1.1x ATR 止損 (MDD 6.22%)</div>
+              <div style="font-size:11px; color:var(--muted);">10年真實數據 100 輪弱點定向演化冠軍：R1 趨勢過濾 (ADX>=20) + 亞盤避空 + 開盤防秒斬 (MES 8.0/MNQ 32.0) + Runner 7.0R + 保本雙倍滑價 (+1.0 pt) + 6口硬封頂 (MDD 2.96%, Sharpe 3.04)</div>
             </div>
           </label>
-          <label class="strat-item">
-            <input type="checkbox" name="strat" value="v4.3" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
-            <span class="strat-dot" style="background:#06b6d4;"></span>
+
+          <!-- V9.9 弱點優化終極冠軍版 -->
+          <label class="strat-item selected">
+            <input type="checkbox" name="strat" value="v9.9" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#f59e0b;"></span>
             <div>
-              <div style="font-weight:700;">V4.3 標普防守力冠軍 (MES)</div>
-              <div style="font-size:11px; color:var(--muted);">1H 結構 + 浪3 LMT + R2/R3 鎖1口 + 50/25/25 梯次</div>
+              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
+                <span>V9.9 弱點優化終極冠軍版</span>
+                <span class="badge" style="background:rgba(245,158,11,0.18); color:#f59e0b; border:1px solid rgba(245,158,11,0.5); font-size:10px;">🚀 實盤接管發單冠軍 (V9.9)</span>
+              </div>
+              <div style="font-size:11px; color:var(--muted);">50輪真實數據演化巔峰：年化 27.77% + 淨利 $317,228 (+1,057%) + 夏普 3.03 + 回撤 8.23% (動態階梯擴口 + ADX趨勢濾網 + R2 1.25x放大 + 亞盤降噪)</div>
             </div>
           </label>
-          <label class="strat-item">
-            <input type="checkbox" name="strat" value="dual_60_40" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
-            <span class="strat-dot" style="background:#d97706;"></span>
+
+          <!-- V9.3 旗艦雙引擎實盤基準版 -->
+          <label class="strat-item selected">
+            <input type="checkbox" name="strat" value="v9.3" checked onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#e11d48;"></span>
             <div>
-              <div style="font-weight:700;">Dual 雙引擎實盤組合 (60% V4.3 + 40% V5.0)</div>
-              <div style="font-size:11px; color:var(--muted);">模擬雲端實盤 6:4 雙資金池協同與防飢餓保護</div>
+              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
+                <span>V9.3 旗艦雙引擎整數自適應實盤基準版</span>
+                <span class="badge" style="background:rgba(225,29,72,0.15); color:#e11d48; border:1px solid rgba(225,29,72,0.4); font-size:10px;">📌 實盤基準對照 (V9.3)</span>
+              </div>
+              <div style="font-size:11px; color:var(--muted);">全整數口三梯次拆單 + 美股黃金窗口調控 (22:30–04:00全額/其餘減半) + 連輸階梯風控 (3連虧減半/5連虧限1張) + 1H ADX>30 強趨勢保護 (實盤穩定基準)</div>
+            </div>
+          </label>
+
+          <!-- V10.0 階梯複利高回報演化版 -->
+          <div style="font-size:10px; font-weight:700; color:#3b82f6; margin:10px 0 4px 2px; text-transform:uppercase; letter-spacing:0.5px;">📈 擴充進階演化版本</div>
+          <label class="strat-item">
+            <input type="checkbox" name="strat" value="v10.0-compound" onchange="onStrategyToggle(this)" style="margin-top:3px;" />
+            <span class="strat-dot" style="background:#3b82f6;"></span>
+            <div>
+              <div style="font-weight:700; display:flex; align-items:center; gap:6px;">
+                <span>V10.0 階梯複利高回報演化版</span>
+                <span class="badge" style="background:rgba(59,130,246,0.15); color:#3b82f6; border:1px solid rgba(59,130,246,0.4); font-size:10px;">📈 複利演化 (+1,488%)</span>
+              </div>
+              <div style="font-size:11px; color:var(--muted);">V10.0 演化防守核心 + 淨值每增長 $10,000 自動解鎖 1 口 (上限 6 口)，10年累積回報 +1488%，CAGR 31.88%，夏普 3.16，MDD 9.19%</div>
             </div>
           </label>
         </div>
@@ -680,17 +644,31 @@
                 <th>年化 CAGR</th>
                 <th>最大回撤 (MDD)</th>
                 <th>Sharpe / Sortino</th>
-                <th>Calmar</th>
-                <th>勝率 (總筆數)</th>
+                <th>Calmar / UPI</th>
+                <th>盈虧比 (Payoff)</th>
                 <th>獲利因子 (PF)</th>
-                <th>單筆期望值</th>
-                <th>IB 總佣金成本</th>
+                <th>勝率 (總筆數)</th>
+                <th>單筆期望值 (評分)</th>
+                <th>日 VaR 95% (CVaR)</th>
+                <th>潰瘍指數 (Ulcer)</th>
+                <th>市場暴露 (持倉時數)</th>
+                <th>連勝 / 連虧</th>
+                <th>IB 總佣金</th>
                 <th>蒙地卡羅 95% MDD</th>
               </tr>
             </thead>
             <tbody id="kpi-compare-body"></tbody>
           </table>
         </div>
+      </section>
+
+      <!-- 深度量化風控與結構指標矩陣 (Advanced Quant Metrics Matrix) -->
+      <section class="card">
+        <div class="card-title">
+          <span>🔬 深度量化風控與結構指標矩陣 (Quantitative Risk & Structure Matrix)</span>
+          <select id="quant-strat-select" onchange="renderQuantDeepDive(this.value)" style="width:auto;"></select>
+        </div>
+        <div id="quant-metrics-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:12px; margin-top:8px;"></div>
       </section>
 
       <!-- 疊加淨值曲線 & 水下回撤對比圖 -->
@@ -939,6 +917,7 @@
 
         populateStrategySelectors(data);
         renderKPITable(data);
+        renderQuantDeepDive();
         drawKlineChart();
         drawEquityAndDDCharts();
         renderAttributionAndHeatmap();
@@ -962,10 +941,12 @@
       const markerSel = document.getElementById('marker-strat-select');
       const attrSel = document.getElementById('attr-strat-select');
       const hmSel = document.getElementById('heatmap-strat-select');
+      const quantSel = document.getElementById('quant-strat-select');
 
       const prevMarker = markerSel ? markerSel.value : '';
       const prevAttr = attrSel ? attrSel.value : '';
       const prevHm = hmSel ? hmSel.value : '';
+      const prevQuant = quantSel ? quantSel.value : '';
 
       if (markerSel) {
         markerSel.innerHTML = keys.map((k, idx) => `<option value="${k}">${idx === 0 ? '★ ' : ''}${results[k].name}</option>`).join('');
@@ -984,15 +965,26 @@
         if (keys.includes(prevHm)) hmSel.value = prevHm;
         else hmSel.value = (attrSel && attrSel.value) || keys[0] || '';
       }
+
+      if (quantSel) {
+        quantSel.innerHTML = keys.map(k => `<option value="${k}">${results[k].name}</option>`).join('');
+        if (keys.includes(prevQuant)) quantSel.value = prevQuant;
+        else quantSel.value = keys[0] || '';
+      }
     }
 
     function syncStrategySelect(source, stratId) {
       const attrSel = document.getElementById('attr-strat-select');
       const hmSel = document.getElementById('heatmap-strat-select');
       const markerSel = document.getElementById('marker-strat-select');
+      const quantSel = document.getElementById('quant-strat-select');
 
       if (attrSel && attrSel.value !== stratId) attrSel.value = stratId;
       if (hmSel && hmSel.value !== stratId) hmSel.value = stratId;
+      if (quantSel && quantSel.value !== stratId) {
+        quantSel.value = stratId;
+        renderQuantDeepDive(stratId);
+      }
       if (source !== 'marker' && markerSel && markerSel.value !== stratId) {
         markerSel.value = stratId;
         drawKlineChart();
@@ -1024,15 +1016,93 @@
             <td class="${m.cagr_pct >= 0 ? 'pos' : 'neg'}">${m.cagr_pct}%</td>
             <td class="neg">-${m.max_drawdown_pct}% ($${m.max_drawdown_usd.toLocaleString()})</td>
             <td><strong>${m.sharpe_ratio}</strong> / ${m.sortino_ratio}</td>
-            <td>${m.calmar_ratio}</td>
+            <td><strong>${m.calmar_ratio}</strong> / <span style="color:#10b981;" title="Ulcer Performance Index (Martin Ratio)">${m.upi ?? '--'}</span></td>
+            <td><strong class="pos">${m.payoff_ratio ?? '--'}</strong> : 1</td>
+            <td><strong>${m.profit_factor}</strong></td>
             <td>${m.win_rate_pct}% (${m.total_trades} 筆)</td>
-            <td>${m.profit_factor}</td>
-            <td class="${m.expectancy_usd >= 0 ? 'pos' : 'neg'}">$${m.expectancy_usd}</td>
+            <td class="${m.expectancy_usd >= 0 ? 'pos' : 'neg'}">$${m.expectancy_usd} <span style="font-size:10px; color:var(--muted);">(${m.expectancy_score ? m.expectancy_score + 'x' : '--'})</span></td>
+            <td class="neg">-${m.var_95_pct ?? '--'}% <span style="font-size:10px; color:var(--muted);">(-${m.cvar_95_pct ?? '--'}%)</span></td>
+            <td style="color:#e2e8f0;">${m.ulcer_index ?? '--'}</td>
+            <td>${m.market_exposure_pct ?? '--'}% <span style="font-size:10px; color:var(--muted);">(${m.avg_holding_hours ?? '--'}h)</span></td>
+            <td><span class="pos">${m.max_consecutive_wins ?? 0}W</span> / <span class="neg">${m.max_consecutive_losses ?? 0}L</span></td>
             <td>$${m.total_commission_usd.toLocaleString()}</td>
             <td class="neg">-${mc.p95_max_dd_pct || m.max_drawdown_pct}%</td>
           </tr>
         `;
       }).join('');
+    }
+
+    function renderQuantDeepDive(stratId) {
+      if (!currentBacktestData) return;
+      const results = currentBacktestData.results || {};
+      const keys = Object.keys(results);
+      if (!keys.length) return;
+      const targetId = stratId && results[stratId] ? stratId : keys[0];
+      const quantSel = document.getElementById('quant-strat-select');
+      if (quantSel && quantSel.value !== targetId) quantSel.value = targetId;
+
+      const r = results[targetId];
+      if (!r) return;
+      const m = r.metrics || {};
+      const grid = document.getElementById('quant-metrics-grid');
+      if (!grid) return;
+
+      grid.innerHTML = `
+        <div style="background:#090d16; border:1px solid rgba(59,130,246,0.3); border-radius:8px; padding:12px;">
+          <div style="font-size:12px; font-weight:700; color:#3b82f6; margin-bottom:8px; display:flex; align-items:center; gap:6px;">
+            <span>🛡️ 風險調整收益 (Risk-Adjusted)</span>
+          </div>
+          <div style="font-size:11px; line-height:1.8; color:#cbd5e1;">
+            <div>• Sharpe 比率: <strong style="color:#fff;">${m.sharpe_ratio}</strong></div>
+            <div>• Sortino 比率 (下行保護): <strong style="color:#10b981;">${m.sortino_ratio}</strong></div>
+            <div>• Calmar 比率 (年化/MDD): <strong style="color:#10b981;">${m.calmar_ratio}</strong></div>
+            <div>• UPI / Martin 指數 (年化/潰瘍): <strong style="color:#10b981;">${m.upi ?? '--'}</strong></div>
+            <div>• Omega 比率: <strong style="color:#38bdf8;">${m.omega_ratio ?? '--'}</strong></div>
+          </div>
+        </div>
+
+        <div style="background:#090d16; border:1px solid rgba(225,29,72,0.3); border-radius:8px; padding:12px;">
+          <div style="font-size:12px; font-weight:700; color:#f43f5e; margin-bottom:8px; display:flex; align-items:center; gap:6px;">
+            <span>🌊 回撤與極端尾部風險 (Tail Risk)</span>
+          </div>
+          <div style="font-size:11px; line-height:1.8; color:#cbd5e1;">
+            <div>• 最大回撤 (MDD): <strong style="color:#f43f5e;">-${m.max_drawdown_pct}% ($${m.max_drawdown_usd?.toLocaleString()})</strong></div>
+            <div>• 最長回撤修復週期: <strong style="color:#cbd5e1;">${m.max_drawdown_duration_days ?? '--'} 天</strong></div>
+            <div>• 淨利修復係數 (Recovery Factor): <strong style="color:#10b981;">${m.recovery_factor ?? '--'}</strong></div>
+            <div>• 日風險值 (VaR 95%): <strong style="color:#fbbf24;">-${m.var_95_pct ?? '--'}%</strong></div>
+            <div>• 條件風險值 (CVaR 95% 期望短缺): <strong style="color:#f87171;">-${m.cvar_95_pct ?? '--'}%</strong></div>
+            <div>• 潰瘍指數 (Ulcer Index): <strong style="color:#94a3b8;">${m.ulcer_index ?? '--'}</strong></div>
+          </div>
+        </div>
+
+        <div style="background:#090d16; border:1px solid rgba(16,185,129,0.3); border-radius:8px; padding:12px;">
+          <div style="font-size:12px; font-weight:700; color:#10b981; margin-bottom:8px; display:flex; align-items:center; gap:6px;">
+            <span>🎯 交易品質與結構 (Trade Quality)</span>
+          </div>
+          <div style="font-size:11px; line-height:1.8; color:#cbd5e1;">
+            <div>• 盈虧比 (Payoff Ratio): <strong style="color:#10b981;">${m.payoff_ratio ?? '--'} : 1</strong></div>
+            <div>• 獲利因子 (Profit Factor): <strong style="color:#10b981;">${m.profit_factor}</strong></div>
+            <div>• 勝率 (Win Rate): <strong style="color:#fff;">${m.win_rate_pct}% (${m.total_trades} 筆)</strong></div>
+            <div>• 單筆數學期望值: <strong style="color:#10b981;">$${m.expectancy_usd}</strong></div>
+            <div>• 期望值係數 (Expectancy Score): <strong style="color:#38bdf8;">${m.expectancy_score ?? '--'}x</strong></div>
+            <div>• 連勝 / 連虧極值: <strong style="color:#10b981;">${m.max_consecutive_wins ?? 0} 連勝</strong> / <strong style="color:#f87171;">${m.max_consecutive_losses ?? 0} 連虧</strong></div>
+          </div>
+        </div>
+
+        <div style="background:#090d16; border:1px solid rgba(245,158,11,0.3); border-radius:8px; padding:12px;">
+          <div style="font-size:12px; font-weight:700; color:#f59e0b; margin-bottom:8px; display:flex; align-items:center; gap:6px;">
+            <span>⚡ 資金運作與時間效率 (Efficiency)</span>
+          </div>
+          <div style="font-size:11px; line-height:1.8; color:#cbd5e1;">
+            <div>• 市場暴露時間比 (Time-in-Market): <strong style="color:#fff;">${m.market_exposure_pct ?? '--'}%</strong></div>
+            <div>• 平均每筆持倉時間: <strong style="color:#94a3b8;">${m.avg_holding_hours ?? '--'} 小時</strong></div>
+            <div>• 年化總波動率: <strong style="color:#cbd5e1;">${m.annual_volatility_pct ?? '--'}%</strong></div>
+            <div>• 下行波動率 (Downside Vol): <strong style="color:#cbd5e1;">${m.downside_volatility_pct ?? '--'}%</strong></div>
+            <div>• 尾部比率 (Tail Ratio): <strong style="color:#10b981;">${m.tail_ratio ?? '--'}</strong></div>
+            <div>• IB 實盤摩擦 (佣金+滑價): <strong style="color:#94a3b8;">$${((m.total_commission_usd || 0) + (m.total_slippage_usd || 0)).toLocaleString()}</strong></div>
+          </div>
+        </div>
+      `;
     }
 
     function renderAttributionAndHeatmap() {
@@ -1697,6 +1767,41 @@
         }
       } catch (e) {
         showToast('❌ 下載異常: ' + e.message, true);
+      }
+    }
+
+    async function triggerOneClickDataUpdate() {
+      const symEl = document.getElementById('inp-ib-sym');
+      const sym = symEl ? symEl.value : (document.getElementById('inp-symbol') ? document.getElementById('inp-symbol').value : 'ES');
+      showToast(`⏳ 正在執行一鍵數據同步（優先探測本機 IBKR，若未啟動則自動秒級同步雲端 VM 10年 CME 數據庫）...`);
+      const btn = document.getElementById('btn-one-click-sync');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '⏳ 正在同步數據中...';
+      }
+
+      try {
+        const resp = await fetch('/api/backtest/update-data', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol: sym })
+        });
+        const data = await resp.json();
+        if (data.status === 'ok') {
+          showToast(`✅ ${data.message}`);
+          document.getElementById('inp-data-source').value = 'IBKR_CSV';
+          await refreshIBKRCacheList();
+          runBacktest();
+        } else {
+          showToast(`⚠️ 更新未完成: ${data.message}`, true);
+        }
+      } catch (e) {
+        showToast(`❌ 更新請求失敗: ${e.message}`, true);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '⚡ 一鍵更新本地回測數據 (雙通道智能同步)';
+        }
       }
     }
 

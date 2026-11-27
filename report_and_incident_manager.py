@@ -1208,6 +1208,15 @@ class ReportScheduler:
                     try:
                         self.generator.generate_report(target_date=yesterday)
                         self.last_reported_date = today_str
+                        
+                        # 同步觸發 3合1 旗艦策略回報對比日報 (V9.3 vs V9.9 vs V10.0，資金比 1:1:1) 並上傳至 Google Drive
+                        try:
+                            from daily_three_in_one_report_generator import DailyThreeInOneReportGenerator
+                            DailyThreeInOneReportGenerator().run(target_date=yesterday, upload_gdrive=True)
+                            logger.info(f"🚀 [3合1報告生成] 每日 06:00 三合一策略對比報告生成並上傳成功 (結算日: {yesterday})")
+                        except Exception as te:
+                            logger.warning(f"每日 06:00 三合一策略對比報告生成異常: {te}")
+
                         # 記錄稽核事件
                         IncidentManager().record_incident(
                             severity="INFO",

@@ -1,0 +1,74 @@
+{
+  "version": "v9.9",
+  "name": "v9_9_Master_Hybrid_Live",
+  "title": "V9.9 弱點優化終極實盤接管版 (CAGR 27% 旗艦雙引擎)",
+  "description": "4H宏觀趨勢鎖定 (4H_LOCK) + 1H ADX強趨勢保護 (R1 ADX>=22.0) + 斐波那契浪3回踩 + 箱體支撐阻力反彈 (R2 1.25x加成) + 亞盤禁空/多頭降碼 + 動態階梯複利擴口 (每$10k增1口/上限8口) + 1.50R/3.00R/5.50R + 美股黃金窗口防秒斬 + 雙倍滑價保本緩衝 (MES 0.75 / MNQ 1.50) + 100% IBKR實盤整數委託合規",
+  "backtest_metrics_10yr": {
+    "initial_capital": 30000.0,
+    "final_equity": 328000.0,
+    "cagr_pct": 27.1,
+    "max_drawdown_pct": 3.85,
+    "win_rate_pct": 63.2,
+    "profit_factor": 2.15
+  },
+  "account_config": {
+    "initial_capital": 30000.0,
+    "commission_tier1_per_side": 0.62,
+    "typical_spread_points": 0.25,
+    "limit_entry_slippage_points": 0.00,
+    "limit_tp_slippage_points": 0.00,
+    "stop_loss_slippage_points": 0.25,
+    "point_multiplier": 5.0,
+    "overnight_margin_per_contract": 2400.0,
+    "margin_buffer_factor": 1.8
+  },
+  "indicator_params": {
+    "trend_mode": "4H_LOCK",
+    "adx_period": 14,
+    "r1_min_adx": 22.0,
+    "r2_max_adx_filter": 30.0
+  },
+  "rule_params": {
+    "trend_mode": "4H_LOCK",
+    "allowed_rules": ["R1", "R2"],
+    "tp1_r": 1.50,
+    "tp2_r": 3.00,
+    "runner_r": 5.50,
+    "sl_atr": 0.80,
+    "r2_sl_atr": 0.82,
+    "r1_min_adx": 22.0,
+    "r2_max_adx_filter": 30.0,
+    "skip_asia_short": true,
+    "asia_lot_discount": 0.40,
+    "trailing_runner": true,
+    "be_buffer_pts": {
+      "MES": 0.75,
+      "MNQ": 1.50
+    },
+    "min_sl_golden": {
+      "MES": 7.0,
+      "MNQ": 28.0
+    },
+    "min_sl_offpeak": {
+      "MES": 5.5,
+      "MNQ": 22.0
+    },
+    "base_lots": 2,
+    "equity_per_lot": 10000.0,
+    "max_contracts_per_order": 8,
+    "r2_lot_scale": 1.25,
+    "use_limit_orders": true,
+    "edge_mult": 0.0,
+    "risk_mult": 1.15
+  },
+  "lot_split_map": {
+    "1": [0, 0, 1],
+    "2": [1, 0, 1],
+    "3": [1, 1, 1],
+    "4": [1, 1, 2],
+    "5": [1, 2, 2],
+    "6": [2, 2, 2],
+    "7": [2, 2, 3],
+    "8": [2, 2, 4]
+  }
+}

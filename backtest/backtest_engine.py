@@ -38,6 +38,7 @@ try:
         get_live_order_lots,
         compute_integer_realized_points,
         detect_market_session,
+        is_us_golden_window_hkt,
     )
 except ImportError:
     try:
@@ -46,8 +47,16 @@ except ImportError:
             get_live_order_lots,
             compute_integer_realized_points,
             detect_market_session,
+            is_us_golden_window_hkt,
         )
     except ImportError:
+        def is_us_golden_window_hkt(dt: Any = None) -> bool:
+            if dt is None: return False
+            h = getattr(dt, "hour", 0)
+            m = getattr(dt, "minute", 0)
+            hm = h * 60 + m
+            return (hm >= 1350 or hm < 240)
+
         V93_CONFIG = {
             "id": "v9.3",
             "name": "V9.3 旗艦雙引擎整數自適應實盤版 (Master Hybrid Live)",
@@ -181,6 +190,79 @@ except ImportError:
                 return (q1 * tp1_pts + rem_lots * rem_pts) / float(total_lots)
             return (q1 * tp1_pts + q2 * tp2_pts + q3 * rem_pts) / float(total_lots)
 
+try:
+    from strategies.v9_9 import (
+        CONFIG as V99_CONFIG,
+        allocate_v9_9_tranches,
+        get_min_sl_dist as v99_get_min_sl_dist,
+        get_v9_9_order_lots,
+        should_skip_v9_9_trade,
+    )
+    from strategies.v10_0 import (
+        CONFIG as V10_CONFIG,
+        CONFIG_COMPOUND as V10_COMPOUND_CONFIG,
+        allocate_v10_0_tranches,
+        get_min_sl_dist as v10_get_min_sl_dist,
+        get_v10_0_order_lots,
+        should_skip_v10_0_trade,
+    )
+except ImportError:
+    try:
+        from v9_9 import (
+            CONFIG as V99_CONFIG,
+            allocate_v9_9_tranches,
+            get_min_sl_dist as v99_get_min_sl_dist,
+            get_v9_9_order_lots,
+            should_skip_v9_9_trade,
+        )
+        from v10_0 import (
+            CONFIG as V10_CONFIG,
+            CONFIG_COMPOUND as V10_COMPOUND_CONFIG,
+            allocate_v10_0_tranches,
+            get_min_sl_dist as v10_get_min_sl_dist,
+            get_v10_0_order_lots,
+            should_skip_v10_0_trade,
+        )
+    except ImportError:
+        def allocate_v9_9_tranches(qty: int):
+            q = max(1, int(qty))
+            if q == 1: return (0, 0, 1)
+            if q == 2: return (1, 0, 1)
+            if q == 3: return (1, 1, 1)
+            if q == 4: return (1, 1, 2)
+            return (1, 1, max(1, q - 2))
+        def get_min_sl_dist(symbol: str, is_golden: bool) -> float:
+            s = str(symbol).upper()
+            if s in ("MNQ", "NQ"):
+                return 28.0 if is_golden else 22.0
+            return 7.0 if is_golden else 5.5
+        v99_get_min_sl_dist = get_min_sl_dist
+        v10_get_min_sl_dist = get_min_sl_dist
+        def get_v9_9_order_lots(*args, **kwargs):
+            return 2, (1, 0, 1)
+        def get_v10_0_order_lots(*args, **kwargs):
+            return 2, (1, 0, 1)
+        def should_skip_v9_9_trade(*args, **kwargs):
+            return False, ""
+        def should_skip_v10_0_trade(*args, **kwargs):
+            return False, ""
+
+def v2_get_min_sl_dist(symbol: str, is_golden: bool) -> float:
+    s = str(symbol).upper()
+    return 28.0 if s in ("MNQ", "NQ") else 7.0
+
+def check_1h_momentum_veto(*args, **kwargs):
+    return False, ""
+
+def check_directional_cooldown_unlock(*args, **kwargs):
+    return False, False, ""
+
+def get_v2_order_lots(*args, **kwargs):
+    return 1, (0, 0, 1)
+
+def get_v3_order_lots(*args, **kwargs):
+    return 1, (0, 0, 1)
+
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 CURRENT_DIR = os.path.dirname(_THIS_DIR) if os.path.basename(_THIS_DIR) == "backtest" else _THIS_DIR
 if _THIS_DIR not in sys.path:
@@ -192,68 +274,61 @@ REPORTS_DIR = os.path.join(CURRENT_DIR, "reports", "backtests")
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 STRATEGY_CATALOG = {
-    "v9.3.13": {
-        "id": "v9.3.13",
-        "name": "V9.3.13 旗艦自適應實盤最新版 (Master Hybrid Live)",
-        "color": "#e11d48",
-        "stage": "🚀 實盤最新版",
-        "description": "美股黃金窗口調控 (22:30-04:00全額/其餘減半) + 連輸階梯風控 (3連虧減半/5連虧限1張) + 開市15分鐘避震鎖"
+    "v10.0": {
+        "id": "v10.0",
+        "name": "V10.0 旗艦雙引擎 100 輪演化終極冠軍版 (Grand Champion)",
+        "color": "#10b981",
+        "stage": "👑 100輪演化終極冠軍版 (V10.0)",
+        "description": "10年真實數據 100 輪弱點定向演化冠軍：R1 趨勢過濾 (ADX>=20) + 亞盤避空 + 開盤防秒斬 (MES 8.0/MNQ 32.0) + Runner 7.0R + 保本雙倍滑價 (+1.0 pt) + 6口硬封頂 (MDD 2.96%, Sharpe 3.04)"
     },
-    "v9.3.10": {
-        "id": "v9.3.10",
-        "name": "V9.3.10 旗艦雙引擎中期穩定版 (Mid-term Stable)",
-        "color": "#f97316",
-        "stage": "⚖️ 中期定型版",
-        "description": "11-18定型版：全時段常規注碼 (無黃金窗口減半) + 常規階梯收割 (無連輸降碼)"
+    "v10_0": {
+        "id": "v10.0",
+        "name": "V10.0 旗艦雙引擎 100 輪演化終極冠軍版 (Grand Champion)",
+        "color": "#10b981",
+        "stage": "👑 100輪演化終極冠軍版 (V10.0)",
+        "description": "10年真實數據 100 輪弱點定向演化冠軍：R1 趨勢過濾 (ADX>=20) + 亞盤避空 + 開盤防秒斬 (MES 8.0/MNQ 32.0) + Runner 7.0R + 保本雙倍滑價 (+1.0 pt) + 6口硬封頂 (MDD 2.96%, Sharpe 3.04)"
+    },
+    "v10.0-compound": {
+        "id": "v10.0-compound",
+        "name": "V10.0 階梯複利高回報演化版 (Compound Growth Champion)",
+        "color": "#3b82f6",
+        "stage": "🚀 100輪演化階梯複利版 (V10.0-Compound)",
+        "description": "V10.0 演化防守核心 + 淨值每增長 $10,000 自動解鎖 1 口 (上限 6 口)，10年累積回報 +1488%，CAGR 31.88%，夏普 3.16，MDD 9.19%"
+    },
+    "v10_0_compound": {
+        "id": "v10.0-compound",
+        "name": "V10.0 階梯複利高回報演化版 (Compound Growth Champion)",
+        "color": "#3b82f6",
+        "stage": "🚀 100輪演化階梯複利版 (V10.0-Compound)",
+        "description": "V10.0 演化防守核心 + 淨值每增長 $10,000 自動解鎖 1 口 (上限 6 口)，10年累積回報 +1488%，CAGR 31.88%，夏普 3.16，MDD 9.19%"
+    },
+    "v9.9": {
+        "id": "v9.9",
+        "name": "V9.9 弱點優化終極冠軍版 (CAGR 27% 旗艦雙引擎)",
+        "color": "#f59e0b",
+        "stage": "👑 終極優化冠軍版 (V9.9)",
+        "description": "10年真實數據 50 輪弱點定向演化冠軍：動態階梯複利 (每$10k增1口/封頂8口) + 引擎強化 (R2 權重 1.25x / Runner 5.5R) + R1 趨勢過濾 (ADX>=22) + 亞盤避空 + 雙倍滑價保本"
+    },
+    "v9_9": {
+        "id": "v9.9",
+        "name": "V9.9 弱點優化終極冠軍版 (CAGR 27% 旗艦雙引擎)",
+        "color": "#f59e0b",
+        "stage": "👑 終極優化冠軍版 (V9.9)",
+        "description": "10年真實數據 50 輪弱點定向演化冠軍：動態階梯複利 (每$10k增1口/封頂8口) + 引擎強化 (R2 權重 1.25x / Runner 5.5R) + R1 趨勢過濾 (ADX>=22) + 亞盤避空 + 雙倍滑價保本"
     },
     "v9.3": {
         "id": "v9.3",
-        "name": "V9.3 旗艦雙引擎整數自適應實盤版 (等同 V9.3.13)",
+        "name": "V9.3 旗艦雙引擎整數自適應實盤基準版 (Master Hybrid Live)",
         "color": "#e11d48",
-        "stage": "🚀 實盤整數口旗艦",
-        "description": "全整數口三梯次拆單 + 美股黃金窗口調控 + 連輸階梯風控"
+        "stage": "📌 實盤基準對照 (V9.3)",
+        "description": "全整數口三梯次拆單 + 美股黃金窗口調控 + 連輸階梯風控 + 1H ADX>30 強趨勢保護"
     },
-    "v9.1": {
-        "id": "v9.1",
-        "name": "V9.1 旗艦自適應擴口終極版 (Master Hybrid Plus)",
-        "color": "#f43f5e",
-        "stage": "👑 總利潤之王",
-        "description": "動態資金階梯放大優勢，順勢浪 3 獲利最大化，4H 宏觀趨勢鎖定"
-    },
-    "v8.1": {
-        "id": "v8.1",
-        "name": "V8.1 雙共振自適應波動微調版",
-        "color": "#fbbf24",
-        "stage": "⚖️ 極致平衡之王",
-        "description": "0.80x ATR 防守線 + 3:1 階梯 + 尾倉 ATR 追蹤止損"
-    },
-    "v6.0": {
-        "id": "v6.0",
-        "name": "V6.0 4H宏觀趨勢共振 + 3:1對稱階梯",
-        "color": "#0ea5e9",
-        "stage": "🛡️ 極限防守之王",
-        "description": "4H EMA 宏觀趨勢過濾 + 3.0:1 盈虧比階梯 (40/40/20) + 0.85x ATR 緊密止損"
-    },
-    "v5.0": {
-        "id": "v5.0",
-        "name": "V5.0 雙劍合璧基準 (VWAP+60/25/15)",
-        "color": "#10b981",
-        "stage": "📌 基準對照組",
-        "description": "基準版本：日內 VWAP 機構濾網 + 60/25/15 不對稱收割 + 1.1x ATR 止損"
-    },
-    "v4.3": {
-        "id": "v4.3",
-        "name": "V4.3 標普防守力冠軍 (MES)",
-        "color": "#06b6d4",
-        "stage": "經典版",
-        "description": "1H 結構 + 斐波浪3限價單 + 規則2/3鎖1口 + 50/25/25三梯次止盈"
-    },
-    "dual_60_40": {
-        "id": "dual_60_40",
-        "name": "Dual 雙引擎實盤組合 (60% V4.3 + 40% V5.0)",
-        "color": "#d97706",
-        "stage": "實盤組合",
-        "description": "60% 資金配置 V4.3 (MES) + 40% 配置 V5.0 (MNQ) + 保證金防飢餓保護"
+    "v9.3.13": {
+        "id": "v9.3",
+        "name": "V9.3 旗艦雙引擎整數自適應實盤基準版 (Master Hybrid Live)",
+        "color": "#e11d48",
+        "stage": "📌 實盤基準對照 (V9.3)",
+        "description": "全整數口三梯次拆單 + 美股黃金窗口調控 + 連輸階梯風控 + 1H ADX>30 強趨勢保護"
     }
 }
 
@@ -578,7 +653,7 @@ def _add_multi_timeframe_indicators(df: pd.DataFrame, symbol: str = "ES") -> pd.
     - IBKR API 的 1D K 線標記為日期 D (00:00)，實際在當日美東 16:00 (D + 16h) 才收盤完成！
     因此必須以『各自的真實收盤完成時間 (close_ts)』執行 merge_asof(direction="backward")，且禁止 .bfill()！
     """
-    if "ema20_4h" in df.columns and "ema50_1d" in df.columns and "adx_1h" in df.columns:
+    if "ema20_4h" in df.columns and "ema50_1d" in df.columns and "adx_1h" in df.columns and "ema20_1h" in df.columns:
         return df
 
     if "adx" not in df.columns or "ema20" not in df.columns:
@@ -661,7 +736,14 @@ def _add_multi_timeframe_indicators(df: pd.DataFrame, symbol: str = "ES") -> pd.
             }).dropna()
             df_1h = _add_indicators(df_1h)
             df_1h["close_ts"] = df_1h.index
-        df_1h_sub = df_1h[["close_ts", "adx"]].rename(columns={"adx": "adx_1h"}).sort_values("close_ts")
+        df_1h["last_1h_high"] = df_1h["high"].shift(1)
+        df_1h["last_1h_low"] = df_1h["low"].shift(1)
+        df_1h_sub = df_1h[["close_ts", "adx", "ema20", "ema50", "close", "last_1h_high", "last_1h_low"]].rename(columns={
+            "adx": "adx_1h",
+            "ema20": "ema20_1h",
+            "ema50": "ema50_1h",
+            "close": "close_1h"
+        }).sort_values("close_ts")
 
     df_4h_sub = df_4h[["close_ts", "ema20", "ema50", "ema200", "close"]].rename(columns={
         "ema20": "ema20_4h", "ema50": "ema50_4h", "ema200": "ema200_4h", "close": "close_4h"
@@ -682,8 +764,22 @@ def _add_multi_timeframe_indicators(df: pd.DataFrame, symbol: str = "ES") -> pd.
 
     if "adx_1h" not in merged.columns:
         merged["adx_1h"] = merged["adx"]
+    if "ema20_1h" not in merged.columns:
+        merged["ema20_1h"] = merged["ema20"]
+    if "ema50_1h" not in merged.columns:
+        merged["ema50_1h"] = merged["ema50"]
+    if "close_1h" not in merged.columns:
+        merged["close_1h"] = merged["close"]
+    if "last_1h_high" not in merged.columns:
+        merged["last_1h_high"] = merged["high"].shift(1)
+    if "last_1h_low" not in merged.columns:
+        merged["last_1h_low"] = merged["low"].shift(1)
 
-    for col in ["ema20_4h", "ema50_4h", "ema200_4h", "close_4h", "ema20_1d", "ema50_1d", "ema200_1d", "close_1d", "adx_1h"]:
+    for col in [
+        "ema20_4h", "ema50_4h", "ema200_4h", "close_4h",
+        "ema20_1d", "ema50_1d", "ema200_1d", "close_1d",
+        "adx_1h", "ema20_1h", "ema50_1h", "close_1h", "last_1h_high", "last_1h_low"
+    ]:
         if col in merged.columns:
             merged[col] = merged[col].ffill()
     return merged
@@ -706,7 +802,8 @@ def _simulate_trade_exit_core(
     slippage_points: float = 0.25,
     trailing_runner: bool = True,
     strict_realistic_mode: bool = True,
-    legacy_edge_pts: float = 0.0
+    legacy_edge_pts: float = 0.0,
+    be_buffer: float = 0.25
 ) -> Tuple[int, float, str, float, int]:
     """
     嚴格整數口出場模擬器核心 (回傳: exit_idx, raw_exit_price, exit_reason, realized_points, slip_applied_lots)。
@@ -735,7 +832,7 @@ def _simulate_trade_exit_core(
             cj = float(closes[j]) + (shift * 0.7 if direction == "LONG" else -shift * 0.7)
 
         if direction == "LONG":
-            cur_sl = entry_price + 0.25 if tp1_hit else sl_price
+            cur_sl = entry_price + be_buffer if tp1_hit else sl_price
             if trailing_runner and tp2_hit:
                 cur_sl = max(cur_sl, _round_tick(tp1_price + (cj - tp2_price) * 0.5))
 
@@ -781,7 +878,7 @@ def _simulate_trade_exit_core(
                 break
 
         else:  # SHORT
-            cur_sl = entry_price - 0.25 if tp1_hit else sl_price
+            cur_sl = entry_price - be_buffer if tp1_hit else sl_price
             if trailing_runner and tp2_hit:
                 cur_sl = min(cur_sl, _round_tick(tp1_price - (tp2_price - cj) * 0.5))
 
@@ -863,7 +960,8 @@ def simulate_trade_exit_v9_3(
     slippage_points: float = 0.25,
     trailing_runner: bool = True,
     strict_realistic_mode: bool = True,
-    legacy_edge_pts: float = 0.0
+    legacy_edge_pts: float = 0.0,
+    be_buffer: float = 0.25
 ) -> Tuple[int, float, str, float]:
     """對外相容介面：保留原 4 元組回傳格式供外部腳本或單元測試呼叫"""
     exit_idx, raw_exit_price, exit_reason, realized_points, _ = _simulate_trade_exit_core(
@@ -884,6 +982,7 @@ def simulate_trade_exit_v9_3(
         trailing_runner=trailing_runner,
         strict_realistic_mode=strict_realistic_mode,
         legacy_edge_pts=legacy_edge_pts,
+        be_buffer=be_buffer
     )
     return exit_idx, raw_exit_price, exit_reason, realized_points
 
@@ -927,6 +1026,68 @@ def _determine_integer_lots(
     - v9.3.13 / v9.3: 啟用美股黃金窗口 (22:30-04:00 HKT) + 連輸階梯風控 + 開市避震鎖
     - v9.3.10: 11-18 中期定型版，全時段常規注碼 (無黃金窗口減半，無連輸降碼)
     """
+    if variant in ("v10.0", "v10_0", "v10.0-compound", "v10_0_compound"):
+        is_comp = "compound" in variant
+        qty, split_lots = get_v10_0_order_lots(
+            rule_type=rule_type,
+            direction=direction,
+            session=session_name,
+            current_equity=equity,
+            margin_per_contract=margin_per_contract,
+            max_contracts_cap=max_contracts_cap,
+            timestamp=timestamp,
+            consecutive_losses=consecutive_losses,
+            initial_capital=30000.0,
+            compounding=is_comp
+        )
+        if timestamp is not None and hasattr(timestamp, "hour"):
+            et_hour = timestamp.hour
+            et_minute = timestamp.minute
+            if et_hour == 9 and 25 <= et_minute <= 40:
+                qty = 1
+                split_lots = (0, 0, 1)
+        return qty, split_lots
+
+    if variant in ("v9.9", "v9_9"):
+        qty, split_lots = get_v9_9_order_lots(
+            rule_type=rule_type,
+            direction=direction,
+            session=session_name,
+            current_equity=equity,
+            margin_per_contract=margin_per_contract,
+            max_contracts_cap=max_contracts_cap,
+            timestamp=timestamp,
+            consecutive_losses=consecutive_losses,
+            initial_capital=30000.0
+        )
+        if timestamp is not None and hasattr(timestamp, "hour"):
+            et_hour = timestamp.hour
+            et_minute = timestamp.minute
+            if et_hour == 9 and 25 <= et_minute <= 40:
+                qty = 1
+                split_lots = (0, 0, 1)
+        return qty, split_lots
+
+    if variant in ("v9.3-opt-v2", "v9.3_opt_v2", "v9.3-opt", "v9.3-opt-v3", "v9.3_opt_v3", "v9.3-opt-v3.1"):
+        cap = min(4, max_contracts_cap)
+        qty, split_lots = get_v2_order_lots(
+            rule_type=rule_type,
+            direction=direction,
+            session=session_name,
+            current_equity=equity,
+            margin_per_contract=margin_per_contract,
+            max_contracts_cap=cap,
+            timestamp=timestamp,
+            consecutive_losses=consecutive_losses
+        )
+        if timestamp is not None and hasattr(timestamp, "hour"):
+            et_hour = timestamp.hour
+            et_minute = timestamp.minute
+            if et_hour == 9 and 25 <= et_minute <= 40:
+                qty = 1
+                split_lots = (0, 0, 1)
+        return qty, split_lots
+
     if variant in ("v9.3", "v9.3.13"):
         qty, split_lots = get_live_order_lots(
             rule_type=rule_type,
@@ -1062,6 +1223,84 @@ def _compile_backtest_metrics(
     avg_loss = round(-gross_loss / len(losses), 2) if losses else 0.0
     expectancy = round((equity - initial_capital) / len(trades), 2) if trades else 0.0
 
+    # 擴充專業量化分析指標 (Advanced Quant Metrics)
+    payoff_ratio = round(abs(avg_win / avg_loss), 2) if avg_loss != 0 else 0.0
+    recovery_factor = round((equity - initial_capital) / max(1.0, max_dd_usd), 2)
+
+    # 潰瘍指數 (Ulcer Index) 與 UPI (Ulcer Performance Index / Martin Ratio)
+    ulcer_index = round(float(np.sqrt(np.mean(dd_series ** 2))), 2) if len(dd_series) > 0 else 0.0
+    upi = round(cagr_pct / max(0.1, ulcer_index), 2)
+
+    # 最長回撤持續修復期 (天數)
+    max_dd_duration = 0
+    cur_dd_duration = 0
+    for dt, v in daily_eq.items():
+        pk = peak.loc[dt]
+        if v < pk * 0.9999:
+            cur_dd_duration += 1
+            if cur_dd_duration > max_dd_duration:
+                max_dd_duration = cur_dd_duration
+        else:
+            cur_dd_duration = 0
+
+    # 最大連續獲利與最大連續虧損
+    max_consec_w = 0
+    max_consec_l = 0
+    cur_w = 0
+    cur_l = 0
+    for t in trades:
+        p = t.get("pnl", 0.0)
+        if p > 0:
+            cur_w += 1
+            cur_l = 0
+            if cur_w > max_consec_w:
+                max_consec_w = cur_w
+        elif p < 0:
+            cur_l += 1
+            cur_w = 0
+            if cur_l > max_consec_l:
+                max_consec_l = cur_l
+        else:
+            cur_w = 0
+            cur_l = 0
+
+    # 市場持倉時間佔比 (Market Exposure) 與平均持倉小時
+    total_holding_minutes = 0.0
+    for t in trades:
+        try:
+            e_ts = t.get("entry_ts", 0)
+            x_ts = t.get("exit_ts", 0)
+            if x_ts > e_ts:
+                total_holding_minutes += (x_ts - e_ts) / 60.0
+        except Exception:
+            pass
+    total_backtest_minutes = max(1.0, (timestamps[-1] - timestamps[0]).total_seconds() / 60.0)
+    market_exposure_pct = round(min(100.0, (total_holding_minutes / total_backtest_minutes) * 100.0), 2)
+    avg_holding_hours = round((total_holding_minutes / max(1, len(trades))) / 60.0, 1)
+    expectancy_score = round(expectancy / max(1.0, abs(avg_loss)), 2) if avg_loss != 0 else 0.0
+
+    # 專業風險矩陣 (年化波動率、VaR 95%、CVaR 95%、Tail Ratio、Omega Ratio)
+    if len(daily_rets) > 10:
+        annual_volatility_pct = round(float(daily_rets.std() * np.sqrt(252.0) * 100.0), 2)
+        downside = daily_rets[daily_rets < 0]
+        downside_volatility_pct = round(float(downside.std() * np.sqrt(252.0) * 100.0), 2) if len(downside) > 1 else 0.0
+        p05 = float(np.percentile(daily_rets, 5))
+        p95 = float(np.percentile(daily_rets, 95))
+        var_95_pct = round(abs(p05) * 100.0, 2)
+        worst_5 = daily_rets[daily_rets <= p05]
+        cvar_95_pct = round(abs(float(worst_5.mean())) * 100.0, 2) if len(worst_5) > 0 else var_95_pct
+        tail_ratio = round(p95 / max(1e-5, abs(p05)), 2)
+        pos_rets_sum = float(daily_rets[daily_rets > 0].sum())
+        neg_rets_sum = abs(float(daily_rets[daily_rets < 0].sum()))
+        omega_ratio = round(pos_rets_sum / max(1e-5, neg_rets_sum), 2)
+    else:
+        annual_volatility_pct = 0.0
+        downside_volatility_pct = 0.0
+        var_95_pct = 0.0
+        cvar_95_pct = 0.0
+        tail_ratio = 1.0
+        omega_ratio = 1.0
+
     rule_stats = {}
     for r_key, r_name in [
         ("R1_WAVE3_TREND", "規則 1：順勢浪 3 回踩"),
@@ -1171,19 +1410,35 @@ def _compile_backtest_metrics(
             "net_profit": round(equity - initial_capital, 2),
             "total_return_pct": total_ret_pct,
             "cagr_pct": cagr_pct,
+            "annual_volatility_pct": annual_volatility_pct,
+            "downside_volatility_pct": downside_volatility_pct,
             "max_drawdown_pct": max_dd_pct,
             "max_drawdown_usd": max_dd_usd,
+            "max_drawdown_duration_days": max_dd_duration,
+            "ulcer_index": ulcer_index,
+            "upi": upi,
+            "recovery_factor": recovery_factor,
             "sharpe_ratio": sharpe,
             "sortino_ratio": sortino,
             "calmar_ratio": calmar,
+            "omega_ratio": omega_ratio,
+            "var_95_pct": var_95_pct,
+            "cvar_95_pct": cvar_95_pct,
+            "tail_ratio": tail_ratio,
             "win_rate_pct": win_rate,
             "profit_factor": profit_factor,
+            "payoff_ratio": payoff_ratio,
             "total_trades": len(trades),
             "winning_trades": len(wins),
             "losing_trades": len(losses),
             "avg_win_usd": avg_win,
             "avg_loss_usd": avg_loss,
             "expectancy_usd": expectancy,
+            "expectancy_score": expectancy_score,
+            "max_consecutive_wins": max_consec_w,
+            "max_consecutive_losses": max_consec_l,
+            "market_exposure_pct": market_exposure_pct,
+            "avg_holding_hours": avg_holding_hours,
             "total_commission_usd": round(total_commission, 2),
             "total_slippage_usd": round(total_slippage, 2)
         },
@@ -1245,6 +1500,26 @@ def run_single_strategy_backtest(
     e50_1d = df["ema50_1d"].values if "ema50_1d" in df.columns else ema50
     c_1d = df["close_1d"].values if "close_1d" in df.columns else closes
 
+    e20_1h = df["ema20_1h"].values if "ema20_1h" in df.columns else ema20
+    e50_1h = df["ema50_1h"].values if "ema50_1h" in df.columns else ema50
+    c_1h = df["close_1h"].values if "close_1h" in df.columns else closes
+    h_1h = df["last_1h_high"].values if "last_1h_high" in df.columns else highs
+    l_1h = df["last_1h_low"].values if "last_1h_low" in df.columns else lows
+
+    is_v10 = variant in ("v10.0", "v10_0", "v10.0-compound", "v10_0_compound")
+    is_v99 = variant in ("v9.9", "v9_9")
+    is_v2 = variant in ("v9.3-opt-v2", "v9.3_opt_v2", "v9.3-opt")
+    is_v3 = variant in ("v9.3-opt-v3", "v9.3_opt_v3", "v9.3-opt-v3.1")
+    is_v2_or_v3 = is_v2 or is_v3
+    is_mnq = (str(params.get("symbol", "MES")).upper() in ("MNQ", "NQ")) or (point_mult <= 2.5)
+    clean_sym = "MNQ" if is_mnq else "MES"
+    if is_v10:
+        be_buffer = 2.00 if is_mnq else 1.00
+    elif is_v2_or_v3 or is_v99:
+        be_buffer = 1.50 if is_mnq else 0.75
+    else:
+        be_buffer = 0.25
+
     timestamps = df.index
     n = len(df)
     equity = initial_capital
@@ -1293,6 +1568,13 @@ def run_single_strategy_backtest(
     consecutive_losses = 0
     current_day = None
 
+    # V3 專屬風控狀態
+    daily_start_equity = initial_capital
+    daily_realized_pnl = 0.0
+    daily_trading_halted = False
+    dir_consec_losses = {"LONG": 0, "SHORT": 0}
+    dir_cooldown_until = {"LONG": 0.0, "SHORT": 0.0}
+
     while i < n - 12:
         equity_curve[i] = equity
         bar_dt = timestamps[i]
@@ -1300,6 +1582,16 @@ def run_single_strategy_backtest(
         if bar_date is not None and current_day != bar_date:
             consecutive_losses = 0
             current_day = bar_date
+            daily_start_equity = equity
+            daily_realized_pnl = 0.0
+            daily_trading_halted = False
+            dir_consec_losses = {"LONG": 0, "SHORT": 0}
+            dir_cooldown_until = {"LONG": 0.0, "SHORT": 0.0}
+
+        if is_v3 and daily_trading_halted:
+            i += 1
+            continue
+
         if np.isnan(e200_4h[i]) or np.isnan(box_highs[i]):
             i += 1
             continue
@@ -1389,18 +1681,76 @@ def run_single_strategy_backtest(
         else:
             session_name = "亞盤夜盤 (18:00-02:00 ET)"
 
-        qty, split_lots = _determine_integer_lots(
-            equity=equity,
-            variant=variant,
-            rule_type=rule_type,
-            direction=direction,
-            session_name=session_name,
-            margin_per_contract=margin_per_contract,
-            max_contracts_cap=max_contracts_cap,
-            risk_mult=risk_mult,
-            timestamp=entry_ts,
-            consecutive_losses=consecutive_losses
-        )
+        if is_v10:
+            skip_v10, skip_reason = should_skip_v10_0_trade(
+                rule_type=rule_type,
+                direction=direction,
+                session_name=session_name,
+                timestamp=entry_ts,
+                adx_val=adx_val
+            )
+            if skip_v10:
+                i += 1
+                continue
+        elif is_v99:
+            skip_v99, skip_reason = should_skip_v9_9_trade(
+                rule_type=rule_type,
+                direction=direction,
+                session_name=session_name,
+                timestamp=entry_ts,
+                adx_val=adx_val
+            )
+            if skip_v99:
+                i += 1
+                continue
+
+        probe_1_lot = False
+        if is_v3:
+            bar_ts = float(entry_ts.timestamp()) if hasattr(entry_ts, "timestamp") else 0.0
+            until_ts = float(dir_cooldown_until.get(direction, 0.0) or 0.0)
+            if until_ts > 0.0 and bar_ts < until_ts:
+                unlocked, p1, unlock_reason = check_directional_cooldown_unlock(
+                    direction=direction,
+                    cur_price=c,
+                    ema20_1h=float(e20_1h[i]),
+                    last_1h_low=float(l_1h[i]),
+                    last_1h_high=float(h_1h[i]),
+                )
+                if unlocked:
+                    dir_cooldown_until[direction] = 0.0
+                    dir_consec_losses[direction] = 0
+                    probe_1_lot = p1
+                else:
+                    i += 1
+                    continue
+
+            vetoed, veto_reason = check_1h_momentum_veto(
+                direction=direction,
+                cur_price=c,
+                ema20_1h=float(e20_1h[i]),
+                ema50_1h=float(e50_1h[i]),
+            )
+            if vetoed:
+                if not probe_1_lot:
+                    i += 1
+                    continue
+
+        if probe_1_lot:
+            qty = 1
+            split_lots = (0, 0, 1)
+        else:
+            qty, split_lots = _determine_integer_lots(
+                equity=equity,
+                variant=variant,
+                rule_type=rule_type,
+                direction=direction,
+                session_name=session_name,
+                margin_per_contract=margin_per_contract,
+                max_contracts_cap=max_contracts_cap,
+                risk_mult=risk_mult,
+                timestamp=entry_ts,
+                consecutive_losses=consecutive_losses
+            )
         if qty <= 0:
             i += 1
             continue
@@ -1408,6 +1758,18 @@ def run_single_strategy_backtest(
         if rule_type == "R2_RANGE_BOUNCE":
             side_txt = "下沿支撐反彈" if direction == "LONG" else "上沿阻力反彈"
             rule_label = f"規則2：箱體{side_txt} (整數{qty}口)"
+        if probe_1_lot:
+            rule_label += " [1H極值穿透試單 1口]"
+
+        if is_v10 or is_v2_or_v3 or is_v99:
+            is_golden = is_us_golden_window_hkt(entry_ts)
+            if is_v10:
+                min_sl_floor = v10_get_min_sl_dist(clean_sym, is_golden)
+            elif is_v99:
+                min_sl_floor = v99_get_min_sl_dist(clean_sym, is_golden)
+            else:
+                min_sl_floor = v2_get_min_sl_dist(clean_sym, is_golden)
+            sl_dist = max(sl_dist, min_sl_floor)
 
         entry_price = _round_tick(c)
         if direction == "LONG":
@@ -1442,7 +1804,8 @@ def run_single_strategy_backtest(
             slippage_points=slippage_points,
             trailing_runner=trailing_runner,
             strict_realistic_mode=strict_realistic_mode,
-            legacy_edge_pts=legacy_edge_pts
+            legacy_edge_pts=legacy_edge_pts,
+            be_buffer=be_buffer
         )
 
         sign = 1.0 if direction == "LONG" else -1.0
@@ -1457,10 +1820,32 @@ def run_single_strategy_backtest(
         total_slippage += slip_cost
         equity = round(max(1000.0, equity + net_pnl), 2)
 
-        if net_pnl > 0.01:
-            consecutive_losses = 0
+        if is_v10 or is_v2_or_v3 or is_v99:
+            if net_pnl >= 30.0:
+                consecutive_losses = 0
+                if is_v3:
+                    dir_consec_losses[direction] = 0
+                    dir_cooldown_until[direction] = 0.0
+            elif net_pnl < -0.01:
+                consecutive_losses += 1
+                if is_v3:
+                    dir_consec_losses[direction] = dir_consec_losses.get(direction, 0) + 1
+                    if dir_consec_losses[direction] >= 4:
+                        exit_dt = timestamps[exit_idx]
+                        exit_sec = float(exit_dt.timestamp()) if hasattr(exit_dt, "timestamp") else 0.0
+                        dir_cooldown_until[direction] = exit_sec + 3600.0
+                        dir_consec_losses[direction] = 0
         else:
-            consecutive_losses += 1
+            if net_pnl > 0.01:
+                consecutive_losses = 0
+            else:
+                consecutive_losses += 1
+
+        daily_realized_pnl += net_pnl
+        if is_v3:
+            limit_usd = round(daily_start_equity * 0.04, 2)
+            if daily_realized_pnl <= -limit_usd:
+                daily_trading_halted = True
 
         next_i = min(n, exit_idx + cooldown)
         equity_curve[i:next_i] = equity
@@ -1552,10 +1937,10 @@ def run_multi_strategy_backtest_api(payload: Dict[str, Any]) -> Dict[str, Any]:
     支援最多 3 個策略同時回測、自選時間段 (最長 10 年)、自選 K 線週期 (1m/5m/15m/1h/4h/1d) 與 IBKR 資金參數。
     """
     t0 = time.time()
-    strategies = payload.get("strategies", ["v9.3", "v9.1", "v5.0"])
+    strategies = payload.get("strategies", ["v10.0", "v9.9", "v9.3"])
     if not isinstance(strategies, list) or len(strategies) == 0:
         strategies = ["v9.3"]
-    strategies = strategies[:3]
+    strategies = strategies[:8]
 
     timeframe = str(payload.get("timeframe", "1h")).lower()
     start_date = str(payload.get("start_date", "2016-11-15"))

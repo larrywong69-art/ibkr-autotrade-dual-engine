@@ -63,7 +63,7 @@ def _parse_semver(ver_str: str):
 def get_version_info(base_dir=CURRENT_DIR, check_remote: bool = False, remote_fetcher=None):
     """回傳目前本機版本、Git 提交與可選的遠端最新版本檢查結果。"""
     version_file = os.path.join(base_dir, "VERSION")
-    current_version = "9.3.3"
+    current_version = "9.9.0"
     if os.path.exists(version_file):
         try:
             with open(version_file, "r", encoding="utf-8") as vf:
@@ -286,9 +286,9 @@ def build_daily_pnl_calendar(month_str: str = None, base_dir: str = CURRENT_DIR)
     all_trades, status_snapshot = _load_deduped_executions(base_dir=base_dir)
     fx_rate = float(status_snapshot.get("fx_rate_usd_hkd") or 7.78)
     cur_pos = {}
-    v93 = status_snapshot.get("v93") or {}
-    mes_pos = v93.get("mes") or (status_snapshot.get("v43") or {}).get("active_position")
-    mnq_pos = v93.get("mnq") or (status_snapshot.get("v50") or {}).get("active_position")
+    v99 = status_snapshot.get("v99") or status_snapshot.get("v93") or {}
+    mes_pos = v99.get("mes") or (status_snapshot.get("v43") or {}).get("active_position")
+    mnq_pos = v99.get("mnq") or (status_snapshot.get("v50") or {}).get("active_position")
     cur_pos["MES"] = int(mes_pos.get("contracts", 0)) if isinstance(mes_pos, dict) else 0
     cur_pos["MNQ"] = int(mnq_pos.get("contracts", 0)) if isinstance(mnq_pos, dict) else 0
     paired_groups = pair_executions_fifo(all_trades, fx_rate=fx_rate, current_positions=cur_pos)
@@ -671,6 +671,25 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": "尚未有可用的結算報告"}, ensure_ascii=False).encode("utf-8"))
             return
 
+        if parsed.path == "/api/three_in_one/status":
+            status_path = os.path.join(CURRENT_DIR, "data", "three_in_one_status.json")
+            if os.path.exists(status_path):
+                try:
+                    with open(status_path, "r", encoding="utf-8") as f:
+                        st_data = json.load(f)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(json.dumps(st_data, ensure_ascii=False).encode("utf-8"))
+                    return
+                except Exception as e:
+                    pass
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "pending", "message": "尚未建立三合一同步數據"}, ensure_ascii=False).encode("utf-8"))
+            return
+
         if parsed.path == "/api/incidents":
             try:
                 limit = int(query.get("limit", [50])[0])
@@ -888,6 +907,33 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
 
         super().do_GET()
 
+    def do_HEAD(self):
+        parsed = urlparse(self.path)
+        clean_path = parsed.path.lstrip("/")
+        candidate_paths = [
+            os.path.join(CURRENT_DIR, "web", clean_path.replace("web/", "")),
+            os.path.join(CURRENT_DIR, "backtest", clean_path.replace("backtest/", "")),
+            os.path.join(CURRENT_DIR, clean_path),
+        ]
+        for candidate in candidate_paths:
+            if os.path.isfile(candidate):
+                mime = "text/plain"
+                if candidate.endswith(".html"):
+                    mime = "text/html; charset=utf-8"
+                elif candidate.endswith(".json"):
+                    mime = "application/json; charset=utf-8"
+                elif candidate.endswith(".js"):
+                    mime = "application/javascript; charset=utf-8"
+                elif candidate.endswith(".css"):
+                    mime = "text/css; charset=utf-8"
+                elif candidate.endswith(".ico") or candidate.endswith(".png"):
+                    mime = "image/png"
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.end_headers()
+                return
+        super().do_HEAD()
+
     def do_POST(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/reports/generate":
@@ -916,6 +962,33 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+            return
+
+        if parsed.path == "/api/three_in_one/generate":
+            content_length = int(self.headers.get("Content-Length", 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            target_date = None
+            try:
+                payload = json.loads(post_data.decode("utf-8"))
+                target_date = payload.get("date")
+            except Exception:
+                pass
+            try:
+                from daily_three_in_one_report_generator import DailyThreeInOneReportGenerator
+                gen = DailyThreeInOneReportGenerator()
+                html_p, csv_p = gen.run(target_date=target_date, upload_gdrive=True)
+                resp = {
+                    "status": "ok",
+                    "message": f"成功生成 {target_date or '今日'} 三合一對比報表並已上傳至 Google Drive！",
+                    "html_file": html_p,
+                    "csv_file": csv_p
+                }
+            except Exception as e:
+                resp = {"status": "error", "message": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
             self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
             return
@@ -1274,6 +1347,34 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                 self.send_response(200)
             except Exception as e:
                 resp = {"status": "error", "message": f"報告匯出異常: {e}"}
+                self.send_response(500)
+
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+            return
+
+        if parsed.path == "/api/backtest/update-data":
+            content_length = int(self.headers.get("Content-Length", 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                payload = json.loads(post_data.decode("utf-8"))
+            except Exception:
+                payload = {}
+
+            try:
+                try:
+                    from backtest.ibkr_history_downloader import one_click_update_data
+                except ImportError:
+                    from ibkr_history_downloader import one_click_update_data
+                sym = str(payload.get("symbol", "ES")).upper().strip()
+                tf = str(payload.get("timeframe", "1h")).lower().strip()
+                force_vm = bool(payload.get("force_vm", False))
+                resp = one_click_update_data(symbol=sym, timeframe=tf, force_vm=force_vm)
+                self.send_response(200)
+            except Exception as e:
+                resp = {"status": "error", "message": f"一鍵更新失敗: {e}"}
                 self.send_response(500)
 
             self.send_header("Content-Type", "application/json; charset=utf-8")

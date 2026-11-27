@@ -1,7 +1,7 @@
 {
   "name": "IBKR 雙引擎量化交易監控",
   "short_name": "IBKR交易",
-  "description": "IBKR 雙策略引擎 (V4.3 MES 60% + V5.0 MNQ 40%) 實時手機監控與手動平倉系統",
+  "description": "IBKR 雙策略引擎 (V9.9 MES 60% + V9.9 MNQ 40%) 實時手機監控與手動平倉系統",
   "start_url": "/mobile.html",
   "scope": "/",
   "display": "standalone",
