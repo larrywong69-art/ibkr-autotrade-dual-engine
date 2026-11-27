@@ -9,7 +9,7 @@ import os
 import sys
 import re
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+CURRENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENV_FILE = os.path.join(CURRENT_DIR, ".env")
 ENV_EXAMPLE = os.path.join(CURRENT_DIR, ".env.example")
 
@@ -57,6 +57,10 @@ def update_pin(new_pin: str) -> bool:
 
 def main():
     if len(sys.argv) > 1:
+        if sys.argv[1] in ("-h", "--help"):
+            print("用法: python tools/change_pin.py <NEW_PIN>")
+            print("例如: python tools/change_pin.py 888888")
+            sys.exit(0)
         new_pin = sys.argv[1].strip()
     else:
         try:

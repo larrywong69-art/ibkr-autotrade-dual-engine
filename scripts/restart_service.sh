@@ -4,7 +4,7 @@
 # ==============================================================================
 set -e
 
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." >/dev/null 2>&1 && pwd )"
 cd "$DIR"
 
 echo "🔄 正在重新啟動 AutoTrade 交易守護系統..."

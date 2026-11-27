@@ -17,10 +17,10 @@ import time
 import argparse
 from typing import Dict, Any
 
-WORKSPACE_DIR = os.path.dirname(os.path.abspath(__file__))
+WORKSPACE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(WORKSPACE_DIR, "data")
-CONTROL_FILE = os.path.join(DATA_DIR, "trade_control.json")
-STATUS_FILE = os.path.join(DATA_DIR, "trade_status.json")
+CONTROL_FILE = os.path.join(WORKSPACE_DIR, "trade_control.json")
+STATUS_FILE = os.path.join(WORKSPACE_DIR, "trade_status.json")
 
 def trigger_via_control_file(symbol: str) -> bool:
     """透過 trade_control.json 向執行中的雙引擎守護進程發送平倉指令"""

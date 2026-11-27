@@ -36,7 +36,9 @@ DATA_DIR = os.path.join(CURRENT_DIR, "data")
 REPORTS_DIR = os.path.join(CURRENT_DIR, "reports")
 AUDITS_DIR = os.path.join(REPORTS_DIR, "audits")
 STATUS_FILE = os.path.join(CURRENT_DIR, "trade_status.json")
-LOG_FILE = os.path.join(CURRENT_DIR, "mes_dual_engine_live.log")
+LOG_DIR = os.path.join(CURRENT_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "mes_dual_engine_live.log") if os.path.exists(os.path.join(LOG_DIR, "mes_dual_engine_live.log")) else os.path.join(CURRENT_DIR, "mes_dual_engine_live.log")
 TRADES_JSONL = os.path.join(DATA_DIR, "trades.jsonl")
 INCIDENTS_JSONL = os.path.join(DATA_DIR, "incidents.jsonl")
 ENV_FILE = os.path.join(CURRENT_DIR, ".env")
@@ -53,6 +55,8 @@ ALLOWED_PATCH_FILES = {
     "telegram_notifier.py",
     "backtest_engine.py",
     "ibkr_history_downloader.py",
+    "backtest/backtest_engine.py",
+    "backtest/ibkr_history_downloader.py",
 }
 
 DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_AUDIT_MODEL", "gemini-4-argon").strip() or "gemini-4-argon"
@@ -196,7 +200,9 @@ class DailyAutoAuditFixer:
             trades = list(status_snapshot.get("recent_trades", []))
 
         log_lines: List[str] = []
-        log_path = os.path.join(self.base_dir, "mes_dual_engine_live.log")
+        log_path = os.path.join(self.base_dir, "logs", "mes_dual_engine_live.log")
+        if not os.path.exists(log_path):
+            log_path = os.path.join(self.base_dir, "mes_dual_engine_live.log")
         if os.path.exists(log_path):
             try:
                 with open(log_path, "r", encoding="utf-8", errors="replace") as lf:

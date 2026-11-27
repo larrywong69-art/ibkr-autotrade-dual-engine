@@ -662,8 +662,10 @@ class GoogleSheetsSyncManager:
                 except Exception as ce:
                     logger.debug(f"解析 {csv_path} 略過: {ce}")
 
-        # 3. 補充 mes_paper_trade_log.csv
-        csv_file = os.path.join(CURRENT_DIR, "mes_paper_trade_log.csv")
+        # 3. 補充 mes_paper_trade_log.csv (優先讀取 data/ 目錄)
+        csv_file = os.path.join(CURRENT_DIR, "data", "mes_paper_trade_log.csv")
+        if not os.path.exists(csv_file):
+            csv_file = os.path.join(CURRENT_DIR, "mes_paper_trade_log.csv")
         if os.path.exists(csv_file):
             try:
                 with open(csv_file, "r", encoding="utf-8") as f:
@@ -1366,7 +1368,7 @@ class GoogleSheetsSyncManager:
             if not webhook_used:
                 logger.warning(
                     f"未找到 gdrive CLI 且未啟用 Webhook，跳過 {file_name} 雲端上傳。"
-                    "💡 提示：在無人值守雲端主機，建議於 .env 設定 GOOGLE_SHEETS_WEBHOOK_URL（詳見 google_apps_script_sync.js）"
+                    "💡 提示：在無人值守雲端主機，建議於 .env 設定 GOOGLE_SHEETS_WEBHOOK_URL（詳見 cloud_deploy/google_apps_script_sync.js）"
                 )
             return file_id
 

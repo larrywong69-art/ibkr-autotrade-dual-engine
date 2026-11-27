@@ -65,7 +65,9 @@ from strategies.defense_champion_v5.strategy import StrategyEngineV5
 from mes_strategy.strategy_models import Direction, SignalType, TradeSignal
 from report_and_incident_manager import IncidentManager, TradeLedgerManager, ReportScheduler
 
-LOG_FILE = os.path.join(CURRENT_DIR, "mes_dual_engine_live.log")
+LOG_DIR = os.path.join(CURRENT_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "mes_dual_engine_live.log")
 STATUS_FILE = os.path.join(CURRENT_DIR, "trade_status.json")
 CONTROL_FILE = os.path.join(CURRENT_DIR, "trade_control.json")
 

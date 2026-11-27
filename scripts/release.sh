@@ -13,7 +13,7 @@ set -euo pipefail
 #   ./release.sh --sync-origin          # 同步推送至私有 origin/main (選用)
 # ==============================================================================
 
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." >/dev/null 2>&1 && pwd )"
 cd "$DIR"
 
 REMOTE="public"

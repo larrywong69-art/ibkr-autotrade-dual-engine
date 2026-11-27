@@ -22,6 +22,10 @@ from datetime import datetime, date, timedelta
 from report_and_incident_manager import IncidentManager, DailyReportGenerator
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKTEST_DIR = os.path.join(CURRENT_DIR, "backtest")
+if os.path.isdir(BACKTEST_DIR) and BACKTEST_DIR not in sys.path:
+    sys.path.insert(0, BACKTEST_DIR)
+
 CONTROL_FILE = os.path.join(CURRENT_DIR, "trade_control.json")
 TUNNEL_INFO_FILE = os.path.join(CURRENT_DIR, "data", "tunnel_info.json")
 
@@ -582,7 +586,9 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
         trades, status_snapshot = self._collect_recent_trades(limit=limit_trades)
         incidents = IncidentManager().get_recent_incidents(limit=limit_incidents)
         log_lines = []
-        log_path = os.path.join(CURRENT_DIR, "mes_dual_engine_live.log")
+        log_path = os.path.join(CURRENT_DIR, "logs", "mes_dual_engine_live.log")
+        if not os.path.exists(log_path):
+            log_path = os.path.join(CURRENT_DIR, "mes_dual_engine_live.log")
         if os.path.exists(log_path):
             with open(log_path, "r", encoding="utf-8", errors="replace") as lf:
                 log_lines = [line.rstrip("\n") for line in lf.readlines()[-log_line_count:]]
@@ -829,7 +835,10 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/backtest/ibkr-cache-list":
             try:
-                from ibkr_history_downloader import list_cached_csvs
+                try:
+                    from backtest.ibkr_history_downloader import list_cached_csvs
+                except ImportError:
+                    from ibkr_history_downloader import list_cached_csvs
                 resp = {"status": "ok", "items": list_cached_csvs()}
                 self.send_response(200)
             except Exception as e:
@@ -841,22 +850,41 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
             return
 
-        if parsed.path == "/manifest.json":
-            manifest_file = os.path.join(CURRENT_DIR, "manifest.json")
-            if os.path.exists(manifest_file):
-                self.send_response(200)
-                self.send_header("Content-Type", "application/manifest+json; charset=utf-8")
-                self.end_headers()
-                with open(manifest_file, "rb") as f:
-                    self.wfile.write(f.read())
-                return
-        
         # 預設首頁重新導向到 dashboard.html
         if parsed.path == "/" or parsed.path == "":
             self.send_response(302)
             self.send_header("Location", "/dashboard.html")
             self.end_headers()
             return
+
+        # 靜態資源路由支援 (支援 web/、backtest/ 子目錄與根目錄兼容)
+        clean_path = parsed.path.lstrip("/")
+        candidate_paths = [
+            os.path.join(CURRENT_DIR, "web", clean_path.replace("web/", "")),
+            os.path.join(CURRENT_DIR, "backtest", clean_path.replace("backtest/", "")),
+            os.path.join(CURRENT_DIR, clean_path),
+        ]
+        for candidate in candidate_paths:
+            if os.path.isfile(candidate):
+                mime = "text/plain"
+                if candidate.endswith(".html"):
+                    mime = "text/html; charset=utf-8"
+                elif candidate.endswith(".json"):
+                    mime = "application/json; charset=utf-8"
+                    if candidate.endswith("manifest.json"):
+                        mime = "application/manifest+json; charset=utf-8"
+                elif candidate.endswith(".js"):
+                    mime = "application/javascript; charset=utf-8"
+                elif candidate.endswith(".css"):
+                    mime = "text/css; charset=utf-8"
+                elif candidate.endswith(".ico") or candidate.endswith(".png"):
+                    mime = "image/png"
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.end_headers()
+                with open(candidate, "rb") as f:
+                    self.wfile.write(f.read())
+                return
 
         super().do_GET()
 
@@ -1220,7 +1248,10 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                 payload = {}
 
             try:
-                from backtest_engine import run_multi_strategy_backtest_api
+                try:
+                    from backtest.backtest_engine import run_multi_strategy_backtest_api
+                except ImportError:
+                    from backtest_engine import run_multi_strategy_backtest_api
                 resp = run_multi_strategy_backtest_api(payload)
                 self.send_response(200)
             except Exception as e:
@@ -1235,7 +1266,10 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/backtest/export-gdrive":
             try:
-                from backtest_engine import export_backtest_to_gdrive
+                try:
+                    from backtest.backtest_engine import export_backtest_to_gdrive
+                except ImportError:
+                    from backtest_engine import export_backtest_to_gdrive
                 resp = export_backtest_to_gdrive()
                 self.send_response(200)
             except Exception as e:
@@ -1257,7 +1291,10 @@ class ControlDashboardHandler(SimpleHTTPRequestHandler):
                 payload = {}
 
             try:
-                from ibkr_history_downloader import download_ibkr_history_to_csv, download_multi_chunks
+                try:
+                    from backtest.ibkr_history_downloader import download_ibkr_history_to_csv, download_multi_chunks
+                except ImportError:
+                    from ibkr_history_downloader import download_ibkr_history_to_csv, download_multi_chunks
                 port_val = payload.get("port")
                 chunks = int(payload.get("chunks", 1))
                 sym = str(payload.get("symbol", "MES")).upper().strip()

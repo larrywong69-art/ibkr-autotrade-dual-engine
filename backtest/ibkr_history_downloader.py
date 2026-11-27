@@ -15,6 +15,7 @@ ibkr_history_downloader.py (V9.3 實盤審計整合優化版)
 """
 
 import os
+import sys
 import json
 import argparse
 from datetime import datetime, timedelta
@@ -37,7 +38,13 @@ except ImportError:
         util = None  # type: ignore
         IB_AVAILABLE = False
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+CURRENT_DIR = os.path.dirname(_THIS_DIR) if os.path.basename(_THIS_DIR) == "backtest" else _THIS_DIR
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
 CACHE_DIR = os.path.join(CURRENT_DIR, "data", "ibkr_cache")
 GDRIVE_DATA_DIR = os.path.join(CURRENT_DIR, "回測用數據")
 os.makedirs(CACHE_DIR, exist_ok=True)

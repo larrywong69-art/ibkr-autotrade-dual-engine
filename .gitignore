@@ -63,3 +63,4 @@ mes_trades_*.csv
 *.png
 
 remote_vm.sh
+scripts/remote_vm.sh

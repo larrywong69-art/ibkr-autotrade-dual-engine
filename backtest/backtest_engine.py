@@ -19,6 +19,7 @@ IBKR 本地量化回測實驗室核心引擎 (支援最長 10 年、最多 3 策
 """
 
 import os
+import sys
 import json
 import time
 import subprocess
@@ -180,7 +181,13 @@ except ImportError:
                 return (q1 * tp1_pts + rem_lots * rem_pts) / float(total_lots)
             return (q1 * tp1_pts + q2 * tp2_pts + q3 * rem_pts) / float(total_lots)
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+CURRENT_DIR = os.path.dirname(_THIS_DIR) if os.path.basename(_THIS_DIR) == "backtest" else _THIS_DIR
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
 REPORTS_DIR = os.path.join(CURRENT_DIR, "reports", "backtests")
 os.makedirs(REPORTS_DIR, exist_ok=True)
 

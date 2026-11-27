@@ -66,7 +66,7 @@ echo " • 📱 手機區域網絡 (同一 Wi-Fi): http://${LAN_IP}:$PORT/mobile
 echo " • 🌐 外出遠端監控 (方案 B): Cloudflare 隧道守護中 (已同步至儀表板與 Telegram)"
 echo " • 🔐 遠端操作解鎖 PIN 碼: ${PIN} (防公網未授權手動平倉)"
 echo " • ✈️ Telegram 即時推播 (方案 C): 實時通報成交/平倉/重連/心跳/每日報告"
-echo " • ⚡ 手動緊急平倉命令: python manual_close_position.py [MES|MNQ|ALL]"
+echo " • ⚡ 手動緊急平倉命令: python tools/manual_close_position.py [MES|MNQ|ALL]"
 echo " • 官方連線: 實體直連 IB Gateway (4002) / TWS (7497) • 具備斷線自動重連守護"
 echo " • 提示: 按 [Ctrl + C] 可隨時安全關閉雙引擎、隧道與伺服器"
 echo "======================================================================"

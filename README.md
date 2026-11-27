@@ -34,11 +34,11 @@
 | **事件與排程管理** | `report_and_incident_manager.py` | 異常事件分級記錄（`MARGIN` / `2109` / `202` / 自癒代碼 `7001–7006`）與每日 06:05 AM 巡檢排程 |
 | **Telegram 通知引擎** | `telegram_notifier.py` | 成交、異常、心跳與「每日稽核問題＋解決方案＋合併指令」Telegram 推播 |
 | **雲端報告與診斷匯出** | `gdrive_report_manager.py` | HTML/CSV 成交與異常診斷報告生成、`rclone` 上傳 Google Drive 與本機匯出 |
-| **監控伺服器 & 前端** | `server.py`, `dashboard.html`, `mobile.html`, `backtest_lab.html` | 桌面雙欄儀表板、手機 PWA 與回測實驗室；支援 PIN 碼啟停、一鍵平倉、診斷下載與雙層巡檢按鈕 |
-| **安全與遠端穿透** | `tunnel_manager.py`, `change_pin.py` | Cloudflare Tunnel 公網加密穿透管理，與 `.env` 6 位數安全 PIN 碼設定工具 |
-| **策略核心與回測套件** | `mes_strategy/`, `strategies/`, `backtest_engine.py`, `ibkr_history_downloader.py` | 策略模型、歷史行情下載與回測驗證工具 |
+| **監控伺服器 & 前端** | `server.py`, `web/dashboard.html`, `web/mobile.html` | 桌面雙欄儀表板與手機 PWA；支援 PIN 碼啟停、一鍵平倉、診斷下載與雙層巡檢按鈕 |
+| **安全與遠端穿透** | `tunnel_manager.py`, `tools/change_pin.py` | Cloudflare Tunnel 公網加密穿透管理，與 `.env` 6 位數安全 PIN 碼設定工具 |
+| **策略核心與回測套件** | `mes_strategy/`, `strategies/`, `backtest/` | 策略模型、歷史行情下載器、回測引擎與回測實驗室 UI (`backtest/`) |
 | **自動化回歸測試** | `tests/test_engine_safety.py` | 涵蓋實盤掛單清理、事件分類、雙層閉環體檢、隔離 worktree 補丁驗收與 Telegram 推播單元測試 |
-| **啟動與雲端部署** | `start_cloud.sh`, `start_paper_trading.sh`, `start_backtest_lab.sh`, `cloud_deploy/setup.sh` | 雲端/本機一鍵啟動與 GCP Linux Docker + IB Gateway + `rclone` + Tmux 全自動部署腳本 |
+| **啟動與雲端部署** | `start_cloud.sh`, `start_paper_trading.sh`, `scripts/`, `cloud_deploy/` | 雲端/本機一鍵啟動與 GCP Linux Docker + IB Gateway + `rclone` + Tmux 全自動部署腳本 |
 
 ---
 
@@ -107,11 +107,11 @@ curl -fsSL https://raw.githubusercontent.com/larrywong69-art/ibkr-autotrade-dual
 
 ```bash
 # 自動執行單元測試 → 打包乾淨版雲端壓縮檔 → 更新 VERSION & CHANGELOG.md → 推送 main 與 Tag → 建立 GitHub Release
-./release.sh 9.3.4 "簡短更新說明"
+./scripts/release.sh 9.3.4 "簡短更新說明"
 
 # 或只自動遞增 patch / minor 版本號
-./release.sh --patch "修復某項問題"
-./release.sh --dry-run       # 先演練檢查與打包，不實際推送
+./scripts/release.sh --patch "修復某項問題"
+./scripts/release.sh --dry-run       # 先演練檢查與打包，不實際推送
 ```
 
 啟動後可於瀏覽器開啟：
@@ -121,7 +121,7 @@ curl -fsSL https://raw.githubusercontent.com/larrywong69-art/ibkr-autotrade-dual
 
 修改安全 PIN 碼：
 ```bash
-python3 change_pin.py 123456
+python3 tools/change_pin.py 123456
 ```
 
 ---
